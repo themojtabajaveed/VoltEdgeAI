@@ -1,0 +1,17 @@
+# Replace USERNAME with your Linux username (e.g. mujtaba12cr)
+# Copy to /etc/systemd/system/voltedge.service
+[Unit]
+Description=VoltEdgeAI Runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/USERNAME/voltedge
+ExecStart=/bin/bash -lc 'cd /home/USERNAME/voltedge && PYTHONPATH=src .venv/bin/python src/runner.py'
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
