@@ -58,5 +58,5 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.6.3
 websockets==16.0
-yfinance==1.2.0
+
 zope.interface==8.2
