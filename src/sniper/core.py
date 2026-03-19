@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
-from sources.nse_prices import fetch_daily_ohlcv, compute_ema, compute_rsi, compute_avg_volume
-from sniper.antigravity import evaluate_symbol, AntigravityStatus
+from src.sources.nse_prices import fetch_daily_ohlcv, compute_ema, compute_rsi, compute_avg_volume
+from src.sniper.antigravity import evaluate_symbol, AntigravityStatus
 
 def compute_macd(close_series: pd.Series):
     ema_12 = close_series.ewm(span=12, adjust=False).mean()

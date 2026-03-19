@@ -3,7 +3,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional
 
-from marketdata.intraday import IntradayBar, VWAPStats, fetch_intraday_bars, compute_vwap_stats
+from src.marketdata.intraday import IntradayBar, VWAPStats, fetch_intraday_bars, compute_vwap_stats
 
 VWAP_TOUCH_BAND = 0.002  # 0.2%
 MAX_WATCH_DURATION_MIN = 90  # e.g., stop watching after 90 minutes if no bounce

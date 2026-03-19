@@ -12,10 +12,10 @@ if "ZERODHA_API_KEY" not in os.environ:
 if "ZERODHA_ACCESS_TOKEN" not in os.environ:
     os.environ["ZERODHA_ACCESS_TOKEN"] = "stub_token"
 
-from data_ingestion.market_live import KiteLiveClient, BarBuilder, Tick
-from data_ingestion.market_history import get_ohlcv
-from data_ingestion.corporate_actions import NSEAnnouncementsClient
-from data_ingestion.market_sentiment import compute_index_sentiment
+from src.data_ingestion.market_live import KiteLiveClient, BarBuilder, Tick
+from src.data_ingestion.market_history import get_ohlcv
+from src.data_ingestion.corporate_actions import NSEAnnouncementsClient
+from src.data_ingestion.market_sentiment import compute_index_sentiment
 
 logging.basicConfig(level=logging.ERROR) # Suppress debug chatter for clean demo output
 

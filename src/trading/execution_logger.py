@@ -1,6 +1,6 @@
 import logging
 import os
-from trading.orders import OrderResult
+from src.trading.orders import OrderResult
 
 LOG_PATH = os.path.join("logs", "executions.log")
 

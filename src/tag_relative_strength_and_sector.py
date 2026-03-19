@@ -1,6 +1,6 @@
 from typing import Optional
-from db import init_db, SessionLocal, FundamentalUniverse
-from sources.nse_prices import fetch_daily_ohlcv
+from src.db import init_db, SessionLocal, FundamentalUniverse
+from src.sources.nse_prices import fetch_daily_ohlcv
 
 def compute_52w_return(symbol: str) -> Optional[float]:
     """Return simple % price change over last ~252 trading days using fetch_daily_ohlcv."""

@@ -1,4 +1,4 @@
-from sources.nse_announcements import fetch_latest_announcements
+from src.sources.nse_announcements import fetch_latest_announcements
 
 def main():
     print("Testing NSE announcement filter...")

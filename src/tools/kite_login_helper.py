@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from kiteconnect import KiteConnect
-from config.zerodha import load_zerodha_config
+from src.config.zerodha import load_zerodha_config
 
 def main() -> int:
     cfg = load_zerodha_config()

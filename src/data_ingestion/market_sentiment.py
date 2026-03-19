@@ -3,7 +3,7 @@ from typing import List, Dict, Optional
 import logging
 
 try:
-    from data_ingestion.market_live import KiteLiveClient, Snapshot
+    from src.data_ingestion.market_live import KiteLiveClient, Snapshot
 except ImportError:
     KiteLiveClient, Snapshot = None, None
 

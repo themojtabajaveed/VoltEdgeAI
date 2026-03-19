@@ -2,9 +2,9 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-from db import init_db, SessionLocal, JurorSignal
-from juror.gemini_client import classify_announcement
-from sources.nse_announcements import fetch_latest_announcements
+from src.db import init_db, SessionLocal, JurorSignal
+from src.juror.gemini_client import classify_announcement
+from src.sources.nse_announcements import fetch_latest_announcements
 
 def main():
     print("Initializing Database...")

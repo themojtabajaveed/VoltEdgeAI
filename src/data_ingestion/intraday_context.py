@@ -1,7 +1,7 @@
 from typing import List, Dict
 import threading
 from datetime import datetime, timedelta
-from data_ingestion.market_live import Bar
+from src.data_ingestion.market_live import Bar
 
 class IntradayStore:
     def __init__(self):

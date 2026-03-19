@@ -2,13 +2,13 @@ import math
 from datetime import datetime
 from typing import Optional
 
-from config.risk import RiskConfig
-from trading.orders import OrderRequest, OrderResult, OrderSide, OrderType
-from trading.daily_risk_state import DailyRiskState
-from trading.sizing import calculate_position_size, SymbolStats, MarketRegime
+from src.config.risk import RiskConfig
+from src.trading.orders import OrderRequest, OrderResult, OrderSide, OrderType
+from src.trading.daily_risk_state import DailyRiskState
+from src.trading.sizing import calculate_position_size, SymbolStats, MarketRegime
 
 try:
-    from brokers.zerodha_client import ZerodhaClient
+    from src.brokers.zerodha_client import ZerodhaClient
 except ImportError:
     ZerodhaClient = None
 

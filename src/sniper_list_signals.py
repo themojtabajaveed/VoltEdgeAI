@@ -1,4 +1,4 @@
-from db import init_db, SessionLocal, JurorSignal
+from src.db import init_db, SessionLocal, JurorSignal
 
 def main():
     print("Reading recent Juror signals...")

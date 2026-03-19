@@ -4,8 +4,8 @@ import os
 # Ensure the root directory logic works locally when running from CLI anywhere
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from db import init_db, SessionLocal, JurorSignal
-from juror.gemini_client import classify_announcement
+from src.db import init_db, SessionLocal, JurorSignal
+from src.juror.gemini_client import classify_announcement
 
 def main():
     print("Initializing Database...")

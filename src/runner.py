@@ -1,7 +1,4 @@
 import os
-from dotenv import load_dotenv
-load_dotenv()
-
 import time
 import subprocess
 import logging
@@ -9,17 +6,17 @@ from datetime import datetime, time as dt_time
 import zoneinfo
 import json
 
-from sniper.antigravity_watcher import AntigravityWatcher
-import daily_decision_engine
-from config.risk import load_risk_config
-from trading.daily_risk_state import DailyRiskState
-from trading.executor import TradeExecutor
-from trading.execution_logger import get_executions_logger, log_execution
-from trading.positions import PositionBook
-from trading.exit_engine import ExitEngine, ExitSignal
-from trading.sizing import MarketRegime, SymbolStats, allow_new_long
-from data_ingestion.market_live import make_default_live_client, BarBuilder
-from data_ingestion.instruments import load_instruments_csv, build_symbol_token_map
+from src.sniper.antigravity_watcher import AntigravityWatcher
+import src.daily_decision_engine as daily_decision_engine
+from src.config.risk import load_risk_config
+from src.trading.daily_risk_state import DailyRiskState
+from src.trading.executor import TradeExecutor
+from src.trading.execution_logger import get_executions_logger, log_execution
+from src.trading.positions import PositionBook
+from src.trading.exit_engine import ExitEngine, ExitSignal
+from src.trading.sizing import MarketRegime, SymbolStats, allow_new_long
+from src.data_ingestion.market_live import make_default_live_client, BarBuilder
+from src.data_ingestion.instruments import load_instruments_csv, build_symbol_token_map
 import sys
 
 # Constants
@@ -37,16 +34,6 @@ ACTIVE_UNIVERSE = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "
 LOG_DIR = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "runner.log")
 
-# Ensure logs directory exists
-os.makedirs(LOG_DIR, exist_ok=True)
-
-# Configure logging
-logging.basicConfig(
-    filename=LOG_FILE,
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-
 def run_script(script_name: str):
     """Run a Python script via subprocess and log the outcome."""
     script_path = os.path.join("src", script_name)
@@ -56,13 +43,17 @@ def run_script(script_name: str):
     logging.info(f"Starting job: {script_name}")
     
     try:
-        # We invoke the script using python3 and pass the module path or direct script execution.
-        # Running from project root -> python3 src/script_name.py
+        env = os.environ.copy()
+        # Ensure the repo root is explicitly set on PYTHONPATH so `import src.xxx` natively works
+        env["PYTHONPATH"] = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        
+        # We invoke the script using python3 and pass the explicitly bounded environment.
         result = subprocess.run(
             ["python3", script_path],
             check=True,
             capture_output=True,
-            text=True
+            text=True,
+            env=env
         )
         print(f"[{datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')}] Successfully finished job: {script_name}")
         logging.info(f"Successfully finished job: {script_name}")
@@ -75,8 +66,21 @@ def run_script(script_name: str):
         print(f"[{datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')}] Failed to execute: {script_name} ({e})")
         logging.error(f"Failed to execute {script_name}: {e}")
 
-def main():
+def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_per_day: int = 3):
+    # Ensure logs directory exists
+    os.makedirs(LOG_DIR, exist_ok=True)
+    
+    # Configure logging inline
+    logging.basicConfig(
+        filename=LOG_FILE,
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+
     risk_cfg = load_risk_config()
+    risk_cfg.live_mode = live_mode
+    risk_cfg.per_trade_capital_rupees = float(per_trade_capital)
+    risk_cfg.max_trades_per_day = max_trades_per_day
     
     print("--- VoltEdgeAI Automated Runner ---")
     print(f"Market Hours: {MARKET_START} to {MARKET_END} IST")
@@ -312,4 +316,11 @@ def main():
             time.sleep(60)
 
 if __name__ == "__main__":
-    main()
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+    run_loop(
+        live_mode=os.getenv("VOLTEDGE_LIVE_MODE", "0") == "1",
+        per_trade_capital=int(float(os.getenv("VOLTEDGE_PER_TRADE_CAPITAL", "300"))),
+        max_trades_per_day=int(os.getenv("VOLTEDGE_MAX_TRADES_PER_DAY", "3"))
+    )

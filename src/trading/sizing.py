@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING
 import math
 
 if TYPE_CHECKING:
-    from config.risk import RiskConfig
+    from src.config.risk import RiskConfig
 
 @dataclass
 class SymbolStats:

@@ -3,7 +3,7 @@ from typing import Optional
 import logging
 
 from kiteconnect import KiteConnect, exceptions
-from trading.orders import OrderRequest, OrderResult, OrderSide, OrderType
+from src.trading.orders import OrderRequest, OrderResult, OrderSide, OrderType
 
 class ZerodhaClient:
     def __init__(self, api_key: str, access_token: str):

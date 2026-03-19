@@ -4,9 +4,9 @@ from typing import List
 import pandas as pd
 import yfinance as yf
 
-from db import init_db, SessionLocal, DailyPerformanceSnapshot, JurorSignal
-from sources.nse_prices import fetch_daily_ohlcv, compute_ema, compute_rsi, compute_avg_volume
-from sniper.core import compute_macd, compute_adx, compute_bollinger_bands
+from src.db import init_db, SessionLocal, DailyPerformanceSnapshot, JurorSignal
+from src.sources.nse_prices import fetch_daily_ohlcv, compute_ema, compute_rsi, compute_avg_volume
+from src.sniper.core import compute_macd, compute_adx, compute_bollinger_bands
 
 NSE_UNIVERSE = ["TCS", "HDFCBANK", "RELIANCE", "INFY", "ICICIBANK"]
 TOP_N = 10  # number of top gainers/losers to log

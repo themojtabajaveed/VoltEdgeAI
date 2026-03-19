@@ -1,6 +1,6 @@
 from typing import Optional, Dict
 import math
-from sources.nse_prices import fetch_daily_ohlcv, compute_atr
+from src.sources.nse_prices import fetch_daily_ohlcv, compute_atr
 
 def plan_trade(
     symbol: str,

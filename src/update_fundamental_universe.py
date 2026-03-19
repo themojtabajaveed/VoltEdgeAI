@@ -1,5 +1,5 @@
 import pandas as pd
-from db import init_db, SessionLocal, FundamentalUniverse
+from src.db import init_db, SessionLocal, FundamentalUniverse
 
 """
 PHASE_I_RULES summary for VoltEdgeAI Fundamental Universe:

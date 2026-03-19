@@ -3,11 +3,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from datetime import datetime
-from db import init_db, SessionLocal, JurorSignal
-from sniper.core import evaluate_signal
-from sniper.logger import log_sniper_decision
-from trade_planner import plan_trade
-from broker.zerodha_client import place_equity_trade_from_plan
+from src.db import init_db, SessionLocal, JurorSignal
+from src.sniper.core import evaluate_signal
+from src.sniper.logger import log_sniper_decision
+from src.trade_planner import plan_trade
+from src.broker.zerodha_client import place_equity_trade_from_plan
 
 ACCOUNT_EQUITY = 100000.0
 MIN_JUROR_CONFIDENCE = 0.80

@@ -6,9 +6,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import sys
-from config.zerodha import load_zerodha_config
-from data_ingestion.market_live import make_default_live_client, BarBuilder
-from data_ingestion.instruments import load_instruments_csv, build_symbol_token_map
+from src.config.zerodha import load_zerodha_config
+from src.data_ingestion.market_live import make_default_live_client, BarBuilder
+from src.data_ingestion.instruments import load_instruments_csv, build_symbol_token_map
 
 def main():
     # Only internal logging processes the raw trace, we only print what we explicitly want

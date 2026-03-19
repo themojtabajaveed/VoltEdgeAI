@@ -10,7 +10,7 @@ try:
 except ImportError:
     KiteConnect, KiteTicker = None, None
 
-from config.zerodha import load_zerodha_config, ZerodhaConfig
+from src.config.zerodha import load_zerodha_config, ZerodhaConfig
 
 @dataclass
 class Tick:
@@ -156,15 +156,20 @@ class KiteLiveClient:
                 self.logger.warning(f"Skipping subscription for {sym}: no instrument_token mapped.")
                 
         if tokens:
-            self._ticker.subscribe(tokens)
-            k_mode = self._ticker.MODE_FULL
-            if mode == "ltp":
-                k_mode = self._ticker.MODE_LTP
-            elif mode == "quote":
-                k_mode = self._ticker.MODE_QUOTE
-                
-            self._ticker.set_mode(k_mode, tokens)
-            self.logger.info(f"Subscribed to {len(tokens)} tokens in '{mode}' mode.")
+            try:
+                self._ticker.subscribe(tokens)
+                k_mode = self._ticker.MODE_FULL
+                if mode == "ltp":
+                    k_mode = self._ticker.MODE_LTP
+                elif mode == "quote":
+                    k_mode = self._ticker.MODE_QUOTE
+                    
+                self._ticker.set_mode(k_mode, tokens)
+                self.logger.info(f"Subscribed to {len(tokens)} tokens in '{mode}' mode.")
+            except AttributeError:
+                self.logger.warning(f"KiteTicker WebSocket is not fully connected yet. Will naturally auto-subscribe {len(tokens)} symbols upon successful _on_connect callback.")
+            except Exception as e:
+                self.logger.error(f"Failed to manually subscribe symbols: {e}")
 
     def unsubscribe_symbols(self, symbols: List[str]) -> None:
         if not self._ticker: return
@@ -274,7 +279,7 @@ class BarBuilder:
                 )
                 current = self._current[tick.symbol]
                 current._start_volume = tick.volume
-                from data_ingestion.intraday_context import add_intraday_bar_to_store
+                from src.data_ingestion.intraday_context import add_intraday_bar_to_store
                 add_intraday_bar_to_store(current)
             
             elif bucket_start > current.start:
@@ -294,7 +299,7 @@ class BarBuilder:
                     volume=0
                 )
                 self._current[tick.symbol]._start_volume = tick.volume
-                from data_ingestion.intraday_context import add_intraday_bar_to_store
+                from src.data_ingestion.intraday_context import add_intraday_bar_to_store
                 add_intraday_bar_to_store(self._current[tick.symbol])
                 
             else:
@@ -306,7 +311,7 @@ class BarBuilder:
                 if hasattr(current, '_start_volume') and tick.volume >= current._start_volume:
                     current.volume = tick.volume - current._start_volume
                 
-                from data_ingestion.intraday_context import add_intraday_bar_to_store
+                from src.data_ingestion.intraday_context import add_intraday_bar_to_store
                 add_intraday_bar_to_store(current)
                 
         return completed_bars

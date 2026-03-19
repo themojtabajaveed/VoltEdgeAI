@@ -1,7 +1,7 @@
 import os
 import csv
-from db import init_db, SessionLocal, JurorSignal
-from sniper.core import evaluate_signal
+from src.db import init_db, SessionLocal, JurorSignal
+from src.sniper.core import evaluate_signal
 
 def main():
     print("Initializing Database...")
