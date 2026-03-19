@@ -2,59 +2,67 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import pandas as pd
-import yfinance as yf
+# import yfinance as yf
 
-def fetch_daily_ohlcv(symbol: str, days: int = 250) -> Optional[pd.DataFrame]:
-    """
-    Fetch the last `days` daily OHLCV candles for the given NSE symbol using Yahoo Finance.
-    - Symbol "ESAFSFB" should be mapped to ticker "ESAFSFB.NS".
-    - Returns a DataFrame indexed by date with columns: ['open', 'high', 'low', 'close', 'volume'].
-    - If data cannot be fetched or is empty, return None.
-    """
-    end = datetime.utcnow()
-    start = end - timedelta(days=days * 2)
-    
-    ticker = f"{symbol}.NS"
-    try:
-        # Fetch data without printing progress bars to keep console output clean
-        df = yf.download(ticker, start=start, end=end, interval="1d", auto_adjust=False, progress=False)
-    except Exception as e:
-        print(f"Error fetching OHLCV for {symbol}: {e}")
-        return None
+YFINANCE_ENABLED = False  # temporary
 
-    if df is None or df.empty:
-        return None
+if YFINANCE_ENABLED:
+    import yfinance as yf
+
+    def fetch_daily_ohlcv(symbol: str, days: int = 250) -> Optional[pd.DataFrame]:
+        """
+        Fetch the last `days` daily OHLCV candles for the given NSE symbol using Yahoo Finance.
+        - Symbol "ESAFSFB" should be mapped to ticker "ESAFSFB.NS".
+        - Returns a DataFrame indexed by date with columns: ['open', 'high', 'low', 'close', 'volume'].
+        - If data cannot be fetched or is empty, return None.
+        """
+        end = datetime.utcnow()
+        start = end - timedelta(days=days * 2)
         
-    # Handle pandas MultiIndex columns that sometimes happen with newer yfinance versions
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.droplevel(1)
+        ticker = f"{symbol}.NS"
+        try:
+            # Fetch data without printing progress bars to keep console output clean
+            df = yf.download(ticker, start=start, end=end, interval="1d", auto_adjust=False, progress=False)
+        except Exception as e:
+            print(f"Error fetching OHLCV for {symbol}: {e}")
+            return None
+    
+        if df is None or df.empty:
+            return None
+            
+        # Handle pandas MultiIndex columns that sometimes happen with newer yfinance versions
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(1)
+            
+        rename_map = {
+            'Open': 'open',
+            'High': 'high',
+            'Low': 'low',
+            'Close': 'close',
+            'Volume': 'volume'
+        }
         
-    rename_map = {
-        'Open': 'open',
-        'High': 'high',
-        'Low': 'low',
-        'Close': 'close',
-        'Volume': 'volume'
-    }
-    
-    # Rename columns to standardized lowercase
-    df = df.rename(columns=rename_map)
-    
-    required_cols = ['open', 'high', 'low', 'close', 'volume']
-    
-    # Make sure we have the required columns
-    available_cols = [c for c in required_cols if c in df.columns]
-    if not available_cols:
-        return None
+        # Rename columns to standardized lowercase
+        df = df.rename(columns=rename_map)
         
-    df = df[available_cols].copy()
-    
-    # Convert types to numeric
-    for col in available_cols:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
         
-    df = df.sort_index(ascending=True)
-    return df.tail(days)
+        # Make sure we have the required columns
+        available_cols = [c for c in required_cols if c in df.columns]
+        if not available_cols:
+            return None
+            
+        df = df[available_cols].copy()
+        
+        # Convert types to numeric
+        for col in available_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+        df = df.sort_index(ascending=True)
+        return df.tail(days)
+else:
+    def fetch_daily_ohlcv(*args, **kwargs) -> Optional[pd.DataFrame]:
+        raise RuntimeError("yfinance-based fetch is disabled in this build.")
 
 def compute_ema(close_series: pd.Series, period: int) -> Optional[float]:
     """Return the latest EMA value for the given period, or None if not enough data."""
