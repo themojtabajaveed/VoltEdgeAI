@@ -4,7 +4,7 @@ appdirs==1.4.4
 attrs==25.4.0
 autobahn==19.11.2
 Automat==25.4.16
-beautifulsoup4==4.14.3
+beautifulsoup4>=4.9.3,<4.10
 certifi==2026.2.25
 cffi==2.0.0
 charset-normalizer==3.4.5
