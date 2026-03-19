@@ -4,7 +4,7 @@ from typing import List, Literal, Optional
 
 import pandas as pd
 import numpy as np
-import yfinance as yf
+# import yfinance as yf
 
 BarInterval = Literal["1m", "5m"]
 
@@ -82,40 +82,48 @@ def compute_vwap_stats(bars: List[IntradayBar], interval: BarInterval = "1m") ->
         n_bars=len(df)
     )
 
-def fetch_intraday_bars(symbol: str, interval: BarInterval = "1m") -> List[IntradayBar]:
-    """
-    Fetch today's intraday bars for `symbol` from market open until now, in the given interval.
-    Assumes NSE symbols are suffixed with '.NS' for yfinance.
-    """
-    yf_symbol = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
-    
-    # yfinance valid intervals for intraday: 1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo
-    df = yf.download(tickers=yf_symbol, period="1d", interval=interval, progress=False, auto_adjust=False)
-    
-    if df.empty:
-        return []
+YFINANCE_ENABLED = False  # temporary
+
+if YFINANCE_ENABLED:
+    import yfinance as yf
+
+    def fetch_intraday_bars(symbol: str, interval: BarInterval = "1m") -> List[IntradayBar]:
+        """
+        Fetch today's intraday bars for `symbol` from market open until now, in the given interval.
+        Assumes NSE symbols are suffixed with '.NS' for yfinance.
+        """
+        yf_symbol = symbol if symbol.endswith(".NS") else f"{symbol}.NS"
         
-    bars = []
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+        # yfinance valid intervals for intraday: 1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo
+        df = yf.download(tickers=yf_symbol, period="1d", interval=interval, progress=False, auto_adjust=False)
         
-    for index, row in df.iterrows():
-        open_val = row['Open'].item() if isinstance(row['Open'], pd.Series) else row['Open']
-        high_val = row['High'].item() if isinstance(row['High'], pd.Series) else row['High']
-        low_val = row['Low'].item() if isinstance(row['Low'], pd.Series) else row['Low']
-        close_val = row['Close'].item() if isinstance(row['Close'], pd.Series) else row['Close']
-        vol_val = row['Volume'].item() if isinstance(row['Volume'], pd.Series) else row['Volume']
-        
-        bars.append(IntradayBar(
-            timestamp=index,
-            open=float(open_val),
-            high=float(high_val),
-            low=float(low_val),
-            close=float(close_val),
-            volume=float(vol_val)
-        ))
-        
-    return bars
+        if df.empty:
+            return []
+            
+        bars = []
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        for index, row in df.iterrows():
+            open_val = row['Open'].item() if isinstance(row['Open'], pd.Series) else row['Open']
+            high_val = row['High'].item() if isinstance(row['High'], pd.Series) else row['High']
+            low_val = row['Low'].item() if isinstance(row['Low'], pd.Series) else row['Low']
+            close_val = row['Close'].item() if isinstance(row['Close'], pd.Series) else row['Close']
+            vol_val = row['Volume'].item() if isinstance(row['Volume'], pd.Series) else row['Volume']
+            
+            bars.append(IntradayBar(
+                timestamp=index,
+                open=float(open_val),
+                high=float(high_val),
+                low=float(low_val),
+                close=float(close_val),
+                volume=float(vol_val)
+            ))
+            
+        return bars
+else:
+    def fetch_intraday_bars(*args, **kwargs) -> List[IntradayBar]:
+        raise RuntimeError("yfinance-based intraday fetch is disabled in this build.")
 
 if __name__ == "__main__":
     test_symbol = "RELIANCE"
