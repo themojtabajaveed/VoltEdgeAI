@@ -1,0 +1,28 @@
+# Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Database
+*.db
+*.sqlite3
+voltedgeai.db
+
+# Logs & Reports
+logs/
+*.log
+
+# Compiled Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+.DS_Store

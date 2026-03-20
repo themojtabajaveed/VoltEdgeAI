@@ -3,6 +3,8 @@ import os
 from datetime import datetime
 from typing import Dict
 
+from src.db import SessionLocal, DecisionRecord
+
 LOG_PATH = os.path.join("logs", "sniper_decisions.csv")
 
 def log_sniper_decision(symbol: str, res: Dict, context: Dict) -> None:
@@ -55,3 +57,27 @@ def log_sniper_decision(symbol: str, res: Dict, context: Dict) -> None:
         if not file_exists:
             writer.writeheader()
         writer.writerow(row_data)
+
+    # Natively inject into SQLite for Daily Analyst processing
+    try:
+        with SessionLocal() as session:
+            record = DecisionRecord(
+                symbol=symbol,
+                status=res.get('status', ''),
+                reason=res.get('reason', ''),
+                close_price=float(res.get('close')) if res.get('close') not in ('', None) else None,
+                ema_200=float(res.get('ema_200')) if res.get('ema_200') not in ('', None) else None,
+                rsi_14=float(res.get('rsi_14')) if res.get('rsi_14') not in ('', None) else None,
+                vol_today=float(res.get('vol_today')) if res.get('vol_today') not in ('', None) else None,
+                vol_20=float(res.get('vol_20')) if res.get('vol_20') not in ('', None) else None,
+                macd_hist=float(res.get('macd_hist')) if res.get('macd_hist') not in ('', None) else None,
+                adx_14=float(res.get('adx_14')) if res.get('adx_14') not in ('', None) else None,
+                juror_label=context.get('juror_label'),
+                juror_confidence=float(context.get('juror_confidence')) if context.get('juror_confidence') not in ('', None) else None,
+                antigravity_status=ag.get('status'),
+                antigravity_z_score=float(ag.get('z_score')) if ag.get('z_score') not in ('', None) else None
+            )
+            session.add(record)
+            session.commit()
+    except Exception as e:
+        print(f"Error persisting DecisionRecord to SQLite: {e}")

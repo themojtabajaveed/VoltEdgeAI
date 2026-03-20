@@ -2,7 +2,7 @@ from datetime import date
 from typing import List
 
 import pandas as pd
-import yfinance as yf
+# import yfinance as yf
 
 from src.db import init_db, SessionLocal, DailyPerformanceSnapshot, JurorSignal
 from src.sources.nse_prices import fetch_daily_ohlcv, compute_ema, compute_rsi, compute_avg_volume
@@ -11,67 +11,75 @@ from src.sniper.core import compute_macd, compute_adx, compute_bollinger_bands
 NSE_UNIVERSE = ["TCS", "HDFCBANK", "RELIANCE", "INFY", "ICICIBANK"]
 TOP_N = 10  # number of top gainers/losers to log
 
-def get_today_ohlc_for_symbols(symbols: List[str]) -> pd.DataFrame:
-    """
-    Use yfinance to download today's daily OHLCV for a list of NSE symbols.
-    Returns a DataFrame with index as symbol and columns: open, high, low, close, volume, pct_change, gap_pct.
-    """
-    yf_symbols = [f"{s}.NS" for s in symbols]
-    
-    # Downloading multiple tickers using group_by="ticker"
-    data = yf.download(yf_symbols, period="5d", interval="1d", group_by="ticker", auto_adjust=False)
-    
-    records = []
-    
-    if len(symbols) == 1:
-        # yfinance returns a flat column hierarchy if only 1 symbol
-        ticker_data = data.dropna(how='all')
-        if len(ticker_data) >= 2:
-            prev_close = float(ticker_data['Close'].iloc[-2])
-            today = ticker_data.iloc[-1]
-            c_open = float(today['Open'])
-            c_high = float(today['High'])
-            c_low = float(today['Low'])
-            c_close = float(today['Close'])
-            c_vol = float(today['Volume'])
-            
-            pct_change = ((c_close / prev_close) - 1.0) * 100.0
-            gap_pct = ((c_open / prev_close) - 1.0) * 100.0
-            
-            records.append({
-                'symbol': symbols[0],
-                'open': c_open, 'high': c_high, 'low': c_low, 'close': c_close, 'volume': c_vol,
-                'pct_change': pct_change, 'gap_pct': gap_pct
-            })
-    else:
-        for s, yf_s in zip(symbols, yf_symbols):
-            try:
-                ticker_data = data[yf_s].dropna(how='all')
+YFINANCE_ENABLED = False  # temporary
+
+if YFINANCE_ENABLED:
+    import yfinance as yf
+
+    def get_today_ohlc_for_symbols(symbols: List[str]) -> pd.DataFrame:
+        """
+        Use yfinance to download today's daily OHLCV for a list of NSE symbols.
+        Returns a DataFrame with index as symbol and columns: open, high, low, close, volume, pct_change, gap_pct.
+        """
+        yf_symbols = [f"{s}.NS" for s in symbols]
+        
+        # Downloading multiple tickers using group_by="ticker"
+        data = yf.download(yf_symbols, period="5d", interval="1d", group_by="ticker", auto_adjust=False)
+        
+        records = []
+        
+        if len(symbols) == 1:
+            # yfinance returns a flat column hierarchy if only 1 symbol
+            ticker_data = data.dropna(how='all')
+            if len(ticker_data) >= 2:
+                prev_close = float(ticker_data['Close'].iloc[-2])
+                today = ticker_data.iloc[-1]
+                c_open = float(today['Open'])
+                c_high = float(today['High'])
+                c_low = float(today['Low'])
+                c_close = float(today['Close'])
+                c_vol = float(today['Volume'])
                 
-                if len(ticker_data) >= 2:
-                    prev_close = float(ticker_data['Close'].iloc[-2])
-                    today = ticker_data.iloc[-1]
-                    c_open = float(today['Open'])
-                    c_high = float(today['High'])
-                    c_low = float(today['Low'])
-                    c_close = float(today['Close'])
-                    c_vol = float(today['Volume'])
-                    
-                    pct_change = ((c_close / prev_close) - 1.0) * 100.0
-                    gap_pct = ((c_open / prev_close) - 1.0) * 100.0
-                    
-                    records.append({
-                        'symbol': s,
-                        'open': c_open, 'high': c_high, 'low': c_low, 'close': c_close, 'volume': c_vol,
-                        'pct_change': pct_change, 'gap_pct': gap_pct
-                    })
-            except Exception as e:
-                print(f"Failed to process {s}: {e}")
+                pct_change = ((c_close / prev_close) - 1.0) * 100.0
+                gap_pct = ((c_open / prev_close) - 1.0) * 100.0
                 
-    df = pd.DataFrame(records)
-    if not df.empty:
-        df = df.set_index('symbol')
-    return df
+                records.append({
+                    'symbol': symbols[0],
+                    'open': c_open, 'high': c_high, 'low': c_low, 'close': c_close, 'volume': c_vol,
+                    'pct_change': pct_change, 'gap_pct': gap_pct
+                })
+        else:
+            for s, yf_s in zip(symbols, yf_symbols):
+                try:
+                    ticker_data = data[yf_s].dropna(how='all')
+                    
+                    if len(ticker_data) >= 2:
+                        prev_close = float(ticker_data['Close'].iloc[-2])
+                        today = ticker_data.iloc[-1]
+                        c_open = float(today['Open'])
+                        c_high = float(today['High'])
+                        c_low = float(today['Low'])
+                        c_close = float(today['Close'])
+                        c_vol = float(today['Volume'])
+                        
+                        pct_change = ((c_close / prev_close) - 1.0) * 100.0
+                        gap_pct = ((c_open / prev_close) - 1.0) * 100.0
+                        
+                        records.append({
+                            'symbol': s,
+                            'open': c_open, 'high': c_high, 'low': c_low, 'close': c_close, 'volume': c_vol,
+                            'pct_change': pct_change, 'gap_pct': gap_pct
+                        })
+                except Exception as e:
+                    print(f"Failed to process {s}: {e}")
+                    
+        df = pd.DataFrame(records)
+        if not df.empty:
+            df = df.set_index('symbol')
+        return df
+else:
+    def get_today_ohlc_for_symbols(*args, **kwargs) -> pd.DataFrame:
+        raise RuntimeError("yfinance-based daily fetch is disabled in this build.")
 
 def main():
     print("Initializing Database...")

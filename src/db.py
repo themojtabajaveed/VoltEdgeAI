@@ -101,3 +101,47 @@ class FundamentalUniverse(Base):
 def get_fundamental_universe(session):
     """Return a query for active FundamentalUniverse rows (is_active=True, macro_ok=True)."""
     return session.query(FundamentalUniverse).filter_by(is_active=True, macro_ok=True)
+
+# 9. Model class for Execution Log tracking
+class DecisionRecord(Base):
+    __tablename__ = "decision_records"
+
+    id = Column(Integer, primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    symbol = Column(String, index=True)
+    status = Column(String)
+    reason = Column(String)
+    
+    close_price = Column(Float, nullable=True)
+    ema_200 = Column(Float, nullable=True)
+    rsi_14 = Column(Float, nullable=True)
+    vol_today = Column(Float, nullable=True)
+    vol_20 = Column(Float, nullable=True)
+    macd_hist = Column(Float, nullable=True)
+    adx_14 = Column(Float, nullable=True)
+    
+    juror_label = Column(String, nullable=True)
+    juror_confidence = Column(Float, nullable=True)
+    
+    antigravity_status = Column(String, nullable=True)
+    antigravity_z_score = Column(Float, nullable=True)
+
+# 10. Model class for Closed Trade tracking
+class TradeRecord(Base):
+    __tablename__ = "trade_records"
+
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String, index=True)
+    direction = Column(String)  # LONG, SHORT
+    qty = Column(Integer)
+    
+    entry_price = Column(Float)
+    exit_price = Column(Float)
+    pnl = Column(Float)
+    
+    entry_time = Column(DateTime)
+    exit_time = Column(DateTime, index=True)
+    
+    mode = Column(String)       # INTRADAY, SWING
+    strategy = Column(String)   # eg ANTIGRAVITY
+    exit_reason = Column(String, nullable=True) # TIME_EXIT, STOP_LOSS, TARGET

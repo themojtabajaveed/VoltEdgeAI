@@ -144,6 +144,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     
     last_intraday_run = None
     last_eod_run_date = None
+    last_report_date = None
+    last_premarket_date = None
     
     while True:
         try:
@@ -276,12 +278,39 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                     continue
                                 
                                 qty = pos.total_qty
+                                # Cache entry properties before closure wipes them out
+                                entry_price = pos.avg_price
+                                entry_time = pos.entry_time
+                                
                                 result = executor.execute_sell(symbol=es.symbol, qty=qty, ltp=es.ltp)
                                 
                                 if result.success:
                                     # Fallback to ltp if avg_price not populated in DRY_RUN mock
                                     price = result.avg_price if result.avg_price else es.ltp
-                                    positions.on_sell_fill(symbol=es.symbol, qty=qty, price=price)
+                                    closed_pos = positions.on_sell_fill(symbol=es.symbol, qty=qty, price=price)
+                                    
+                                    # Emit TradeRecord precisely whenever a position entirely terminates
+                                    if closed_pos and closed_pos.total_qty == 0:
+                                        try:
+                                            from src.db import SessionLocal, TradeRecord
+                                            with SessionLocal() as session:
+                                                record = TradeRecord(
+                                                    symbol=es.symbol,
+                                                    direction="LONG",
+                                                    qty=qty,
+                                                    entry_price=entry_price,
+                                                    exit_price=price,
+                                                    pnl=closed_pos.realized_pnl,
+                                                    entry_time=entry_time,
+                                                    exit_time=datetime.now(IST),
+                                                    mode=es.mode,
+                                                    strategy=es.strategy,
+                                                    exit_reason=es.reason
+                                                )
+                                                session.add(record)
+                                                session.commit()
+                                        except Exception as db_e:
+                                            logging.error(f"Failed to log TradeRecord inherently to SQLite: {db_e}")
                                     
                                 meta = {
                                     "reason": es.reason,
@@ -301,6 +330,18 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                     if last_eod_run_date != current_date:
                         run_script("log_daily_performance.py")
                         last_eod_run_date = current_date
+                        
+                # 3. Explicit Evening Analyst Dispatches exclusively targeted after exactly 18:00 specifically 
+                if current_time >= dt_time(18, 0):
+                    if last_report_date != current_date:
+                        run_script("reports/daily_summary.py")
+                        last_report_date = current_date
+                        
+                # 4. Explicit Pre-Market Watchlist strictly dispatched exactly after 09:00 explicitly actively organically
+                if current_time >= dt_time(9, 0):
+                    if last_premarket_date != current_date:
+                        run_script("reports/pre_market_brief.py")
+                        last_premarket_date = current_date
             
             # Sleep for 60 seconds before checking time again
             time.sleep(60)
