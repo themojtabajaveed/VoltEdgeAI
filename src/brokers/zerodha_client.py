@@ -40,7 +40,7 @@ class ZerodhaClient:
                 tradingsymbol=req.symbol,
                 transaction_type=transaction_type,
                 quantity=req.quantity,
-                product=self._kite.PRODUCT_CNC,
+                product=self._kite.PRODUCT_MIS,   # MIS = Margin Intraday Square-off (required for shorting + auto-squareoff)
                 order_type=self._kite.ORDER_TYPE_MARKET
             )
             return OrderResult(

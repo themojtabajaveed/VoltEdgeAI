@@ -1,4 +1,14 @@
+"""
+daily_decision_engine.py (v2)
+------------------------------
+Reads recent Juror signals from the DB, filters by confidence and
+Sniper technical rules. Passes actionable signals to the AntigravityWatcher.
+
+Execution (placing actual orders) is handled exclusively by TradeExecutor
+in runner.py. This module is analysis-only.
+"""
 import os
+import logging
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -6,21 +16,17 @@ from datetime import datetime
 from src.db import init_db, SessionLocal, JurorSignal
 from src.sniper.core import evaluate_signal
 from src.sniper.logger import log_sniper_decision
-from src.trade_planner import plan_trade
-from src.broker.zerodha_client import place_equity_trade_from_plan
 
-ACCOUNT_EQUITY = 100000.0
+logger = logging.getLogger(__name__)
+
 MIN_JUROR_CONFIDENCE = 0.80
 
+
 def main(watcher=None):
-    print("--- VoltEdgeAI Daily Decision Engine ---")
-    print(f"Account Equity configured at ₹{ACCOUNT_EQUITY:,.2f}")
-    print(f"Minimum Juror Confidence: {MIN_JUROR_CONFIDENCE:.2f}")
-    print("Initializing Database...")
+    logger.info("--- VoltEdgeAI Daily Decision Engine ---")
     init_db()
 
     with SessionLocal() as session:
-        # Fetch latest 50 signals
         recent_signals = (
             session.query(JurorSignal)
             .order_by(JurorSignal.created_at.desc())
@@ -29,61 +35,59 @@ def main(watcher=None):
         )
 
         if not recent_signals:
-            print("No signals found in the database. Run Juror NSE live script first.")
+            logger.info("No signals found in DB. Skipping decision engine.")
             return
 
-        print(f"Found {len(recent_signals)} recent signal(s). Filtering for actionable trades...\n")
+        logger.info(f"Decision engine: evaluating {len(recent_signals)} signal(s).")
 
         for row in recent_signals:
-            # Step 1: Filter by Juror criteria
+            # Step 1: Filter by Juror confidence
             if row.label != "Positive" or row.confidence is None or row.confidence < MIN_JUROR_CONFIDENCE:
                 continue
-                
+
             # Step 2: Apply Sniper technical rules
-            res = evaluate_signal(row.symbol)
-            status = res["status"]
-            
-            # Log the decision
-            log_sniper_decision(
-                symbol=row.symbol,
-                res=res,
-                context={"juror_label": row.label, "juror_confidence": row.confidence}
-            )
-            
+            try:
+                res = evaluate_signal(row.symbol)
+            except Exception as e:
+                logger.warning(f"Sniper evaluate_signal failed for {row.symbol}: {e}")
+                continue
+
+            status = res.get("status", "SKIP")
+
+            # Log decision
+            try:
+                log_sniper_decision(
+                    symbol=row.symbol,
+                    res=res,
+                    context={"juror_label": row.label, "juror_confidence": row.confidence}
+                )
+            except Exception as e:
+                logger.warning(f"Failed to log sniper decision for {row.symbol}: {e}")
+
             if status != "KEEP":
-                print(f"{row.symbol} | SKIP | Juror={row.label} ({row.confidence:.2f}), Sniper={status} ({res.get('reason', '')})")
-                
-                # Check if we should watch this for antigravity bounces
-                if status == "WAIT" and res.get("antigravity", {}).get("status") == "WAITING_FOR_GRAVITY":
-                    if watcher:
-                        ag = res["antigravity"]
+                logger.info(
+                    f"{row.symbol} | SKIP | Juror={row.label} ({row.confidence:.2f}), "
+                    f"Sniper={status} ({res.get('reason', '')})"
+                )
+                # If WAIT + antigravity stretch detected, hand to watcher
+                if status == "WAIT" and watcher:
+                    ag = res.get("antigravity", {})
+                    if ag.get("status") == "WAITING_FOR_GRAVITY":
                         watcher.add_wait_signal(
                             symbol=row.symbol,
                             z_score=ag.get("z_score", 0.0),
                             vwap=ag.get("vwap", 0.0),
                             ltp=ag.get("ltp", 0.0),
-                            now=datetime.now()
+                            now=datetime.now(),
                         )
                 continue
 
-            # Step 3: Compute Trade Plan
-            plan = plan_trade(row.symbol, equity=ACCOUNT_EQUITY)
-            
-            if plan is None:
-                print(f"{row.symbol} | SKIP | Juror={row.label} ({row.confidence:.2f}), Sniper={status} (Trade Plan Generation Failed / Insufficient ATR data)")
-                continue
+            logger.info(
+                f"{row.symbol} | KEEP | Juror={row.label} ({row.confidence:.2f}), "
+                f"Sniper={status} — queued for execution via runner."
+            )
 
-            # Step 4: Output approved "Trade Card"
-            print("===")
-            print(f"Candidate: {row.symbol}")
-            print(f"  Juror:  {row.label} ({row.confidence:.2f})")
-            print(f"  Sniper: {status} - {res.get('reason', '')}")
-            print(f"  Price:  Close=₹{plan['entry']:.2f}, ATR=₹{plan['atr']:.2f}")
-            print(f"  Plan:   Entry=₹{plan['entry']:.2f}, SL=₹{plan['stop_loss']:.2f}, Target=₹{plan['target']:.2f}")
-            print(f"  Size:   Qty={plan['qty']}, Risk=₹{plan['risk_amount']:.2f}, Reward=₹{plan['reward_amount']:.2f}, R:R={plan['rr_effective']:.2f}")
-            print("===")
-            
-            place_equity_trade_from_plan(plan, side="BUY", dry_run=True)
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     main()

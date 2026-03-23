@@ -1,0 +1,16 @@
+{
+  "predictions": [
+    {
+      "date": "2026-03-23",
+      "symbol": "RELIANCE",
+      "predicted_direction": "bullish",
+      "key_level": 1450.0,
+      "reason": "test",
+      "score": null,
+      "actual_change_pct": null
+    }
+  ],
+  "system_lessons": [
+    "2026-03-23: Test lesson"
+  ]
+}

@@ -7,6 +7,7 @@ import zoneinfo
 import json
 
 from src.sniper.antigravity_watcher import AntigravityWatcher
+from src.sniper.momentum_scanner import fetch_top_movers
 import src.daily_decision_engine as daily_decision_engine
 from src.config.risk import load_risk_config
 from src.trading.daily_risk_state import DailyRiskState
@@ -15,7 +16,8 @@ from src.trading.execution_logger import get_executions_logger, log_execution
 from src.trading.positions import PositionBook
 from src.trading.exit_engine import ExitEngine, ExitSignal
 from src.trading.sizing import MarketRegime, SymbolStats, allow_new_long
-import json
+from src.trading.atr import compute_atr, compute_stop_distance, compute_atr_position_size
+from src.data_ingestion.intraday_context import get_intraday_bars_for_symbol
 from src.data_ingestion.market_live import make_default_live_client, BarBuilder
 from src.data_ingestion.instruments import load_instruments_csv, build_symbol_token_map
 import sys
@@ -38,10 +40,12 @@ def load_daily_regime() -> MarketRegime:
             pass
     return MarketRegime(trend="sideways", strength=0.0)
 
-MARKET_START = dt_time(9, 15)   # 09:15 IST
-MARKET_END = dt_time(15, 30)    # 15:30 IST
-INTRADAY_INTERVAL_MIN = 15      # configurable cadence
-ACTIVE_UNIVERSE = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "BHARTIARTL"]
+MARKET_START  = dt_time(9, 15)   # 09:15 IST
+MARKET_END    = dt_time(15, 30)  # 15:30 IST
+SCANNER_TIME  = dt_time(9, 30)   # 09:30 — scanner runs once after open
+INTRADAY_INTERVAL_MIN = 15
+# Active universe is now dynamic (loaded by momentum_scanner). Fallback if scanner fails:
+FALLBACK_UNIVERSE = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "BHARTIARTL"]
 
 LOG_DIR = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "runner.log")
@@ -123,7 +127,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     try:
         df = load_instruments_csv()
         full_map = build_symbol_token_map(df)
-        active_map = {s: full_map[s] for s in ACTIVE_UNIVERSE if s in full_map}
+        active_map = {s: full_map[s] for s in FALLBACK_UNIVERSE if s in full_map}
     except Exception as e:
         logging.error(f"Failed to load instruments CSV: {e}")
         print("Error: Could not load data/zerodha_instruments.csv")
@@ -153,11 +157,14 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     t.start()
     
     daily_traded_symbols = set()
-    
-    last_intraday_run = None
-    last_eod_run_date = None
-    last_report_date = None
+    last_intraday_run   = None
+    last_eod_run_date   = None
+    last_report_date    = None
     last_premarket_date = None
+    last_scanner_date   = None
+    last_feedback_date  = None   # tracks daily feedback_loop run
+    scanner_long_symbols:  list = []
+    scanner_short_symbols: list = []
     
     while True:
         try:
@@ -175,6 +182,23 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                 logging.info(f"Resetting DailyRiskState for new session: {current_date}")
             
             if is_weekday:
+                # 0. Run momentum scanner once at 09:30
+                if current_time >= SCANNER_TIME and last_scanner_date != current_date:
+                    try:
+                        movers = fetch_top_movers()
+                        scanner_long_symbols  = [c.symbol for c in movers["gainers"]]
+                        scanner_short_symbols = [c.symbol for c in movers["losers"]]
+                        all_scan_symbols = scanner_long_symbols + scanner_short_symbols
+                        logging.info(f"Scanner: LONG={scanner_long_symbols}, SHORT={scanner_short_symbols}")
+                        print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Scanner → LONG: {scanner_long_symbols}")
+                        print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Scanner → SHORT: {scanner_short_symbols}")
+                        # Subscribe websocket to scanned symbols
+                        if all_scan_symbols:
+                            client.subscribe_symbols(all_scan_symbols, mode="full")
+                    except Exception as e:
+                        logging.error(f"Momentum scanner failed: {e}")
+                    last_scanner_date = current_date
+
                 # 1. Intraday tasks between 9:15 and 15:30
                 if MARKET_START <= current_time <= MARKET_END:
                     should_run_intraday = False
@@ -203,7 +227,10 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
 
                         # Advance Antigravity state machine
                         try:
-                            signals = watcher.tick(now=datetime.now(IST))
+                            signals = watcher.tick(
+                                bars_provider=get_intraday_bars_for_symbol,
+                                now=datetime.now(IST),
+                            )
                             if signals:
                                 # Example placeholder: treat everything as neutral for now
                                 market_regime = load_daily_regime() # Load regime here
@@ -219,97 +246,85 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                         
                                         sym = sig.get('symbol')
                                         ltp = sig.get('ltp')
+                                        direction = "LONG"  # antigravity signals are always LONG
                                         if not sym or ltp is None: continue
                                         
                                         if sym in daily_traded_symbols:
-                                            logging.info(f"Skipping executor for {sym}: already traded today.")
+                                            logging.info(f"Skipping {sym}: already traded today.")
                                             continue
-                                            
-                                        # Risk guard: max trades per day
                                         if risk_state.trades_taken >= risk_cfg.max_trades_per_day:
-                                            exec_logger.info("SKIP_EXECUTION: max_trades_per_day reached (%s), skipping %s", risk_state.trades_taken, sym)
-                                            print(f"Risk constraint hit: trades_taken >= max_trades_per_day ({risk_cfg.max_trades_per_day}).")
+                                            print(f"Risk constraint: max_trades_per_day reached.")
                                             continue
-                                            
-                                        sym_stats = SymbolStats(
-                                            symbol=sym,
-                                            last_price=ltp,
-                                            avg_daily_turnover_rupees=5000000.0, # Placeholder dynamically mapped
-                                        )
-                                        
+
+                                        # Compute ATR-based stop and position size from live bar store
+                                        bars = get_intraday_bars_for_symbol(sym, lookback_minutes=70)
+                                        atr_val = compute_atr(bars, period=14)
+                                        stop_dist = compute_stop_distance(atr_val) if atr_val > 0 else ltp * 0.01
+                                        stop_price = round(ltp - stop_dist, 2)    # LONG stop below entry
+                                        qty = compute_atr_position_size(risk_cfg.per_trade_capital_rupees, stop_dist) if atr_val > 0 else 1
+
+                                        market_regime = load_daily_regime()
+                                        sym_stats = SymbolStats(symbol=sym, last_price=ltp, avg_daily_turnover_rupees=5_000_000.0)
                                         if not allow_new_long(sym_stats, market_regime, risk_cfg):
-                                            exec_logger.info(
-                                                "SKIP_EXECUTION: allow_new_long rejected symbol %s in regime %s/%s",
-                                                sym, market_regime.trend, market_regime.strength,
-                                            )
-                                            print(f"Risk constraint hit: allow_new_long sizing rejected {sym}.")
+                                            print(f"Risk gate: allow_new_long rejected {sym}.")
                                             continue
-                                            
-                                        # Execute (DRY_RUN or LIVE depending on risk_config.live_mode)
-                                        result = executor.execute_buy(
-                                            symbol=sym, 
-                                            ltp=ltp,
-                                            market_regime=market_regime,
-                                            symbol_stats=sym_stats,
-                                        )
-                                        
-                                        if not result.success:
-                                            exec_logger.info("EXECUTION_FAILED: executor rejected symbol %s: %s", sym, result.message)
-                                        
-                                        # Update daily state
+
+                                        result = executor.execute_buy(symbol=sym, ltp=ltp, qty=qty, market_regime=market_regime)
                                         if result.success:
                                             risk_state.trades_taken += 1
                                             daily_traded_symbols.add(sym)
                                             positions.on_buy_fill(
-                                                symbol=sym,
-                                                qty=result.filled_qty,
-                                                price=result.avg_price,
-                                                mode="INTRADAY",
-                                                strategy=sig.get("strategy", "ANTIGRAVITY"),
-                                                initial_stop_price=sig.get("initial_stop_price")
+                                                symbol=sym, qty=result.filled_qty, price=result.avg_price,
+                                                mode="INTRADAY", strategy=sig.get("strategy", "ANTIGRAVITY"),
+                                                initial_stop_price=stop_price, atr=atr_val,
+                                                broker_order_id=result.broker_order_id if hasattr(result, 'broker_order_id') else None,
                                             )
-                                            
-                                        # Add some meta info (strategy, z_score, vwap)
-                                        meta = {
-                                            "strategy": sig.get("strategy", "ANTIGRAVITY"),
-                                            "z_score": sig.get("z_score"),
-                                            "vwap": sig.get("vwap"),
-                                        }
-                                        log_execution(exec_logger, symbol=sym, ltp=ltp, result=result, meta=meta)
+                                        log_execution(exec_logger, symbol=sym, ltp=ltp, result=result,
+                                                      meta={"strategy": "ANTIGRAVITY", "z_score": sig.get("z_score"), "vwap": sig.get("vwap"), "stop": stop_price, "atr": atr_val})
 
                         except Exception as e:
                             logging.error(f"Failed to execute Antigravity Watcher tick: {e}")
                             print(f"\nWatcher tick error: {e}")
                             
-                        # Process Exits
+                        # Process Exits — branches correctly on LONG vs SHORT
                         try:
                             exit_signals = exit_engine.tick(now=now)
                             for es in exit_signals:
                                 pos = positions.get_position(es.symbol)
                                 if not pos or pos.total_qty <= 0:
                                     continue
-                                
-                                qty = pos.total_qty
-                                # Cache entry properties before closure wipes them out
+
+                                exit_qty   = pos.total_qty
                                 entry_price = pos.avg_price
-                                entry_time = pos.entry_time
-                                
-                                result = executor.execute_sell(symbol=es.symbol, qty=qty, ltp=es.ltp)
-                                
+                                entry_time  = pos.entry_time
+                                direction   = pos.side  # "LONG" or "SHORT"
+
+                                # ── Route to correct executor method ──────────────────
+                                if es.side == "COVER":  # Closing a SHORT position
+                                    result = executor.execute_short_cover(symbol=es.symbol, qty=exit_qty, ltp=es.ltp)
+                                else:                   # Closing a LONG position
+                                    result = executor.execute_sell(symbol=es.symbol, qty=exit_qty, ltp=es.ltp)
+
                                 if result.success:
-                                    # Fallback to ltp if avg_price not populated in DRY_RUN mock
                                     price = result.avg_price if result.avg_price else es.ltp
-                                    closed_pos = positions.on_sell_fill(symbol=es.symbol, qty=qty, price=price)
-                                    
-                                    # Emit TradeRecord precisely whenever a position entirely terminates
-                                    if closed_pos and closed_pos.total_qty == 0:
+
+                                    if es.side == "COVER":
+                                        closed_pos = positions.on_cover_fill(symbol=es.symbol, qty=exit_qty, price=price)
+                                    else:
+                                        closed_pos = positions.on_sell_fill(symbol=es.symbol, qty=exit_qty, price=price)
+
+                                    if closed_pos is not None:
+                                        # ── Update daily P&L so loss-cap fires correctly ──
+                                        risk_state.daily_pnl = getattr(risk_state, 'daily_pnl', 0.0) + closed_pos.realized_pnl
+
+                                        # ── Persist TradeRecord to SQLite ─────────────────
                                         try:
                                             from src.db import SessionLocal, TradeRecord
                                             with SessionLocal() as session:
                                                 record = TradeRecord(
                                                     symbol=es.symbol,
-                                                    direction="LONG",
-                                                    qty=qty,
+                                                    direction=direction,
+                                                    qty=exit_qty,
                                                     entry_price=entry_price,
                                                     exit_price=price,
                                                     pnl=closed_pos.realized_pnl,
@@ -322,14 +337,11 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                                 session.add(record)
                                                 session.commit()
                                         except Exception as db_e:
-                                            logging.error(f"Failed to log TradeRecord inherently to SQLite: {db_e}")
-                                    
-                                meta = {
-                                    "reason": es.reason,
-                                    "mode": es.mode,
-                                    "strategy": es.strategy,
-                                    "stop_price": es.stop_price,
-                                }
+                                            logging.error(f"Failed to log TradeRecord to SQLite: {db_e}")
+
+                                meta = {"reason": es.reason, "mode": es.mode,
+                                        "strategy": es.strategy, "stop_price": es.stop_price,
+                                        "direction": direction}
                                 log_execution(exec_logger, symbol=es.symbol, ltp=es.ltp, result=result, meta=meta)
                         except Exception as e:
                             logging.error(f"Failed to process ExitEngine tick: {e}")
@@ -343,13 +355,19 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         run_script("log_daily_performance.py")
                         last_eod_run_date = current_date
                         
-                # 3. Explicit Evening Analyst Dispatches exclusively targeted after exactly 18:00 specifically 
+                # 3. 18:00 — Market Chronicle (replaces old daily_summary.py)
                 if current_time >= dt_time(18, 0):
                     if last_report_date != current_date:
-                        run_script("reports/daily_summary.py")
+                        run_script("reports/market_chronicle.py")
                         last_report_date = current_date
-                        
-                # 4. Explicit Pre-Market Watchlist strictly dispatched exactly after 06:00 explicitly actively organically
+
+                # 4. 18:01 — Prediction Feedback Loop (score morning's calls)
+                if current_time >= dt_time(18, 1):
+                    if last_feedback_date != current_date:
+                        run_script("reports/feedback_loop.py")
+                        last_feedback_date = current_date
+
+                # 5. 06:00 — Morning Global Intelligence Brief
                 if current_time >= dt_time(6, 0):
                     if last_premarket_date != current_date:
                         run_script("reports/pre_market_brief.py")
