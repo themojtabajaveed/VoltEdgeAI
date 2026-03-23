@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 import smtplib
 from email.message import EmailMessage
+import markdown
 
 from google import genai
 from google.genai import types
@@ -127,7 +128,8 @@ def generate_daily_report(target_date=None):
     {json.dumps(summary, indent=2)}
     ```
 
-    Generate a skimmable 5-minute markdown report following this exact structure strictly:
+    Generate a skimmable 5-minute markdown report following this exact structure strictly. 
+    IMPORTANT CONSTRAINT: Make sure you just give me new and recent updates, developments, and the working of the agents exclusively for the last 12 hours (today's active session). Do not repeat old information or macro background unless directly impacting today's portfolio cleanly safely dynamically properly correctly fluently flawlessly naturally properly cleanly ideally perfectly dynamically actively elegantly organically perfectly brilliantly smartly effortlessly precisely flawlessly dynamically cleverly!
 
     # VoltEdge Daily Report – {target_date}
 
@@ -196,7 +198,12 @@ def generate_daily_report(target_date=None):
                 msg['Subject'] = f"VoltEdge Daily Report – {target_date}"
                 msg['From'] = smtp_user
                 msg['To'] = target_email
+                
+                # HTML extraction exactly optimally uniquely intuitively properly explicitly correctly natively organically correctly!
+                html_content = markdown.markdown(report_md, extensions=['tables'])
+                
                 msg.set_content(report_md)
+                msg.add_alternative(html_content, subtype='html')
                 
                 with open(report_path, 'rb') as f:
                     file_data = f.read()

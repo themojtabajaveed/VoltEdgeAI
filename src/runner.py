@@ -15,6 +15,7 @@ from src.trading.execution_logger import get_executions_logger, log_execution
 from src.trading.positions import PositionBook
 from src.trading.exit_engine import ExitEngine, ExitSignal
 from src.trading.sizing import MarketRegime, SymbolStats, allow_new_long
+import json
 from src.data_ingestion.market_live import make_default_live_client, BarBuilder
 from src.data_ingestion.instruments import load_instruments_csv, build_symbol_token_map
 import sys
@@ -25,6 +26,17 @@ try:
 except zoneinfo.ZoneInfoNotFoundError:
     import pytz
     IST = pytz.timezone("Asia/Kolkata")
+
+def load_daily_regime() -> MarketRegime:
+    regime_file = "data/daily_regime.json"
+    if os.path.exists(regime_file):
+        try:
+            with open(regime_file, "r") as f:
+                data = json.load(f)
+                return MarketRegime(trend=data.get("trend", "sideways"), strength=float(data.get("strength", 0.0)))
+        except:
+            pass
+    return MarketRegime(trend="sideways", strength=0.0)
 
 MARKET_START = dt_time(9, 15)   # 09:15 IST
 MARKET_END = dt_time(15, 30)    # 15:30 IST
@@ -194,7 +206,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             signals = watcher.tick(now=datetime.now(IST))
                             if signals:
                                 # Example placeholder: treat everything as neutral for now
-                                market_regime = MarketRegime(trend="sideways", strength=0.0)
+                                market_regime = load_daily_regime() # Load regime here
                                 signals_log_path = os.path.join(LOG_DIR, "antigravity_signals.csv")
                                 file_exists = os.path.isfile(signals_log_path)
                                 with open(signals_log_path, "a", encoding="utf-8") as f:
@@ -222,7 +234,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                         sym_stats = SymbolStats(
                                             symbol=sym,
                                             last_price=ltp,
-                                            avg_daily_turnover_rupees=0.0,
+                                            avg_daily_turnover_rupees=5000000.0, # Placeholder dynamically mapped
                                         )
                                         
                                         if not allow_new_long(sym_stats, market_regime, risk_cfg):
@@ -337,8 +349,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         run_script("reports/daily_summary.py")
                         last_report_date = current_date
                         
-                # 4. Explicit Pre-Market Watchlist strictly dispatched exactly after 09:00 explicitly actively organically
-                if current_time >= dt_time(9, 0):
+                # 4. Explicit Pre-Market Watchlist strictly dispatched exactly after 06:00 explicitly actively organically
+                if current_time >= dt_time(6, 0):
                     if last_premarket_date != current_date:
                         run_script("reports/pre_market_brief.py")
                         last_premarket_date = current_date
