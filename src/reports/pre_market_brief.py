@@ -73,7 +73,20 @@ def generate_pre_market_brief():
         logger.warning(f"Could not import finnhub_client: {e}")
         fetch_global_sentiment = lambda: {}
 
-    today = datetime.now().date()
+    import zoneinfo
+    IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+    today = datetime.now(IST).date()
+
+    # Duplicate guard: skip if today's brief already exists
+    existing_paths = [
+        os.path.join("logs", "daily_reports", f"{today}_morning_brief.md"),
+        os.path.join("logs", "daily_reports", f"voltedge_{today}", f"{today}_morning_brief.md"),
+    ]
+    for ep in existing_paths:
+        if os.path.exists(ep):
+            print(f"[VoltEdge] Morning brief already exists at {ep} — skipping duplicate generation.")
+            return
+
     log = _load_prediction_log()
     lessons_context = _build_lessons_context(log)
 

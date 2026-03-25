@@ -92,11 +92,35 @@ def run_script(script_name: str):
         
     except subprocess.CalledProcessError as e:
         print(f"[{datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')}] Job failed: {script_name} (Exit {e.returncode})")
+        if e.stderr:
+            print(f"--- STDERR for {script_name} ---")
+            print(e.stderr[-2000:])  # Last 2000 chars to avoid flooding
+            print(f"--- END STDERR ---")
         logging.error(f"Job failed: {script_name} with exit code {e.returncode}")
         logging.error(f"Error Output:\n{e.stderr}")
     except Exception as e:
         print(f"[{datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')}] Failed to execute: {script_name} ({e})")
         logging.error(f"Failed to execute {script_name}: {e}")
+
+
+def _should_fire_scheduled_job(scheduled_time: dt_time, runner_start_time: dt_time, current_time: dt_time) -> bool:
+    """
+    Prevent cascade-firing of past-due jobs on runner restart.
+    A job should fire only if:
+      1. current_time >= scheduled_time (it's past the scheduled time)
+      2. runner started BEFORE the scheduled time (so it was running when the job was due)
+         OR current_time is within 30 minutes of scheduled_time (grace window for restarts)
+    """
+    if current_time < scheduled_time:
+        return False
+    # If runner started before the scheduled time, fire normally
+    if runner_start_time <= scheduled_time:
+        return True
+    # Grace window: if we restarted within 30 min of the scheduled time, still fire
+    sched_minutes = scheduled_time.hour * 60 + scheduled_time.minute
+    current_minutes = current_time.hour * 60 + current_time.minute
+    return (current_minutes - sched_minutes) <= 30
+
 
 def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_per_day: int = 3):
     # Ensure logs directory exists
@@ -188,6 +212,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     last_discovery_run  = None
     last_regime_update  = None    # V3: live regime updates
     last_autopsy_date   = None    # Phase G: EOD autopsy
+    runner_start_time   = datetime.now(IST).time()  # Phase I: cascade prevention
     scanner_long_symbols:  list = []
     scanner_short_symbols: list = []
     
@@ -701,13 +726,13 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         last_eod_run_date = current_date
                         
                 # 3. 18:00 — Market Chronicle (replaces old daily_summary.py)
-                if current_time >= dt_time(18, 0):
+                if _should_fire_scheduled_job(dt_time(18, 0), runner_start_time, current_time):
                     if last_report_date != current_date:
                         run_script("reports/market_chronicle.py")
                         last_report_date = current_date
 
                 # 2b. 16:00 — EOD Market Autopsy (pattern learning)
-                if current_time >= dt_time(16, 0) and current_time < dt_time(18, 0):
+                if _should_fire_scheduled_job(dt_time(16, 0), runner_start_time, current_time) and current_time < dt_time(18, 0):
                     if last_autopsy_date != current_date:
                         try:
                             from src.reports.eod_autopsy import run_eod_autopsy
@@ -720,13 +745,13 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         last_autopsy_date = current_date
 
                 # 4. 18:01 — Prediction Feedback Loop (score morning's calls)
-                if current_time >= dt_time(18, 1):
+                if _should_fire_scheduled_job(dt_time(18, 1), runner_start_time, current_time):
                     if last_feedback_date != current_date:
                         run_script("reports/feedback_loop.py")
                         last_feedback_date = current_date
 
                 # 5. 06:00 — Morning Global Intelligence Brief
-                if current_time >= dt_time(6, 0):
+                if _should_fire_scheduled_job(dt_time(6, 0), runner_start_time, current_time):
                     if last_premarket_date != current_date:
                         run_script("reports/pre_market_brief.py")
                         last_premarket_date = current_date

@@ -41,10 +41,15 @@ def _read_file_tail(path: str, n_lines: int = 80) -> str:
 
 
 def _read_morning_brief(today: date) -> str:
-    path = os.path.join("logs", "daily_reports", f"{today}_morning_brief.md")
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            return f.read()[:3000]   # cap at 3k chars to save tokens
+    """Search for morning brief in all known save locations."""
+    candidates = [
+        os.path.join("logs", "daily_reports", f"{today}_morning_brief.md"),
+        os.path.join("logs", "daily_reports", f"voltedge_{today}", f"{today}_morning_brief.md"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                return f.read()[:3000]
     return "(No morning brief found for today)"
 
 
@@ -160,11 +165,26 @@ def generate_market_chronicle(target_date: date | None = None) -> None:
     from google import genai
     from google.genai import types
 
-    today = target_date or datetime.now().date()
+    import zoneinfo
+    IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+    today = target_date or datetime.now(IST).date()
+
+    # Duplicate guard: skip if today's chronicle already exists
+    existing_paths = [
+        os.path.join("logs", "daily_reports", f"{today}_chronicle.md"),
+        os.path.join("logs", "daily_reports", f"voltedge_{today}", f"{today}_chronicle.md"),
+    ]
+    for ep in existing_paths:
+        if os.path.exists(ep):
+            print(f"[VoltEdge] Chronicle already exists at {ep} — skipping duplicate generation.")
+            return
 
     morning_brief   = _read_morning_brief(today)
     prediction_ctx  = _load_prediction_log_context(today)
-    runner_log_tail = _read_file_tail("logs/runner.log", n_lines=80)
+    # Try both known log locations
+    runner_log_tail = _read_file_tail("/tmp/voltedge_logs/runner.log", n_lines=80)
+    if "not found" in runner_log_tail:
+        runner_log_tail = _read_file_tail("logs/runner.log", n_lines=80)
     db_ctx          = _fetch_db_context(today)
 
     api_key = os.getenv("GEMINI_API_KEY")

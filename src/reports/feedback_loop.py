@@ -100,7 +100,9 @@ Format: one lesson per line, no bullet points, no preamble.
 
 
 def run_feedback_loop():
-    today = datetime.now().date()
+    import zoneinfo
+    IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+    today = datetime.now(IST).date()
     log = _load_log()
 
     # Get today's unscored predictions

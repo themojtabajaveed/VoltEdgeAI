@@ -417,7 +417,20 @@ def run_eod_autopsy(kite=None):
     load_dotenv("/tmp/voltedge.env")
     load_dotenv()
 
-    today = datetime.now().date()
+    import zoneinfo
+    IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+    today = datetime.now(IST).date()
+
+    # Duplicate guard: skip if today's autopsy already exists
+    existing_paths = [
+        os.path.join("logs", "daily_reports", f"{today}_autopsy.md"),
+        os.path.join("logs", "daily_reports", f"voltedge_{today}", f"{today}_autopsy.md"),
+    ]
+    for ep in existing_paths:
+        if os.path.exists(ep):
+            print(f"[VoltEdge] Autopsy already exists at {ep} — skipping duplicate generation.")
+            return
+
     logger.info(f"Starting EOD Autopsy for {today}")
     print(f"\n{'='*60}")
     print(f"[16:00] EOD MARKET AUTOPSY — {today}")
@@ -466,6 +479,8 @@ def run_eod_autopsy(kite=None):
     for candidate, direction in all_movers:
         sym = candidate.symbol
         try:
+            import time
+            time.sleep(0.4) # Rate limit protection for Kite API
             print(f"\n  🔬 Analyzing {sym} ({direction})...")
 
             # A) Fetch intraday data from Kite (5-min candles, full day)

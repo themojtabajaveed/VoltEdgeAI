@@ -27,8 +27,10 @@ def get_today_ohlc_for_symbols(symbols: List[str]) -> pd.DataFrame:
     """
     records = []
     
+    import time
     for s in symbols:
         try:
+            time.sleep(0.4) # Respect Kite API limits
             df = fetch_daily_ohlcv(s, days=5)
             if df is None or len(df) < 2:
                 continue
@@ -62,7 +64,9 @@ def main():
     print("Initializing Database...")
     init_db()
 
-    today_val = date.today()
+    import zoneinfo
+    IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+    today_val = datetime.now(IST).date()
     print(f"Fetching daily OHLC for {len(NSE_UNIVERSE)} symbols ({today_val})...")
     
     df_today = get_today_ohlc_for_symbols(NSE_UNIVERSE)
@@ -85,6 +89,8 @@ def main():
             if symbol in processed:
                 continue
             processed.add(symbol)
+            import time
+            time.sleep(0.4) # Respect Kite API limits
             
             print(f"  -> {symbol} ({row['pct_change']:.2f}%)")
             
