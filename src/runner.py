@@ -34,6 +34,7 @@ from src.data_ingestion.nse_scraper import get_deal_signal
 from src.data_ingestion.pcr_tracker import compute_pcr, get_pcr_score_modifier
 from src.trading.depth_analyzer import analyze_depth, get_depth_score_modifier, should_skip_illiquid
 from src.tools.auto_login import auto_refresh_access_token
+from src.data_ingestion.news_context import NewsClient
 import sys
 
 # Constants
@@ -57,6 +58,7 @@ def load_daily_regime() -> MarketRegime:
 MARKET_START  = dt_time(9, 15)   # 09:15 IST
 MARKET_END    = dt_time(15, 30)  # 15:30 IST
 SCANNER_TIME  = dt_time(9, 30)   # 09:30 — scanner runs once after open
+PREMARKET_TIME= dt_time(8, 30)   # 08:30 — pre-market macro check
 INTRADAY_INTERVAL_MIN = 15
 # Active universe is now dynamic (loaded by momentum_scanner). Fallback if scanner fails:
 FALLBACK_UNIVERSE = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "BHARTIARTL"]
@@ -205,6 +207,58 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                 logging.info(f"Resetting DailyRiskState for new session: {current_date}")
             
             if is_weekday:
+                # -1. Pre-Market Macro Sentiment Check (08:30)
+                if current_time >= PREMARKET_TIME and last_premarket_date != current_date:
+                    try:
+                        logging.info("Running Pre-Market Macro News Check (NewsData.io)...")
+                        news_client = NewsClient()
+                        all_headlines = []
+                        
+                        # A) Indian Macro (1 credit)
+                        macro_news = news_client.fetch_indian_macro_summary()
+                        if macro_news:
+                            all_headlines.extend([n.headline for n in macro_news])
+                            print(f"\n[08:30 NEWS] Indian Macro: {len(macro_news)} headlines loaded")
+                        
+                        # B) Sector Rotation Scan (5 credits)
+                        SECTOR_QUERIES = [
+                            "IT services Infosys TCS Wipro",
+                            "banking HDFC SBI ICICI",
+                            "pharma Sun Pharma Cipla",
+                            "auto Tata Motors Maruti",
+                            "energy Reliance ONGC power",
+                        ]
+                        sector_summaries = {}
+                        for sq in SECTOR_QUERIES:
+                            sector_news = news_client.fetch_sector_news(sq)
+                            sector_name = sq.split()[0]
+                            sector_summaries[sector_name] = len(sector_news)
+                            all_headlines.extend([n.headline for n in sector_news[:3]])
+                        print(f"[08:30 NEWS] Sector Scan: {sector_summaries}")
+                        
+                        # C) Global Commodity Risk (2 credits)
+                        commodity_news = news_client.fetch_global_commodity_news()
+                        global_risk_news = news_client.fetch_global_macro_risk()
+                        all_headlines.extend([n.headline for n in commodity_news[:3]])
+                        all_headlines.extend([n.headline for n in global_risk_news[:3]])
+                        print(f"[08:30 NEWS] Global Risk: {len(commodity_news)} commodity, {len(global_risk_news)} macro")
+                        
+                        # D) Gemini Sentiment Scoring
+                        if all_headlines:
+                            score = catalyst_analyzer.analyze_premarket_macro(all_headlines[:20])
+                            trend = "bullish" if score > 0.2 else "bearish" if score < -0.2 else "sideways"
+                            
+                            regime_data = {"trend": trend, "strength": score, "date": str(current_date)}
+                            os.makedirs("data", exist_ok=True)
+                            with open("data/daily_regime.json", "w") as f:
+                                json.dump(regime_data, f)
+                            
+                            print(f"[08:30 PRE-MARKET ORACLE] Overnight Sentiment: {trend.upper()} ({score:+.2f})")
+                            logging.info(f"Pre-Market regime updated: {regime_data}")
+                    except Exception as e:
+                        logging.error(f"Pre-market oracle failed: {e}")
+                    last_premarket_date = current_date
+
                 # 0. Run momentum scanner + stock discovery at 09:30
                 if current_time >= SCANNER_TIME and last_scanner_date != current_date:
                     try:
@@ -222,6 +276,25 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         # Subscribe websocket to scanned symbols
                         if all_scan_symbols:
                             client.subscribe_symbols(all_scan_symbols, mode="full")
+                            
+                        # V2.1: Fetch delayed NewsData overnight catalyst for the top 5 gainers and losers
+                        print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Fetching overnight news context via NewsData.io...")
+                        news_client = NewsClient()
+                        top_targets = all_scan_symbols[:5] + all_scan_symbols[-5:]
+                        for sym in set(top_targets):
+                            try:
+                                eod_news = news_client.fetch_stock_eod_news(sym)
+                                if eod_news:
+                                    headline = eod_news[0].headline
+                                    direction = "LONG" if sym in scanner_long_symbols else "SHORT"
+                                    discovery.ingest_manual(
+                                        symbol=sym, direction=direction, source="newsdata_eod", 
+                                        headline=headline
+                                    )
+                                    logging.info(f"NewsContext {sym}: {headline}")
+                            except Exception as sub_e:
+                                logging.warning(f"Failed EOD news fetch for {sym}: {sub_e}")
+
                     except Exception as e:
                         logging.error(f"Momentum scanner failed: {e}")
                     last_scanner_date = current_date

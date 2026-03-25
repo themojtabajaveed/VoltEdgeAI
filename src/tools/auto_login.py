@@ -150,26 +150,46 @@ def auto_refresh_access_token(
         return None
 
     # ── Step 3: Get request_token from redirect ──────────────────────────
+    request_token = None
     try:
-        # Hit the connect URL with the authenticated session
-        redirect_resp = session.get(
-            f"{CONNECT_URL}?v=3&api_key={api_key}",
-            allow_redirects=False,
-        )
-
-        if redirect_resp.status_code in (301, 302, 303):
-            redirect_url = redirect_resp.headers.get("Location", "")
-        else:
-            # Some versions return 200 with the token in response
-            redirect_url = redirect_resp.url
-
-        parsed = urlparse(redirect_url)
-        params = parse_qs(parsed.query)
-        request_token = params.get("request_token", [None])[0]
+        # Kite redirects: kite.trade → kite.zerodha.com → <redirect_uri>?request_token=...
+        # The redirect_uri is typically 127.0.0.1 or localhost, which won't be running.
+        # Strategy: follow redirects and catch the ConnectionError when it hits localhost.
+        # The request_token is embedded in THAT final URL.
+        try:
+            redirect_resp = session.get(
+                f"{CONNECT_URL}?v=3&api_key={api_key}",
+                allow_redirects=True,
+                timeout=10,
+            )
+            # If we somehow get a successful response, parse its URL
+            final_url = redirect_resp.url
+            parsed = urlparse(final_url)
+            params = parse_qs(parsed.query)
+            request_token = params.get("request_token", [None])[0]
+        except requests.exceptions.ConnectionError as ce:
+            # Expected! The final redirect to 127.0.0.1 will fail.
+            # Extract the request_token from the error's URL.
+            error_str = str(ce)
+            if "request_token=" in error_str:
+                import re
+                match = re.search(r'request_token=([a-zA-Z0-9]+)', error_str)
+                if match:
+                    request_token = match.group(1)
+                    logger.info(f"Auto-login Step 3 OK: extracted request_token from redirect error")
 
         if not request_token:
-            logger.error(f"Auto-login Step 3: No request_token in redirect: {redirect_url}")
-            print(f"❌ No request_token found in redirect URL")
+            # Fallback: try with allow_redirects=False and check Location header chain
+            r = session.get(f"{CONNECT_URL}?v=3&api_key={api_key}", allow_redirects=False, timeout=10)
+            loc = r.headers.get("Location", "")
+            if "request_token=" in loc:
+                parsed = urlparse(loc)
+                params = parse_qs(parsed.query)
+                request_token = params.get("request_token", [None])[0]
+
+        if not request_token:
+            logger.error("Auto-login Step 3: Could not extract request_token from any redirect")
+            print("❌ No request_token found in redirect chain")
             return None
 
         logger.info(f"Auto-login Step 3 OK: got request_token")

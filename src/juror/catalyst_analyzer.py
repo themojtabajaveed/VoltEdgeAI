@@ -138,6 +138,29 @@ class CatalystAnalyzer:
         except Exception as e:
             logger.error(f"CatalystAnalyzer failed for {symbol}: {e}")
             return self._stub_analysis(symbol, pct_change, direction, headline)
+            
+    def analyze_premarket_macro(self, headlines: list[str]) -> float:
+        """
+        Takes a list of overnight/pre-market macro headlines and returns a sentiment score from -1.0 to +1.0.
+        """
+        if not self.model or not headlines:
+            return 0.0
+            
+        combined = "\n- ".join(headlines)
+        prompt = f"""You are a senior Indian macro-economist. Assess the overnight news sentiment BEFORE the Indian market opens.
+Headlines:
+- {combined}
+
+Rate the overall sentiment from -1.0 (Extreme Panic/Crash) to +1.0 (Extreme Euphoria/Bull Market). 0.0 is Neutral.
+Return ONLY a raw float number."""
+
+        try:
+            response = self.model.generate_content(prompt)
+            score_str = response.text.strip().replace("`", "")
+            return max(-1.0, min(1.0, float(score_str)))
+        except Exception as e:
+            logger.error(f"Premarket macro sentiment failed: {e}")
+            return 0.0
 
     def _stub_analysis(
         self,
