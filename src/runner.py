@@ -8,6 +8,9 @@ import json
 
 from src.sniper.antigravity_watcher import AntigravityWatcher
 from src.sniper.momentum_scanner import fetch_top_movers
+from src.sniper.stock_discovery import StockDiscovery
+from src.sniper.technical_scorer import TechnicalScorer, meets_entry_threshold
+from src.juror.catalyst_analyzer import CatalystAnalyzer
 import src.daily_decision_engine as daily_decision_engine
 from src.config.risk import load_risk_config
 from src.trading.daily_risk_state import DailyRiskState
@@ -15,11 +18,22 @@ from src.trading.executor import TradeExecutor
 from src.trading.execution_logger import get_executions_logger, log_execution
 from src.trading.positions import PositionBook
 from src.trading.exit_engine import ExitEngine, ExitSignal
+from src.trading.position_monitor import PositionMonitor
 from src.trading.sizing import MarketRegime, SymbolStats, allow_new_long
 from src.trading.atr import compute_atr, compute_stop_distance, compute_atr_position_size
+from src.trading.trading_costs import compute_breakeven_move_pct, is_trade_viable
+from src.trading.circuit_limits import is_safe_to_enter_long, is_safe_to_enter_short
+from src.trading.time_of_day import should_allow_new_entry, adjust_score_for_time, get_expiry_risk_factor
+from src.trading.sector_guard import check_sector_concentration
 from src.data_ingestion.intraday_context import get_intraday_bars_for_symbol
 from src.data_ingestion.market_live import make_default_live_client, BarBuilder
 from src.data_ingestion.instruments import load_instruments_csv, build_symbol_token_map
+from src.data_ingestion.market_sentiment import compute_index_sentiment
+from src.data_ingestion.macro_context import refresh_macro_context, get_cached_context
+from src.data_ingestion.nse_scraper import get_deal_signal
+from src.data_ingestion.pcr_tracker import compute_pcr, get_pcr_score_modifier
+from src.trading.depth_analyzer import analyze_depth, get_depth_score_modifier, should_skip_illiquid
+from src.tools.auto_login import auto_refresh_access_token
 import sys
 
 # Constants
@@ -47,7 +61,7 @@ INTRADAY_INTERVAL_MIN = 15
 # Active universe is now dynamic (loaded by momentum_scanner). Fallback if scanner fails:
 FALLBACK_UNIVERSE = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN", "BHARTIARTL"]
 
-LOG_DIR = "logs"
+LOG_DIR = "/tmp/voltedge_logs"
 LOG_FILE = os.path.join(LOG_DIR, "runner.log")
 
 def run_script(script_name: str):
@@ -119,6 +133,11 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     
     watcher = AntigravityWatcher()
     
+    # V2 Core Engines
+    discovery = StockDiscovery(top_n=10)
+    scorer = TechnicalScorer()
+    catalyst_analyzer = CatalystAnalyzer()
+    
     # Initialize stateful Daily P&L Tracker
     today = datetime.now(IST).date()
     risk_state = DailyRiskState(trading_date=today)
@@ -143,6 +162,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     
     positions = PositionBook()
     exit_engine = ExitEngine(positions=positions, live_client=client, risk=risk_cfg)
+    pos_monitor = PositionMonitor(live_client=client)
     
     import threading
     def bar_builder_worker():
@@ -162,7 +182,9 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     last_report_date    = None
     last_premarket_date = None
     last_scanner_date   = None
-    last_feedback_date  = None   # tracks daily feedback_loop run
+    last_feedback_date  = None
+    last_discovery_run  = None
+    last_regime_update  = None    # V3: live regime updates
     scanner_long_symbols:  list = []
     scanner_short_symbols: list = []
     
@@ -179,16 +201,21 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
             if current_date != risk_state.trading_date:
                 risk_state.reset_for_new_day(current_date)
                 daily_traded_symbols.clear()
+                discovery.reset()
                 logging.info(f"Resetting DailyRiskState for new session: {current_date}")
             
             if is_weekday:
-                # 0. Run momentum scanner once at 09:30
+                # 0. Run momentum scanner + stock discovery at 09:30
                 if current_time >= SCANNER_TIME and last_scanner_date != current_date:
                     try:
                         movers = fetch_top_movers()
                         scanner_long_symbols  = [c.symbol for c in movers["gainers"]]
                         scanner_short_symbols = [c.symbol for c in movers["losers"]]
                         all_scan_symbols = scanner_long_symbols + scanner_short_symbols
+                        
+                        # V2: Feed scanner results into StockDiscovery
+                        discovery.ingest_scanner_results(movers["gainers"], movers["losers"])
+                        
                         logging.info(f"Scanner: LONG={scanner_long_symbols}, SHORT={scanner_short_symbols}")
                         print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Scanner → LONG: {scanner_long_symbols}")
                         print(f"[{datetime.now(IST).strftime('%H:%M:%S')}] Scanner → SHORT: {scanner_short_symbols}")
@@ -225,15 +252,257 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         
                         last_intraday_run = now
 
-                        # Advance Antigravity state machine
+                        # ── V2: STOCK DISCOVERY → SCORE → ANALYZE → EXECUTE ──────────
+                        try:
+                            # V3: Update market regime live every 30 minutes
+                            if last_regime_update is None or (now - last_regime_update).total_seconds() > 1800:
+                                try:
+                                    live_sentiment = compute_index_sentiment(client, "NIFTY 50", [])
+                                    if live_sentiment.trend != "sideways" or live_sentiment.strength > 0.3:
+                                        market_regime = MarketRegime(trend=live_sentiment.trend, strength=live_sentiment.strength)
+                                        logging.info(f"Live regime update: {live_sentiment.trend} ({live_sentiment.strength:.2f})")
+                                        print(f"  📊 Live regime: {live_sentiment.trend} ({live_sentiment.strength:.2f}) — {live_sentiment.comment}")
+                                    else:
+                                        market_regime = load_daily_regime()
+                                except Exception:
+                                    market_regime = load_daily_regime()
+                                last_regime_update = now
+                            else:
+                                market_regime = load_daily_regime()
+
+                            # V4: Macro context refresh (commodity/forex/FII/DII)
+                            try:
+                                macro_ctx = refresh_macro_context()
+                                print(f"  🌍 {macro_ctx.summary}")
+                                if macro_ctx.is_risk_off():
+                                    print(f"  ⚠️ MACRO RISK-OFF — trade scores will be dampened")
+                            except Exception as e:
+                                macro_ctx = None
+                                logging.warning(f"Macro context failed: {e}")
+
+                            # V3: Time-of-day gate
+                            time_ok, time_reason = should_allow_new_entry(datetime.now(IST))
+                            if not time_ok:
+                                logging.info(f"Time gate blocked: {time_reason}")
+                            
+                            # V3: F&O expiry risk factor
+                            expiry_factor = get_expiry_risk_factor(current_date)
+                            if expiry_factor < 1.0:
+                                print(f"  ⚠️ F&O expiry day — position sizes reduced to {expiry_factor:.0%}")
+
+                            # V4: PCR update (alongside regime, every 30 min)
+                            pcr_data = None
+                            try:
+                                kite_raw = getattr(client, '_kite', None)
+                                if kite_raw:
+                                    nifty_tick = client.get_last_tick("NIFTY 50")
+                                    spot = nifty_tick.ltp if nifty_tick else None
+                                    pcr_data = compute_pcr(kite_raw, spot)
+                                    if pcr_data:
+                                        print(f"  📉 PCR: {pcr_data.summary}")
+                            except Exception:
+                                pcr_data = None
+
+                            watchlist = discovery.get_ranked_watchlist()
+                            
+                            if watchlist:
+                                print(f"\n[{datetime.now(IST).strftime('%H:%M:%S')}] V2 Discovery Watchlist ({len(watchlist)} candidates):")
+                                for ds in watchlist:
+                                    print(f"  {ds.symbol} [{ds.direction}] Score={ds.total_score:.1f} Sources={ds.sources}")
+                                
+                                for ds in watchlist:
+                                    sym = ds.symbol
+                                    if sym in daily_traded_symbols:
+                                        continue
+                                    if risk_state.trades_taken >= risk_cfg.max_trades_per_day:
+                                        print(f"Risk: max_trades_per_day reached. Stopping.")
+                                        break
+                                    
+                                    # Get intraday bars for scoring
+                                    bars = get_intraday_bars_for_symbol(sym, lookback_minutes=70)
+                                    if not bars or len(bars) < 5:
+                                        continue
+                                    
+                                    # Fetch daily data for scoring
+                                    try:
+                                        from src.sources.nse_prices import fetch_daily_ohlcv
+                                        daily_df = fetch_daily_ohlcv(sym, days=252)
+                                    except Exception:
+                                        daily_df = None
+                                    
+                                    # Get Nifty change for relative strength
+                                    nifty_pct = 0.0
+                                    nifty_tick = client.get_last_tick("NIFTY 50")
+                                    if nifty_tick:
+                                        nifty_snap = client.get_snapshot(["NIFTY 50"])
+                                        if "NIFTY 50" in nifty_snap:
+                                            ns = nifty_snap["NIFTY 50"]
+                                            if ns.ohlc.get("open", 0) > 0:
+                                                nifty_pct = (ns.ltp - ns.ohlc["open"]) / ns.ohlc["open"] * 100
+                                    
+                                    # Score the candidate
+                                    if ds.direction == "LONG":
+                                        tech_score = scorer.score_long(sym, daily_df, bars, nifty_pct)
+                                    else:
+                                        tech_score = scorer.score_short(sym, daily_df, bars, nifty_pct)
+                                    
+                                    print(f"  → {tech_score.summary}")
+                                    logging.info(f"TechScore: {tech_score.summary}")
+                                    
+                                    # V3: Apply time-of-day adjustment
+                                    adjusted_score = adjust_score_for_time(tech_score.total, datetime.now(IST))
+                                    tech_score.total = adjusted_score
+                                    
+                                    # V4: Apply macro score modifier
+                                    if macro_ctx:
+                                        macro_mod = macro_ctx.get_score_modifier()
+                                        tech_score.total = tech_score.total * macro_mod
+                                        if macro_mod != 1.0:
+                                            print(f"    Macro modifier: {macro_mod:.2f}x → adjusted score={tech_score.total:.0f}")
+                                    
+                                    # Check threshold
+                                    if not meets_entry_threshold(tech_score, market_regime.trend):
+                                        logging.info(f"{sym} score {tech_score.total:.0f} below threshold for {market_regime.trend} regime")
+                                        continue
+                                    
+                                    # V3: Time-of-day hard gate
+                                    if not time_ok:
+                                        print(f"  ⏰ {sym} passed score but blocked by time gate: {time_reason}")
+                                        continue
+                                    
+                                    # Catalyst analysis (LLM)
+                                    try:
+                                        catalyst = catalyst_analyzer.analyze(
+                                            symbol=sym, ltp=ds.ltp, pct_change=ds.pct_change,
+                                            volume=ds.volume, direction=ds.direction,
+                                            headline=ds.catalyst_headline,
+                                        )
+                                        print(f"  → Catalyst: {catalyst.catalyst_summary} (Remaining: {catalyst.estimated_remaining_move}%)")
+                                        logging.info(f"Catalyst {sym}: {catalyst.catalyst_type} conf={catalyst.confidence}")
+                                        
+                                        # Skip if remaining move is too small
+                                        if catalyst.estimated_remaining_move < 0.5:
+                                            print(f"  → Skipping {sym}: estimated remaining move only {catalyst.estimated_remaining_move}%")
+                                            continue
+                                    except Exception as ce:
+                                        logging.warning(f"Catalyst analysis failed for {sym}: {ce}")
+                                        catalyst = None
+                                    
+                                    # Compute ATR-based stop and position size
+                                    ltp = bars[-1].close
+                                    atr_val = compute_atr(bars, period=14)
+                                    stop_dist = compute_stop_distance(atr_val) if atr_val > 0 else ltp * 0.015
+                                    # Cap stop at 2.5% max loss
+                                    max_stop = ltp * 0.025
+                                    stop_dist = min(stop_dist, max_stop)
+                                    
+                                    if ds.direction == "LONG":
+                                        stop_price = round(ltp - stop_dist, 2)
+                                    else:
+                                        stop_price = round(ltp + stop_dist, 2)
+                                    
+                                    qty = compute_atr_position_size(risk_cfg.per_trade_capital_rupees, stop_dist) if stop_dist > 0 else 1
+                                    
+                                    # V3: Apply F&O expiry factor
+                                    qty = max(1, int(qty * expiry_factor))
+                                    
+                                    # V3: Trading costs viability check
+                                    breakeven_pct = compute_breakeven_move_pct(qty, ltp)
+                                    expected_move = catalyst.estimated_remaining_move if catalyst else 1.0
+                                    if not is_trade_viable(qty, ltp, expected_move):
+                                        print(f"  💰 {sym}: breakeven={breakeven_pct:.3f}%, expected={expected_move:.1f}% — cost ratio too high, skipping")
+                                        continue
+                                    
+                                    # V4: Order book depth check
+                                    tick_raw = client.get_last_tick(sym)
+                                    if tick_raw and hasattr(tick_raw, 'bid') and hasattr(tick_raw, 'ask'):
+                                        depth_data = {"buy": [{"price": tick_raw.bid or 0, "quantity": 0, "orders": 0}],
+                                                      "sell": [{"price": tick_raw.ask or 0, "quantity": 0, "orders": 0}]}
+                                        depth = analyze_depth(sym, depth_data, ltp)
+                                        if should_skip_illiquid(depth):
+                                            print(f"  🚨 {sym}: ILLIQUID (spread {depth.bid_ask_spread_pct:.3f}%) — skipping")
+                                            continue
+                                        depth_mod = get_depth_score_modifier(depth, ds.direction)
+                                        if depth_mod != 1.0:
+                                            tech_score.total *= depth_mod
+                                            print(f"    Depth modifier: {depth_mod:.2f}x ({depth.signal})")
+                                    
+                                    # V4: PCR modifier for LONG/SHORT
+                                    pcr_mod = get_pcr_score_modifier(pcr_data)
+                                    if pcr_mod != 1.0:
+                                        tech_score.total *= pcr_mod
+                                        pcr_label = pcr_data.signal if pcr_data else "n/a"
+                                        print(f"    PCR modifier: {pcr_mod:.2f}x (PCR={pcr_label})")
+                                    
+                                    # V3: Circuit limit check
+                                    prev_close = ds.prev_close if ds.prev_close > 0 else ltp
+                                    if ds.direction == "LONG":
+                                        circuit_ok, circuit_reason = is_safe_to_enter_long(sym, prev_close, ltp)
+                                    else:
+                                        circuit_ok, circuit_reason = is_safe_to_enter_short(sym, prev_close, ltp)
+                                    if not circuit_ok:
+                                        print(f"  🚫 {sym}: {circuit_reason}")
+                                        continue
+                                    
+                                    # V3: Sector concentration check
+                                    open_symbols = [p.symbol for p in positions.get_open_positions()]
+                                    sector_ok, sector_reason = check_sector_concentration(sym, open_symbols)
+                                    if not sector_ok:
+                                        print(f"  🏭 {sym}: {sector_reason}")
+                                        continue
+                                    
+                                    # V4: Bulk/block deal check (institutional interest)
+                                    deal_sig = get_deal_signal(sym)
+                                    if deal_sig == "INSTITUTIONAL_SELL" and ds.direction == "LONG":
+                                        print(f"  🏦 {sym}: Institutional SELL deal detected — skipping LONG")
+                                        continue
+                                    elif deal_sig == "INSTITUTIONAL_BUY" and ds.direction == "SHORT":
+                                        print(f"  🏦 {sym}: Institutional BUY deal detected — skipping SHORT")
+                                        continue
+                                    elif deal_sig == "INSTITUTIONAL_BUY" and ds.direction == "LONG":
+                                        print(f"  🏦 {sym}: Institutional BUY confirmed — extra conviction")
+                                    
+                                    # Execute trade
+                                    if ds.direction == "LONG":
+                                        sym_stats = SymbolStats(symbol=sym, last_price=ltp, avg_daily_turnover_rupees=ds.volume * ltp if ds.volume > 0 else 5_000_000.0)
+                                        if not allow_new_long(sym_stats, market_regime, risk_cfg):
+                                            continue
+                                        result = executor.execute_buy(symbol=sym, ltp=ltp, qty=qty, market_regime=market_regime)
+                                        if result.success:
+                                            risk_state.trades_taken += 1
+                                            daily_traded_symbols.add(sym)
+                                            positions.on_buy_fill(
+                                                symbol=sym, qty=result.filled_qty, price=result.avg_price or ltp,
+                                                mode="INTRADAY", strategy="V2_DISCOVERY_LONG",
+                                                initial_stop_price=stop_price, atr=atr_val,
+                                            )
+                                            print(f"  ✅ EXECUTED LONG: {qty}x {sym} @ {ltp:.2f} SL={stop_price:.2f}")
+                                    else:  # SHORT
+                                        result = executor.execute_short_sell(symbol=sym, ltp=ltp, qty=qty)
+                                        if result.success:
+                                            risk_state.trades_taken += 1
+                                            daily_traded_symbols.add(sym)
+                                            positions.on_short_fill(
+                                                symbol=sym, qty=result.filled_qty, price=result.avg_price or ltp,
+                                                mode="INTRADAY", strategy="V2_DISCOVERY_SHORT",
+                                                initial_stop_price=stop_price, atr=atr_val,
+                                            )
+                                            print(f"  ✅ EXECUTED SHORT: {qty}x {sym} @ {ltp:.2f} SL={stop_price:.2f}")
+                                    
+                                    cat_meta = {"catalyst": catalyst.catalyst_type, "remaining": catalyst.estimated_remaining_move} if catalyst else {}
+                                    log_execution(exec_logger, symbol=sym, ltp=ltp, result=result,
+                                                  meta={"strategy": f"V2_{ds.direction}", "tech_score": tech_score.total, "stop": stop_price, "atr": atr_val, **cat_meta})
+                        except Exception as e:
+                            logging.error(f"V2 Discovery pipeline error: {e}")
+                            import traceback; traceback.print_exc()
+
+                        # ── Antigravity state machine (legacy, still runs in parallel) ──
                         try:
                             signals = watcher.tick(
                                 bars_provider=get_intraday_bars_for_symbol,
                                 now=datetime.now(IST),
                             )
                             if signals:
-                                # Example placeholder: treat everything as neutral for now
-                                market_regime = load_daily_regime() # Load regime here
                                 signals_log_path = os.path.join(LOG_DIR, "antigravity_signals.csv")
                                 file_exists = os.path.isfile(signals_log_path)
                                 with open(signals_log_path, "a", encoding="utf-8") as f:
@@ -242,49 +511,51 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                     for sig in signals:
                                         fmt = f"{sig['timestamp'].isoformat()},{sig['symbol']},{sig['vwap']},{sig['ltp']},{sig['z_score']},{sig['volume']},{sig['event']},\"{sig['note']}\"\n"
                                         f.write(fmt)
-                                        print(f"\n*** NEW ANTIGRAVITY BUY SIGNAL EMITTED: {sig['symbol']} ***\n")
+                                        print(f"\n*** ANTIGRAVITY BUY SIGNAL: {sig['symbol']} ***")
                                         
                                         sym = sig.get('symbol')
                                         ltp = sig.get('ltp')
-                                        direction = "LONG"  # antigravity signals are always LONG
-                                        if not sym or ltp is None: continue
-                                        
-                                        if sym in daily_traded_symbols:
-                                            logging.info(f"Skipping {sym}: already traded today.")
-                                            continue
-                                        if risk_state.trades_taken >= risk_cfg.max_trades_per_day:
-                                            print(f"Risk constraint: max_trades_per_day reached.")
-                                            continue
+                                        if not sym or ltp is None or sym in daily_traded_symbols: continue
+                                        if risk_state.trades_taken >= risk_cfg.max_trades_per_day: continue
 
-                                        # Compute ATR-based stop and position size from live bar store
                                         bars = get_intraday_bars_for_symbol(sym, lookback_minutes=70)
                                         atr_val = compute_atr(bars, period=14)
-                                        stop_dist = compute_stop_distance(atr_val) if atr_val > 0 else ltp * 0.01
-                                        stop_price = round(ltp - stop_dist, 2)    # LONG stop below entry
+                                        stop_dist = compute_stop_distance(atr_val) if atr_val > 0 else ltp * 0.015
+                                        stop_dist = min(stop_dist, ltp * 0.025)
+                                        stop_price = round(ltp - stop_dist, 2)
                                         qty = compute_atr_position_size(risk_cfg.per_trade_capital_rupees, stop_dist) if atr_val > 0 else 1
 
                                         market_regime = load_daily_regime()
-                                        sym_stats = SymbolStats(symbol=sym, last_price=ltp, avg_daily_turnover_rupees=5_000_000.0)
-                                        if not allow_new_long(sym_stats, market_regime, risk_cfg):
-                                            print(f"Risk gate: allow_new_long rejected {sym}.")
-                                            continue
-
                                         result = executor.execute_buy(symbol=sym, ltp=ltp, qty=qty, market_regime=market_regime)
                                         if result.success:
                                             risk_state.trades_taken += 1
                                             daily_traded_symbols.add(sym)
                                             positions.on_buy_fill(
-                                                symbol=sym, qty=result.filled_qty, price=result.avg_price,
-                                                mode="INTRADAY", strategy=sig.get("strategy", "ANTIGRAVITY"),
+                                                symbol=sym, qty=result.filled_qty, price=result.avg_price or ltp,
+                                                mode="INTRADAY", strategy="ANTIGRAVITY",
                                                 initial_stop_price=stop_price, atr=atr_val,
-                                                broker_order_id=result.broker_order_id if hasattr(result, 'broker_order_id') else None,
                                             )
                                         log_execution(exec_logger, symbol=sym, ltp=ltp, result=result,
                                                       meta={"strategy": "ANTIGRAVITY", "z_score": sig.get("z_score"), "vwap": sig.get("vwap"), "stop": stop_price, "atr": atr_val})
 
                         except Exception as e:
-                            logging.error(f"Failed to execute Antigravity Watcher tick: {e}")
-                            print(f"\nWatcher tick error: {e}")
+                            logging.error(f"Antigravity tick error: {e}")
+
+                        # ── Position Monitoring (V2) ──
+                        try:
+                            for pos in positions.get_open_positions():
+                                tick = client.get_last_tick(pos.symbol)
+                                if not tick: continue
+                                bars = get_intraday_bars_for_symbol(pos.symbol, lookback_minutes=30)
+                                alerts = pos_monitor.check_position(
+                                    symbol=pos.symbol, entry_price=pos.avg_price,
+                                    side=pos.side, ltp=tick.ltp, intraday_bars=bars,
+                                )
+                                for alert in alerts:
+                                    print(f"  ⚠️ [{alert.severity}] {alert.symbol}: {alert.message}")
+                                    logging.info(f"PosMonitor [{alert.severity}] {alert.symbol}: {alert.message}")
+                        except Exception as e:
+                            logging.error(f"Position monitor error: {e}")
                             
                         # Process Exits — branches correctly on LONG vs SHORT
                         try:
@@ -389,9 +660,29 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
 if __name__ == "__main__":
     import os
     from dotenv import load_dotenv
-    load_dotenv()
+
+    # Load .env — try project root first, then /tmp shadow
+    for _env_path in [".env", "/tmp/voltedge.env"]:
+        if os.path.exists(_env_path):
+            load_dotenv(_env_path)
+            break
+    else:
+        _env_path = ".env"
+
+    # Auto-login: refresh access token headlessly (requires TOTP secret)
+    print("\n🔑 Attempting auto-login...")
+    _token = auto_refresh_access_token(env_file=_env_path)
+    if _token:
+        print(f"🔑 Token refreshed: {_token[:8]}...")
+    else:
+        existing = os.getenv("ZERODHA_ACCESS_TOKEN", "")
+        if existing:
+            print(f"🔑 Using existing token: {existing[:8]}...")
+        else:
+            print("⚠️ No access token available. Set ZERODHA_USER_ID, ZERODHA_PASSWORD, ZERODHA_TOTP_SECRET for auto-login.")
+
     run_loop(
         live_mode=os.getenv("VOLTEDGE_LIVE_MODE", "0") == "1",
-        per_trade_capital=int(float(os.getenv("VOLTEDGE_PER_TRADE_CAPITAL", "300"))),
-        max_trades_per_day=int(os.getenv("VOLTEDGE_MAX_TRADES_PER_DAY", "3"))
+        per_trade_capital=int(float(os.getenv("VOLTEDGE_PER_TRADE_CAPITAL", "5000"))),
+        max_trades_per_day=int(os.getenv("VOLTEDGE_MAX_TRADES_PER_DAY", "5"))
     )

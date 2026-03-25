@@ -6,15 +6,15 @@ class RiskConfig:
     live_mode: bool
     max_trades_per_day: int
     max_daily_loss_rupees: float
-    per_trade_capital_rupees: float  # e.g. 100 or 500 to start
+    per_trade_capital_rupees: float  # Minimum ₹5000 to keep brokerage costs < 1%
     max_open_positions: int
-    intraday_stop_pct: float = 0.01
+    intraday_stop_pct: float = 0.025       # 2.5% hard stop cap
     intraday_exit_time: str = "15:20"
     min_shares_per_trade: int = 1
-    max_shares_per_trade: int = 200
+    max_shares_per_trade: int = 500
     weak_market_size_factor: float = 0.5
     strong_market_size_factor: float = 1.0
-    min_avg_daily_turnover_rupees: float = 2000000.0
+    min_avg_daily_turnover_rupees: float = 2_000_000.0
     min_price_rupees: float = 50.0
 
 def load_risk_config() -> RiskConfig:
@@ -38,25 +38,25 @@ def load_risk_config() -> RiskConfig:
         max_trades = 5
         
     try:
-        max_positions = int(os.getenv("VOLTEDGE_MAX_OPEN_POSITIONS", "3"))
+        max_positions = int(os.getenv("VOLTEDGE_MAX_OPEN_POSITIONS", "5"))
     except ValueError:
-        max_positions = 3
+        max_positions = 5
         
     # Safely cast floats with a fallback
     try:
-        max_loss = float(os.getenv("VOLTEDGE_MAX_DAILY_LOSS", "500.0"))
+        max_loss = float(os.getenv("VOLTEDGE_MAX_DAILY_LOSS", "2500.0"))
     except ValueError:
-        max_loss = 500.0
+        max_loss = 2500.0
         
     try:
-        trade_capital = float(os.getenv("VOLTEDGE_PER_TRADE_CAPITAL", "100.0"))
+        trade_capital = float(os.getenv("VOLTEDGE_PER_TRADE_CAPITAL", "5000.0"))
     except ValueError:
-        trade_capital = 100.0
+        trade_capital = 5000.0
         
     try:
-        stop_pct = float(os.getenv("VOLTEDGE_INTRADAY_STOP_PCT", "0.01"))
+        stop_pct = float(os.getenv("VOLTEDGE_INTRADAY_STOP_PCT", "0.025"))
     except ValueError:
-        stop_pct = 0.01
+        stop_pct = 0.025
         
     exit_time = os.getenv("VOLTEDGE_INTRADAY_EXIT_TIME", "15:20")
     

@@ -2,10 +2,10 @@ import logging
 import os
 from src.trading.orders import OrderResult
 
-LOG_PATH = os.path.join("logs", "executions.log")
+LOG_PATH = os.path.join("/tmp/voltedge_logs", "executions.log")
 
 def get_executions_logger() -> logging.Logger:
-    os.makedirs("logs", exist_ok=True)
+    os.makedirs("/tmp/voltedge_logs", exist_ok=True)
     logger = logging.getLogger("executions")
     # Only adding the handler if it hasn't been attached yet to prevent duplicate lines
     if not logger.handlers:

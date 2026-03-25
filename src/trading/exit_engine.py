@@ -35,6 +35,7 @@ from src.data_ingestion.market_live import KiteLiveClient
 logger = logging.getLogger(__name__)
 
 TRAIL_ATR_MULTIPLIER = 1.0   # trail at 1×ATR from the running extreme
+WIDE_TRAIL_ATR_MULTIPLIER = 1.5  # V2: widened trail for strong trends
 
 
 @dataclass
@@ -99,9 +100,19 @@ class ExitEngine:
                 if pos.side == "LONG" and ltp <= pos.trailing_stop_price:
                     reason = "BREAKEVEN_STOP" if pos.breakeven_activated else "TRAILING_STOP"
                     signals.append(self._make_signal(pos, ltp, reason))
+                    continue
                 elif pos.side == "SHORT" and ltp >= pos.trailing_stop_price:
                     reason = "BREAKEVEN_STOP" if pos.breakeven_activated else "TRAILING_STOP"
                     signals.append(self._make_signal(pos, ltp, reason))
+                    continue
+
+            # ── 5. V2: Smart exit checks (only if position has been open > 10 min) ──
+            mins_open = (now - pos.entry_time).total_seconds() / 60 if pos.entry_time else 0
+            if mins_open >= 10:
+                # Momentum exhaustion: long tailing off at highs
+                if self._check_exhaustion_exit(pos, ltp):
+                    signals.append(self._make_signal(pos, ltp, "MOMENTUM_EXHAUSTION"))
+                    continue
 
         return signals
 
@@ -114,10 +125,11 @@ class ExitEngine:
         one_r = pos.risk_unit()
 
         if pos.side == "LONG":
-            unrealized = (ltp - pos.avg_price) * pos.total_qty
+            # Per-share unrealized gain (NOT total ₹ — must match one_r units)
+            per_share_gain = ltp - pos.avg_price
 
             # Breakeven activation: price moved 1R in our favour
-            if not pos.breakeven_activated and one_r > 0 and unrealized >= one_r:
+            if not pos.breakeven_activated and one_r > 0 and per_share_gain >= one_r:
                 pos.trailing_stop_price = pos.avg_price
                 pos.breakeven_activated = True
                 logger.info(
@@ -137,10 +149,11 @@ class ExitEngine:
                         )
 
         elif pos.side == "SHORT":
-            unrealized = (pos.avg_price - ltp) * pos.total_qty
+            # Per-share unrealized gain (NOT total ₹)
+            per_share_gain = pos.avg_price - ltp
 
             # Breakeven activation
-            if not pos.breakeven_activated and one_r > 0 and unrealized >= one_r:
+            if not pos.breakeven_activated and one_r > 0 and per_share_gain >= one_r:
                 pos.trailing_stop_price = pos.avg_price
                 pos.breakeven_activated = True
                 logger.info(
@@ -158,6 +171,53 @@ class ExitEngine:
                         logger.info(
                             f"[TRAIL] {pos.symbol} SHORT trail lowered → {pos.trailing_stop_price:.2f}"
                         )
+
+    def _check_exhaustion_exit(self, pos: Position, ltp: float) -> bool:
+        """
+        V2: Check if the move is exhausted.
+        For LONG: if price has given back > 50% of unrealized peak gain and
+        breakeven is activated, tighten to market exit.
+        """
+        if not pos.breakeven_activated:
+            return False
+
+        if pos.side == "LONG":
+            if pos.highest_price and pos.highest_price > pos.avg_price:
+                peak_gain = pos.highest_price - pos.avg_price
+                current_gain = ltp - pos.avg_price
+                if peak_gain > 0 and current_gain / peak_gain < 0.4:
+                    # Given back > 60% of the peak — momentum is dead
+                    logger.info(f"[EXIT] {pos.symbol} exhaustion: gave back 60%+ of peak gain")
+                    return True
+        elif pos.side == "SHORT":
+            if pos.lowest_price and pos.lowest_price < pos.avg_price:
+                peak_gain = pos.avg_price - pos.lowest_price
+                current_gain = pos.avg_price - ltp
+                if peak_gain > 0 and current_gain / peak_gain < 0.4:
+                    logger.info(f"[EXIT] {pos.symbol} SHORT exhaustion: gave back 60%+ of peak gain")
+                    return True
+        return False
+
+    def widen_trail_for_strong_trend(self, pos: Position, ltp: float) -> None:
+        """
+        V2: For stocks in a strong trend (volume accelerating, no nearby resistance),
+        widen the trail from 1.0×ATR to 1.5×ATR to let winners run.
+        Call this externally when the PositionMonitor detects strong trend conditions.
+        """
+        atr = pos.atr or 0.0
+        if atr <= 0 or not pos.breakeven_activated:
+            return
+
+        if pos.side == "LONG" and pos.highest_price:
+            new_trail = pos.highest_price - (WIDE_TRAIL_ATR_MULTIPLIER * atr)
+            if pos.trailing_stop_price is None or new_trail > pos.trailing_stop_price:
+                pos.trailing_stop_price = round(new_trail, 2)
+                logger.info(f"[TRAIL-WIDE] {pos.symbol} trail widened to {pos.trailing_stop_price:.2f} (1.5xATR)")
+        elif pos.side == "SHORT" and pos.lowest_price:
+            new_trail = pos.lowest_price + (WIDE_TRAIL_ATR_MULTIPLIER * atr)
+            if pos.trailing_stop_price is None or new_trail < pos.trailing_stop_price:
+                pos.trailing_stop_price = round(new_trail, 2)
+                logger.info(f"[TRAIL-WIDE] {pos.symbol} SHORT trail widened to {pos.trailing_stop_price:.2f}")
 
     def _make_signal(self, pos: Position, ltp: float, reason: str) -> ExitSignal:
         side = "SELL" if pos.side == "LONG" else "COVER"

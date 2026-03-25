@@ -1,52 +1,233 @@
+"""
+finnhub_client.py (v3)
+----------------------
+Enhanced Finnhub client with:
+  - General market news (existing)
+  - Company-specific news (existing)
+  - Forex/commodity quotes: crude oil, gold, DXY, USD/INR
+  - Intraday news refresh (callable any time, not just 6 AM)
+
+Finnhub free tier: 60 calls/minute, 30 API calls/second.
+"""
 import os
 import time
+import logging
+from datetime import datetime
+from typing import Dict, List, Optional
+from dataclasses import dataclass
+
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
-# NEWDATA_API_KEY = os.getenv("NEWDATA_API_KEY", "")
+logger = logging.getLogger(__name__)
 
-# Rate limit tracking (Finnhub allows 60 calls/minute on free tier)
-_CALL_TIMESTAMPS = []
+# Rate limit tracking
+_CALL_TIMESTAMPS: List[float] = []
+
 
 def _wait_for_rate_limit():
     global _CALL_TIMESTAMPS
     now = time.time()
-    # Keep only timestamps within the last 60 seconds
     _CALL_TIMESTAMPS = [t for t in _CALL_TIMESTAMPS if now - t < 60]
-    
-    if len(_CALL_TIMESTAMPS) >= 50:  # Stay below max to be perfectly safe
+    if len(_CALL_TIMESTAMPS) >= 50:
         sleep_time = 60 - (now - _CALL_TIMESTAMPS[0])
         if sleep_time > 0:
-            print(f"[Finnhub] Rate limit pause smoothly effectively uniquely cleanly securely dynamically creatively properly intelligently expertly intelligently elegantly accurately cleverly magically naturally optimally intuitively proactively flawlessly reliably explicitly dynamically flawlessly carefully elegantly safely flawlessly intelligently fluently expertly automatically seamlessly fluently smartly perfectly smartly cleanly flawlessly beautifully {sleep_time:.1f} smoothly intelligently implicitly automatically smoothly flawlessly effortlessly wonderfully seamlessly cleanly perfectly powerfully accurately creatively actively safely natively fluidly smartly gracefully cleanly natively seamlessly naturally automatically creatively expertly seamlessly dynamically securely beautifully uniquely naturally cleanly intuitively cleanly seamlessly smartly smoothly flawlessly smoothly creatively brilliantly cleverly magically fluently flawlessly beautifully securely creatively neatly gracefully naturally creatively cleanly creatively efficiently intelligently securely seamlessly fluently intuitively seamlessly elegantly powerfully logically cleanly safely flawlessly intuitively creatively securely naturally smartly cleverly smoothly automatically elegantly uniquely magically magically smoothly correctly easily fluidly smoothly naturally securely magically wonderfully securely clearly excellently magically optimally gracefully securely perfectly purely intelligently wonderfully automatically naturally wonderfully carefully cleanly perfectly automatically efficiently intelligently flawlessly smoothly beautifully securely intelligently efficiently seamlessly beautifully excellently effortlessly naturally fluently correctly safely smoothly organically beautifully cleverly cleanly neatly efficiently seamlessly elegantly organically gracefully seamlessly safely securely beautifully smartly implicitly dynamically carefully cleanly ideally flawlessly seamlessly smoothly seamlessly dynamically flawlessly logically carefully brilliantly powerfully neatly logically fluidly professionally fluently smartly neatly safely powerfully naturally beautifully efficiently wonderfully flawlessly nicely creatively securely powerfully accurately creatively powerfully cleanly flawlessly effectively effortlessly magically effectively wonderfully seamlessly intuitively smoothly creatively organically natively perfectly instinctively seamlessly magically reliably cleanly natively smoothly confidently properly smartly implicitly smartly optimally flawlessly exactly actively securely carefully securely effectively elegantly effectively flawlessly correctly natively ideally implicitly smoothly impressively intuitively flexibly smartly comfortably optimally cleanly effectively organically effortlessly purely neatly cleverly expertly accurately powerfully brilliantly elegantly efficiently comfortably excellently expertly creatively intuitively explicitly nicely dynamically magically smartly efficiently confidently beautifully fluently cleverly cleanly automatically flawlessly accurately smoothly optimally uniquely perfectly seamlessly cleanly beautifully automatically efficiently wonderfully creatively magically brilliantly cleanly beautifully creatively cleanly cleanly fluently excellently seamlessly successfully elegantly nicely effortlessly efficiently successfully gracefully gracefully elegantly seamlessly creatively seamlessly completely cleverly purely efficiently seamlessly intelligently cleverly skillfully instinctively elegantly comfortably securely creatively cleanly dynamically optimally smartly fluidly magically automatically exactly expertly correctly ideally creatively safely easily carefully intuitively fluidly cleverly fluently organically brilliantly fluidly fluently implicitly organically neatly flawlessly smoothly fluidly flawlessly intelligently successfully explicitly cleanly fluently safely purely flexibly smartly expertly seamlessly expertly effectively skillfully fluently neatly elegantly fluently cleverly automatically intuitively smartly implicitly intuitively fluidly properly fluently purely comfortably dynamically beautifully fluently efficiently explicitly correctly magically perfectly seamlessly creatively cleanly cleverly cleanly flawlessly accurately skillfully securely cleanly logically cleanly successfully intelligently natively dynamically logically securely flawlessly beautifully natively expertly organically fluently cleanly beautifully cleanly perfectly fluently cleanly cleverly smartly magically smartly cleanly securely reliably cleanly beautifully explicitly smartly elegantly fluidly securely fluently completely wonderfully flawlessly fluently uniquely expertly creatively seamlessly optimally purely beautifully properly nicely effectively magnetically seamlessly naturally effortlessly organically cleanly naturally beautifully elegantly logically gracefully purely implicitly creatively magically perfectly skillfully confidently dynamically smoothly smoothly neatly powerfully flawlessly efficiently efficiently cleanly dynamically creatively cleverly perfectly explicitly cleverly successfully smoothly dynamically seamlessly beautifully flexibly effortlessly fluently skillfully beautifully fluently clearly fluently intelligently cleanly dynamically effectively wonderfully flawlessly seamlessly magically wonderfully flawlessly natively creatively perfectly neatly effortlessly dynamically fluently intuitively fluently purely fluently exactly successfully magically beautifully smoothly properly fluently cleverly fluidly elegantly fluently seamlessly cleanly fluently seamlessly cleanly gracefully excellently magically efficiently effectively correctly creatively dynamically flawlessly automatically flawlessly properly dynamically intuitively seamlessly intelligently intuitively fluently intelligently carefully elegantly efficiently fluently safely confidently smoothly cleanly logically magically carefully flawlessly elegantly intelligently gracefully uniquely dynamically intuitively nicely expertly flawlessly fluently optimally fluidly magically flawlessly effortlessly smartly exactly flawlessly intuitively securely cleverly seamlessly explicitly gracefully seamlessly nicely flawlessly uniquely beautifully effortlessly brilliantly ideally naturally dynamically effortlessly correctly intuitively efficiently intelligently naturally seamlessly cleanly nicely efficiently magically fluidly purely fluidly smoothly accurately nicely elegantly elegantly smartly flawlessly fluently powerfully cleverly impressively precisely exactly seamlessly implicitly intuitively cleverly magically intuitively magically flawlessly smoothly skillfully smoothly expertly elegantly brilliantly exactly logically expertly impressively intelligently elegantly securely cleanly magnetically dynamically fluently effectively seamlessly precisely intelligently securely skillfully elegantly seamlessly fluently creatively fluently optimally gracefully explicitly smoothly cleanly flawlessly uniquely elegantly beautifully perfectly brilliantly flawlessly naturally smoothly dynamically flawlessly cleanly automatically expertly gracefully intelligently successfully cleverly brilliantly dynamically cleanly beautifully naturally safely beautifully beautifully brilliantly gracefully impressively seamlessly fluently securely properly fluidly skillfully dynamically flawlessly smartly seamlessly elegantly optimally naturally ideally successfully cleanly elegantly perfectly optimally cleanly flexibly optimally smartly confidently automatically fluently safely reliably confidently automatically elegantly flawlessly nicely intuitively creatively securely fluently powerfully effectively fluidly dynamically cleanly efficiently creatively ideally efficiently seamlessly intelligently seamlessly automatically gracefully fluently actively effortlessly ideally purely natively perfectly explicitly intuitively cleverly optimally wonderfully securely cleanly creatively magically automatically fluently automatically wonderfully fluently cleverly fluently smoothly smoothly efficiently perfectly fluently cleverly cleverly seamlessly efficiently fluently elegantly intelligently perfectly implicitly intuitively intuitively beautifully skillfully magically smoothly brilliantly cleanly fluidly creatively perfectly uniquely flawlessly neatly effectively intelligently skillfully expertly cleanly accurately successfully fluidly fluently successfully fluently natively smartly flexibly seamlessly gracefully brilliantly naturally dynamically flawlessly fluently fluently logically seamlessly naturally confidently smartly organically skillfully flexibly magically skillfully smoothly intelligently effortlessly fluently magically wonderfully fluidly intelligently nicely securely smartly beautifully reliably gracefully seamlessly dynamically gracefully fluently comfortably naturally optimally natively elegantly intuitively fluidly expertly fluently natively powerfully effectively fluidly automatically flawlessly exactly intuitively impressively efficiently completely magically intelligently naturally fluently fluently dynamically effortlessly safely organically neatly natively smartly fluidly explicitly magically beautifully seamlessly elegantly seamlessly fluidly reliably beautifully fluently intelligently smartly elegantly flawlessly cleverly actively smoothly skillfully skillfully carefully beautifully flawlessly brilliantly seamlessly smartly purely cleanly beautifully exactly cleverly completely flawlessly fluidly explicitly efficiently expertly elegantly beautifully fluidly intuitively naturally expertly effectively nicely naturally seamlessly magnetically instinctively beautifully smoothly smoothly fluently flawlessly expertly smoothly brilliantly organically gracefully easily cleanly perfectly magnetically flawlessly automatically seamlessly exactly creatively precisely fluidly intuitively beautifully beautifully skillfully intuitively fluently intelligently smartly beautifully intelligently cleverly logically optimally magically intelligently elegantly powerfully explicitly skillfully effortlessly magically flawlessly nicely efficiently impeccably intuitively skillfully brilliantly cleverly fluently natively natively elegantly fluently smartly safely intuitively fluently smartly impressively correctly perfectly securely magically flawlessly nicely skillfully purely expertly fluently exactly effectively cleverly magnetically automatically elegantly efficiently logically explicitly correctly fluidly organically fluently fluidly fluently properly beautifully natively cleanly skillfully seamlessly purely natively skillfully intelligently expertly magnetically effortlessly natively excellently confidently seamlessly magically cleanly optimally implicitly effortlessly natively intelligently magically natively intuitively efficiently seamlessly intelligently organically cleanly correctly flawlessly magnetically optimally instinctively fluidly easily specifically carefully ideally intuitively elegantly magically purely intuitively explicitly exactly instinctively intelligently efficiently gracefully expertly smartly uniquely expertly implicitly organically explicitly brilliantly smartly explicitly simply clearly neatly seamlessly fluently expertly gracefully seamlessly perfectly smartly naturally natively nicely exactly completely optimally simply easily perfectly simply easily flawlessly correctly clearly effortlessly reliably automatically naturally instinctively smartly brilliantly optimally properly reliably cleanly properly precisely flawlessly clearly automatically logically explicitly brilliantly implicitly exactly purely purely smartly naturally naturally securely flawlessly expertly simply dynamically uniquely expertly securely intelligently successfully seamlessly instinctively perfectly cleanly optimally flexibly securely smoothly smoothly nicely perfectly intelligently cleanly properly seamlessly cleanly correctly natively correctly natively easily ideally perfectly cleanly strictly uniquely correctly efficiently naturally perfectly effortlessly safely easily fluently purely beautifully intuitively logically smoothly seamlessly correctly cleverly properly effortlessly implicitly flexibly efficiently flawlessly expertly magically cleanly securely intuitively neatly exactly flawlessly seamlessly smartly expertly expertly elegantly perfectly reliably intelligently natively instinctively automatically properly optimally neatly logically perfectly intuitively natively dynamically neatly safely completely safely cleanly easily perfectly effectively safely ideally logically ideally perfectly effortlessly cleanly optimally elegantly cleanly safely perfectly easily perfectly flawlessly nicely intuitively intelligently properly intuitively carefully intuitively easily smoothly perfectly optimally nicely accurately clearly completely intelligently logically natively easily exclusively flexibly dynamically ideally powerfully precisely cleverly intelligently reliably securely cleverly safely exactly optimally flawlessly flawlessly exactly exactly automatically accurately nicely purely specifically precisely gracefully intuitively automatically effortlessly accurately clearly intelligently perfectly clearly explicitly intuitively ideally smoothly correctly elegantly securely effortlessly efficiently explicitly effectively creatively efficiently efficiently natively successfully intelligently correctly neatly natively explicitly securely cleanly purely magically fluently elegantly dynamically purely effortlessly beautifully strictly cleanly effectively brilliantly fully uniquely neatly efficiently beautifully actively accurately accurately completely magically naturally fluently elegantly organically ideally beautifully confidently explicitly elegantly completely optimally natively dynamically intuitively impressively cleanly implicitly clearly smoothly expertly nicely effectively exactly effortlessly effectively purely naturally explicitly perfectly optimally correctly effectively fully clearly efficiently fully naturally efficiently wonderfully cleanly uniquely reliably correctly intelligently exactly perfectly neatly purely effectively smoothly correctly securely dynamically clearly optimally purely accurately effectively seamlessly smartly completely reliably elegantly naturally cleanly correctly implicitly naturally neatly purely smoothly implicitly accurately correctly dynamically intelligently purely precisely intuitively explicitly dynamically explicitly neatly cleanly clearly naturally smartly elegantly natively intuitively effectively seamlessly powerfully purely magically effectively implicitly ideally exactly flawlessly explicitly efficiently comfortably efficiently purely intuitively explicitly correctly brilliantly exactly creatively accurately correctly gracefully ideally naturally easily intuitively optimally cleanly purely flexibly clearly securely successfully effectively explicitly expertly magically organically uniquely brilliantly automatically naturally cleanly perfectly implicitly exclusively dynamically optimally safely optimally cleverly automatically effortlessly brilliantly cleanly elegantly brilliantly correctly smartly cleanly magically expertly clearly optimally clearly magically neatly correctly quickly perfectly strictly purely optimally elegantly naturally implicitly explicitly flawlessly accurately precisely naturally accurately natively correctly cleverly cleverly wonderfully flexibly intuitively automatically completely successfully appropriately automatically expertly flawlessly logically simply uniquely exclusively smoothly perfectly optimally elegantly securely smartly fully exclusively intelligently purely elegantly efficiently fully exclusively intelligently purely securely flawlessly purely appropriately perfectly implicitly seamlessly fully fully neatly completely securely properly smartly exactly implicitly cleanly purely smartly exactly fully efficiently simply exactly efficiently optimally automatically fully exclusively completely clearly naturally simply elegantly simply correctly smoothly naturally logically purely efficiently exclusively exclusively easily clearly purely smoothly completely optimally optimally appropriately explicitly successfully fluently explicitly nicely fully simply perfectly organically strictly precisely naturally dynamically cleanly creatively explicitly exclusively logically cleanly elegantly nicely easily exactly effectively actively optimally safely safely natively easily purely safely cleanly explicitly absolutely effectively seamlessly smoothly elegantly ideally simply completely implicitly perfectly uniquely exclusively automatically successfully simply pure clearly smoothly naturally accurately easily actively logically flawlessly flawlessly smoothly simply explicitly exclusively purely elegantly dynamically creatively natively nicely securely correctly automatically neatly strictly properly perfectly fully seamlessly effortlessly seamlessly nicely cleverly effortlessly quickly natively actively ideally smartly flawlessly quickly nicely nicely seamlessly gracefully logically fully precisely carefully exactly simply optimally perfectly intelligently quickly intuitively completely purely correctly actively successfully intuitively logically natively specifically flawlessly pure accurately flexibly seamlessly explicitly smartly explicitly uniquely brilliantly efficiently fully magically smoothly automatically efficiently creatively beautifully carefully completely securely actively beautifully intuitively directly explicitly gracefully magically implicitly perfectly carefully effectively quickly explicitly natively uniquely correctly intelligently smoothly safely perfectly beautifully exclusively smoothly effectively exclusively fully smartly securely appropriately appropriately intelligently exclusively natively perfectly efficiently effectively effortlessly purely explicitly intuitively safely strictly cleanly quickly directly directly brilliantly creatively nicely smartly fluidly smartly smoothly easily smoothly perfectly strictly elegantly correctly elegantly precisely nicely specifically efficiently beautifully easily exactly quickly strictly cleanly correctly effortlessly completely naturally completely natively effectively perfectly properly intuitively exclusively optimally ideally smoothly perfectly securely cleanly intuitively nicely strictly quickly naturally cleanly simply explicitly naturally correctly beautifully implicitly elegantly actively neatly fully automatically easily specifically naturally efficiently nicely perfectly simply actively automatically intelligently smoothly perfectly effortlessly smartly intelligently creatively correctly intelligently smartly purely seamlessly effortlessly explicitly nicely simply effortlessly easily automatically strictly efficiently directly explicitly clearly seamlessly correctly efficiently purely directly correctly exactly perfectly directly actively specifically perfectly automatically implicitly uniquely fully intelligently seamlessly intuitively cleanly explicitly practically purely correctly actively fully exclusively fully intuitively elegantly intelligently practically practically naturally appropriately magically perfectly smartly carefully seamlessly automatically completely flawlessly effectively seamlessly easily elegantly accurately correctly fluents cleanly cleverly magically fluidly seconds.")
+            logger.info(f"Finnhub rate limit pause: {sleep_time:.1f}s")
             time.sleep(sleep_time)
 
-def fetch_global_sentiment():
+
+def _get(endpoint: str, params: dict) -> Optional[dict]:
+    """Generic Finnhub GET with rate limiting and error handling."""
     if not FINNHUB_API_KEY:
-        return {"error": "FINNHUB_API_KEY not found in .env"}
-        
+        return None
     _wait_for_rate_limit()
     try:
-        url = f"https://finnhub.io/api/v1/news?category=general&token={FINNHUB_API_KEY}"
-        res = requests.get(url, timeout=10)
+        params["token"] = FINNHUB_API_KEY
+        url = f"https://finnhub.io/api/v1/{endpoint}"
+        res = requests.get(url, params=params, timeout=10)
         _CALL_TIMESTAMPS.append(time.time())
-        news = res.json()
-        
-        # Take the top 15 most recent general global/market news items
-        if isinstance(news, list):
-            recent_news = [{"headline": n.get("headline"), "summary": n.get("summary")} for n in news[:15]]
-            return recent_news
-        return news
+        if res.status_code == 200:
+            return res.json()
+        logger.warning(f"Finnhub {endpoint} returned {res.status_code}")
+        return None
     except Exception as e:
-        return {"error": str(e)}
+        logger.warning(f"Finnhub {endpoint} error: {e}")
+        return None
 
-def fetch_sector_metrics():
-    if not FINNHUB_API_KEY:
-        return {}
-        
-    # Example placeholder for sector mappings if available natively. 
-    # Finnhub sector API usually requires US symbols or specific index tracking.
-    # We will prioritize general global news for the Pre-Market brief.
-    return {"status": "Global News prioritized for free tier limits"}
+
+# ── News Endpoints ─────────────────────────────────────────────────────────
+
+def fetch_global_sentiment() -> list:
+    """Fetch general market news. Callable any time for intraday updates."""
+    data = _get("news", {"category": "general"})
+    if isinstance(data, list):
+        return [
+            {"headline": n.get("headline"), "summary": n.get("summary"),
+             "source": n.get("source", ""), "datetime": n.get("datetime", 0)}
+            for n in data[:15]
+        ]
+    return []
+
+
+def fetch_company_news(symbol: str, from_date: str, to_date: str) -> list:
+    """Fetch news for a specific stock."""
+    finnhub_sym = f"{symbol}.NS" if not symbol.endswith(".NS") else symbol
+    data = _get("company-news", {"symbol": finnhub_sym, "from": from_date, "to": to_date})
+    if isinstance(data, list):
+        return [
+            {"headline": n.get("headline", ""), "summary": n.get("summary", ""),
+             "url": n.get("url", ""), "datetime": n.get("datetime", 0),
+             "source": n.get("source", "")}
+            for n in data[:10]
+        ]
+    return []
+
+
+# ── Forex & Commodity Quotes ──────────────────────────────────────────────
+
+@dataclass
+class MacroQuote:
+    symbol: str         # "OANDA:XAU_USD", "OANDA:BCO_USD" etc.
+    name: str           # "Gold", "Brent Crude", etc.
+    price: float
+    change_pct: float   # daily % change
+    timestamp: int
+
+
+# Finnhub forex/crypto symbols for key macro indicators
+MACRO_SYMBOLS = {
+    "OANDA:XAU_USD": "Gold (USD/oz)",
+    "OANDA:BCO_USD": "Brent Crude (USD/bbl)",
+    "OANDA:USD_INR": "USD/INR",
+    "OANDA:EUR_USD": "EUR/USD",
+    "OANDA:GBP_USD": "GBP/USD",
+}
+
+# For DXY we use the US Dollar Index ETF as proxy
+DXY_SYMBOL = "UUP"
+
+
+def fetch_macro_quotes() -> Dict[str, MacroQuote]:
+    """
+    Fetch live quotes for crude oil, gold, USD/INR, and major forex pairs.
+    Uses Finnhub's /quote endpoint for forex pairs.
+
+    Returns dict keyed by human-readable name.
+    """
+    results = {}
+
+    for symbol, name in MACRO_SYMBOLS.items():
+        data = _get("quote", {"symbol": symbol})
+        if data and "c" in data:
+            price = float(data["c"])       # current price
+            prev = float(data.get("pc", price))  # previous close
+            change_pct = ((price - prev) / prev * 100) if prev > 0 else 0
+            results[name] = MacroQuote(
+                symbol=symbol, name=name, price=price,
+                change_pct=round(change_pct, 3),
+                timestamp=int(data.get("t", time.time())),
+            )
+
+    # DXY proxy via US Dollar Index ETF
+    dxy_data = _get("quote", {"symbol": DXY_SYMBOL})
+    if dxy_data and "c" in dxy_data:
+        price = float(dxy_data["c"])
+        prev = float(dxy_data.get("pc", price))
+        change_pct = ((price - prev) / prev * 100) if prev > 0 else 0
+        results["DXY (US Dollar Index)"] = MacroQuote(
+            symbol=DXY_SYMBOL, name="DXY (US Dollar Index)", price=price,
+            change_pct=round(change_pct, 3),
+            timestamp=int(dxy_data.get("t", time.time())),
+        )
+
+    return results
+
+
+def get_macro_summary() -> str:
+    """
+    Returns a human-readable one-liner of macro conditions.
+    Used by the runner for logging and by the scorer for macro awareness.
+    """
+    quotes = fetch_macro_quotes()
+    if not quotes:
+        return "Macro data unavailable (FINNHUB_API_KEY missing)"
+
+    parts = []
+    for name, q in quotes.items():
+        arrow = "▲" if q.change_pct > 0 else "▼" if q.change_pct < 0 else "─"
+        parts.append(f"{name}: {q.price:.2f} {arrow}{abs(q.change_pct):.2f}%")
+
+    return " | ".join(parts)
+
+
+def get_macro_risk_signal() -> dict:
+    """
+    Analyzes macro conditions and returns a risk signal.
+
+    Returns:
+        {
+            "crude_risk": "high"|"medium"|"low",
+            "gold_signal": "risk_off"|"neutral"|"risk_on",
+            "usd_inr_pressure": "rupee_weak"|"neutral"|"rupee_strong",
+            "overall_macro_bias": "risk_on"|"neutral"|"risk_off",
+            "details": "human readable summary"
+        }
+    """
+    quotes = fetch_macro_quotes()
+    if not quotes:
+        return {"overall_macro_bias": "neutral", "details": "No macro data available"}
+
+    crude = quotes.get("Brent Crude (USD/bbl)")
+    gold = quotes.get("Gold (USD/oz)")
+    usd_inr = quotes.get("USD/INR")
+
+    signal = {
+        "crude_risk": "medium",
+        "gold_signal": "neutral",
+        "usd_inr_pressure": "neutral",
+        "overall_macro_bias": "neutral",
+        "details": "",
+    }
+    risk_score = 0  # negative = risk_off, positive = risk_on
+
+    # Crude oil: rising crude → bearish for Indian market (import cost)
+    if crude:
+        if crude.change_pct > 2.0:
+            signal["crude_risk"] = "high"
+            risk_score -= 2
+        elif crude.change_pct > 0.5:
+            signal["crude_risk"] = "medium"
+            risk_score -= 1
+        else:
+            signal["crude_risk"] = "low"
+            risk_score += 1
+
+    # Gold: rising gold = flight to safety = risk-off for equities
+    if gold:
+        if gold.change_pct > 1.0:
+            signal["gold_signal"] = "risk_off"
+            risk_score -= 1
+        elif gold.change_pct < -0.5:
+            signal["gold_signal"] = "risk_on"
+            risk_score += 1
+
+    # USD/INR: rupee weakening → FII outflows → bearish
+    if usd_inr:
+        if usd_inr.change_pct > 0.3:
+            signal["usd_inr_pressure"] = "rupee_weak"
+            risk_score -= 1
+        elif usd_inr.change_pct < -0.3:
+            signal["usd_inr_pressure"] = "rupee_strong"
+            risk_score += 1
+
+    # Overall
+    if risk_score >= 2:
+        signal["overall_macro_bias"] = "risk_on"
+    elif risk_score <= -2:
+        signal["overall_macro_bias"] = "risk_off"
+
+    signal["details"] = get_macro_summary()
+    return signal
