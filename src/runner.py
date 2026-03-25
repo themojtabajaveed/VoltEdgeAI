@@ -187,6 +187,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     last_feedback_date  = None
     last_discovery_run  = None
     last_regime_update  = None    # V3: live regime updates
+    last_autopsy_date   = None    # Phase G: EOD autopsy
     scanner_long_symbols:  list = []
     scanner_short_symbols: list = []
     
@@ -704,6 +705,19 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                     if last_report_date != current_date:
                         run_script("reports/market_chronicle.py")
                         last_report_date = current_date
+
+                # 2b. 16:00 — EOD Market Autopsy (pattern learning)
+                if current_time >= dt_time(16, 0) and current_time < dt_time(18, 0):
+                    if last_autopsy_date != current_date:
+                        try:
+                            from src.reports.eod_autopsy import run_eod_autopsy
+                            from kiteconnect import KiteConnect
+                            kite = KiteConnect(api_key=os.getenv("ZERODHA_API_KEY"))
+                            kite.set_access_token(os.getenv("ZERODHA_ACCESS_TOKEN"))
+                            run_eod_autopsy(kite=kite)
+                        except Exception as e:
+                            logging.error(f"EOD Autopsy failed: {e}")
+                        last_autopsy_date = current_date
 
                 # 4. 18:01 — Prediction Feedback Loop (score morning's calls)
                 if current_time >= dt_time(18, 1):

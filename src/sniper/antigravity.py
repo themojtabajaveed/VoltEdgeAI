@@ -36,7 +36,7 @@ def _get_today_start() -> datetime:
     return datetime.now(tz).replace(hour=9, minute=15, second=0, microsecond=0)
 
 def fetch_intraday_history_fallback(symbol: str) -> list[IntradayBar]:
-    """Fetch today's history from Kite (market_history), fallback to yfinance."""
+    """Fetch today's history from Kite (market_history), with graceful degradation."""
     today_start = _get_today_start()
     now = datetime.now(today_start.tzinfo)
     
@@ -58,9 +58,9 @@ def fetch_intraday_history_fallback(symbol: str) -> list[IntradayBar]:
                     ))
                 return bars
         except Exception as e:
-            logger.warning(f"Kite history fetch failed for {symbol}: {e}. Falling back to yfinance.")
+            logger.warning(f"Kite history fetch failed for {symbol}: {e}")
             
-    # Fallback to yfinance
+    # Fallback: try the Kite-powered intraday fetch
     return fetch_intraday_bars(symbol, interval="1m")
 
 class AntigravityStatus(str, Enum):
@@ -133,7 +133,7 @@ def evaluate_symbol(symbol: str) -> AntigravityDecision:
     Fetch live intraday bars mapped over historical backfills, compute VWAPStats, and return Decision.
     """
     try:
-        # 1. Fetch historical from Kite DB/API, breaking into yfinance if failing
+        # 1. Fetch historical from Kite DB/API with graceful degradation
         history_bars = fetch_intraday_history_fallback(symbol)
         
         # 2. Fetch lightning fast live bars from current stream memory

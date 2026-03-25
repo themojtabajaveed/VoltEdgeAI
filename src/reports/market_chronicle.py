@@ -18,9 +18,13 @@ import logging
 from email.message import EmailMessage
 from datetime import datetime, date
 
-from dotenv import load_dotenv
-load_dotenv()
+import sys
+if "." not in sys.path:
+    sys.path.insert(0, ".")
 
+from dotenv import load_dotenv
+load_dotenv("/tmp/voltedge.env")
+load_dotenv()
 logger = logging.getLogger(__name__)
 
 
@@ -208,10 +212,10 @@ List every significant agent event from the decision_timeline in chronological o
 
 ## 3. Trade-by-Trade Analysis
 For each trade in the trades list:
-**{symbol} — {direction} — PnL: ₹{pnl}**
-- Entry: {entry_time} @ ₹{entry_price} | Exit: {exit_time} @ ₹{exit_price}
+**{{symbol}} — {{direction}} — PnL: ₹{{pnl}}**
+- Entry: {{entry_time}} @ ₹{{entry_price}} | Exit: {{exit_time}} @ ₹{{exit_price}}
 - Entry Trigger: [what indicator/strategy triggered this]
-- Exit Reason: {exit_reason}
+- Exit Reason: {{exit_reason}}
 - Assessment: [what went right or wrong with this specific trade]
 
 ## 4. Post-Market Scorecard
@@ -243,10 +247,17 @@ These should be different from the morning brief's directives — these come fro
         report_md = response.text
 
         # ── Save report ─────────────────────────────────────────────────────
-        os.makedirs(os.path.join("logs", "daily_reports"), exist_ok=True)
-        report_path = os.path.join("logs", "daily_reports", f"{today}_chronicle.md")
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(report_md)
+        try:
+            os.makedirs(os.path.join("logs", "daily_reports"), exist_ok=True)
+            report_path = os.path.join("logs", "daily_reports", f"{today}_chronicle.md")
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write(report_md)
+        except Exception as e:
+            logger.warning(f"Could not save to logs/daily_reports: {e}. Falling back to data/")
+            report_path = os.path.join("data", f"{today}_chronicle.md")
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write(report_md)
+        
         print(f"[VoltEdge] Market Chronicle saved to: {report_path}")
 
         # ── Email dispatch ───────────────────────────────────────────────────
