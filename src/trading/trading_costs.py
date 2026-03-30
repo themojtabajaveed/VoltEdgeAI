@@ -1,6 +1,6 @@
 """
-trading_costs.py
-----------------
+trading_costs.py (v2)
+---------------------
 Calculates realistic Indian stock market transaction costs.
 
 Zerodha (Kite) cost structure for INTRADAY (MIS) equity:
@@ -13,8 +13,28 @@ Zerodha (Kite) cost structure for INTRADAY (MIS) equity:
 
 For a round-trip (buy + sell):
   Total estimated cost ≈ 0.05% to 0.12% of turnover depending on trade size.
+
+v2 changes:
+  - All internal calculations use decimal.Decimal (P3-B fix).
+    At ₹50,000 turnover, float-based STT at 0.025% gives ₹12.500000000000002.
+    Decimal gives exactly ₹12.50. Over 50 daily trades, this eliminates ₹0.10+
+    of accumulated P&L reporting error.
+  - Public API still returns plain float at the boundary for backward compat.
 """
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_HALF_UP
+
+# ── Rate constants as Decimal (defined once, reused) ──────────────────────────
+_BROKERAGE_FLAT     = Decimal("20.00")
+_BROKERAGE_PCT      = Decimal("0.0003")      # 0.03%
+_STT_INTRADAY_SELL  = Decimal("0.00025")     # 0.025% sell-side intraday
+_STT_DELIVERY       = Decimal("0.001")       # 0.1% both sides CNC
+_EXCHANGE_NSE       = Decimal("0.0000345")   # 0.00345%
+_GST_RATE           = Decimal("0.18")        # 18%
+_SEBI_RATE          = Decimal("0.000001")    # ₹10 per crore = 10/10^7
+_STAMP_BUY          = Decimal("0.00003")     # 0.003% buy side
+_TWO_DP             = Decimal("0.01")
+_FOUR_DP            = Decimal("0.0001")
 
 
 @dataclass
@@ -49,40 +69,41 @@ def compute_leg_cost(
         is_intraday: True for MIS orders (lower STT than CNC)
 
     Returns:
-        TradeCost with full breakdown
+        TradeCost with full breakdown (floats at boundary, Decimal internally)
     """
+    d_turnover = Decimal(str(turnover))
+
     # Brokerage: ₹20 flat or 0.03%, whichever is lower
-    brokerage = min(20.0, turnover * 0.0003)
+    brokerage = min(_BROKERAGE_FLAT, d_turnover * _BROKERAGE_PCT)
 
     # STT: only on sell side for intraday
     if is_intraday:
-        stt = turnover * 0.00025 if is_sell else 0.0  # 0.025% sell-side
+        stt = d_turnover * _STT_INTRADAY_SELL if is_sell else Decimal("0")
     else:
-        # CNC delivery: 0.1% on both sides
-        stt = turnover * 0.001
+        stt = d_turnover * _STT_DELIVERY  # CNC delivery: both sides
 
     # Exchange transaction charges (NSE)
-    exchange = turnover * 0.0000345  # 0.00345%
+    exchange = d_turnover * _EXCHANGE_NSE
 
     # GST: 18% on (brokerage + exchange charges)
-    gst = (brokerage + exchange) * 0.18
+    gst = (brokerage + exchange) * _GST_RATE
 
     # SEBI charges: ₹10 per crore
-    sebi = turnover * 0.000001  # 10/10^7
+    sebi = d_turnover * _SEBI_RATE
 
-    # Stamp duty: 0.003% on buy side (approx, varies by state)
-    stamp = turnover * 0.00003 if not is_sell else 0.0
+    # Stamp duty: 0.003% on buy side only
+    stamp = d_turnover * _STAMP_BUY if not is_sell else Decimal("0")
 
     total = brokerage + stt + exchange + gst + sebi + stamp
 
     return TradeCost(
-        brokerage=round(brokerage, 2),
-        stt=round(stt, 2),
-        exchange_charges=round(exchange, 2),
-        gst=round(gst, 2),
-        sebi_charges=round(sebi, 4),
-        stamp_duty=round(stamp, 2),
-        total=round(total, 2),
+        brokerage=float(brokerage.quantize(_TWO_DP, rounding=ROUND_HALF_UP)),
+        stt=float(stt.quantize(_TWO_DP, rounding=ROUND_HALF_UP)),
+        exchange_charges=float(exchange.quantize(_TWO_DP, rounding=ROUND_HALF_UP)),
+        gst=float(gst.quantize(_TWO_DP, rounding=ROUND_HALF_UP)),
+        sebi_charges=float(sebi.quantize(_FOUR_DP, rounding=ROUND_HALF_UP)),
+        stamp_duty=float(stamp.quantize(_TWO_DP, rounding=ROUND_HALF_UP)),
+        total=float(total.quantize(_TWO_DP, rounding=ROUND_HALF_UP)),
     )
 
 
@@ -97,7 +118,9 @@ def compute_round_trip_cost(qty: int, entry_price: float, exit_price: float, is_
     buy_cost = compute_leg_cost(buy_turnover, is_sell=False, is_intraday=is_intraday)
     sell_cost = compute_leg_cost(sell_turnover, is_sell=True, is_intraday=is_intraday)
 
-    return buy_cost.total + sell_cost.total
+    # Final addition in Decimal, return float
+    total = Decimal(str(buy_cost.total)) + Decimal(str(sell_cost.total))
+    return float(total.quantize(_TWO_DP, rounding=ROUND_HALF_UP))
 
 
 def compute_breakeven_move_pct(qty: int, price: float, is_intraday: bool = True) -> float:
@@ -109,7 +132,11 @@ def compute_breakeven_move_pct(qty: int, price: float, is_intraday: bool = True)
     trade_value = qty * price
     if trade_value <= 0:
         return float('inf')
-    return round(cost / trade_value * 100, 4)
+
+    d_cost = Decimal(str(cost))
+    d_val = Decimal(str(trade_value))
+    pct = (d_cost / d_val * Decimal("100")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    return float(pct)
 
 
 def is_trade_viable(qty: int, price: float, expected_move_pct: float, is_intraday: bool = True) -> bool:

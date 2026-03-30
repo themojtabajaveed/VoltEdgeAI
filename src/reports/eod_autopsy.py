@@ -405,16 +405,18 @@ def _generate_report(analyses: list, today: date) -> str:
 
 # ── Main Orchestrator ─────────────────────────────────────────────────────
 
-def run_eod_autopsy(kite=None):
+def run_eod_autopsy(kite=None, traded_symbols: set = None, viper_symbols: list = None):
     """
     Main orchestrator. Runs at 16:00 IST.
 
     Args:
-        kite: KiteConnect instance (for fetching historical data).
-              If None, tries to create one from env.
+        kite:            KiteConnect instance (for fetching historical data).
+                         If None, tries to create one from env.
+        traded_symbols:  Set of symbols actually traded today (from runner).
+        viper_symbols:   VIPER watchlist symbols (from runner).
     """
     from dotenv import load_dotenv
-    load_dotenv("/tmp/voltedge.env")
+    load_dotenv()
     load_dotenv()
 
     import zoneinfo
@@ -452,6 +454,15 @@ def run_eod_autopsy(kite=None):
             logger.error(f"Failed to initialize Kite client: {e}")
             return
 
+    # ── Step 0b: Build token map ONCE from cached CSV (avoids 20x kite.instruments() calls) ──
+    _token_map: dict = {}
+    try:
+        from src.data_ingestion.instruments import load_instruments_csv, build_symbol_token_map
+        _token_map = build_symbol_token_map(load_instruments_csv())
+        logger.info(f"Token map loaded: {len(_token_map)} symbols")
+    except Exception as e:
+        logger.warning(f"Could not load token map from CSV: {e} — will attempt live lookup")
+
     # ── Step 1: Fetch top movers ──────────────────────────────────────────
     try:
         from src.sniper.momentum_scanner import fetch_top_movers
@@ -462,8 +473,7 @@ def run_eod_autopsy(kite=None):
         print(f"  📉 Losers:  {[c.symbol for c in losers]}")
     except Exception as e:
         logger.error(f"Failed to fetch top movers: {e}")
-        print(f"  ❌ Could not fetch movers: {e}")
-        return
+        gainers, losers = [], []
 
     # ── Step 2: Analyze each mover ────────────────────────────────────────
     analyses = []
@@ -484,18 +494,23 @@ def run_eod_autopsy(kite=None):
             print(f"\n  🔬 Analyzing {sym} ({direction})...")
 
             # A) Fetch intraday data from Kite (5-min candles, full day)
+            # Uses pre-built token map — no per-symbol kite.instruments() call
             bars_df = None
             try:
-                from_dt = datetime.combine(today, datetime.min.time())
-                to_dt = datetime.combine(today, datetime.max.time())
-                historical = kite.historical_data(
-                    instrument_token=_resolve_token(kite, sym),
-                    from_date=from_dt,
-                    to_date=to_dt,
-                    interval="5minute",
-                )
-                if historical:
-                    bars_df = pd.DataFrame(historical)
+                token = _token_map.get(sym) or _resolve_token(kite, sym, _token_map)
+                if token:
+                    from_dt = datetime.combine(today, datetime.min.time())
+                    to_dt = datetime.combine(today, datetime.max.time())
+                    historical = kite.historical_data(
+                        instrument_token=token,
+                        from_date=from_dt,
+                        to_date=to_dt,
+                        interval="5minute",
+                    )
+                    if historical:
+                        bars_df = pd.DataFrame(historical)
+                else:
+                    logger.warning(f"No token found for {sym} — skipping historical fetch")
             except Exception as e:
                 logger.warning(f"Could not fetch Kite historical for {sym}: {e}")
 
@@ -577,8 +592,27 @@ def run_eod_autopsy(kite=None):
     print(f"{'='*60}\n")
 
 
-def _resolve_token(kite, symbol: str) -> int:
-    """Resolve NSE instrument token for a symbol."""
+def _resolve_token(kite, symbol: str, cached_map: dict = None) -> int:
+    """
+    Resolve NSE instrument token for a symbol.
+    Prefers the pre-built cached_map to avoid live API calls.
+    """
+    # 1. Try pre-built map first (fast, no API call)
+    if cached_map:
+        token = cached_map.get(symbol, 0)
+        if token:
+            return token
+    # 2. Fallback: CSV (still no live API call)
+    try:
+        from src.data_ingestion.instruments import load_instruments_csv, build_symbol_token_map
+        df = load_instruments_csv()
+        token_map = build_symbol_token_map(df)
+        token = token_map.get(symbol, 0)
+        if token:
+            return token
+    except Exception:
+        pass
+    # 3. Last resort: live API (slow — only if CSV is missing/stale)
     try:
         instruments = kite.instruments("NSE")
         for inst in instruments:
@@ -586,14 +620,7 @@ def _resolve_token(kite, symbol: str) -> int:
                 return inst["instrument_token"]
     except Exception:
         pass
-    # Fallback: try loading from cached CSV
-    try:
-        from src.data_ingestion.instruments import load_instruments_csv, build_symbol_token_map
-        df = load_instruments_csv()
-        token_map = build_symbol_token_map(df)
-        return token_map.get(symbol, 0)
-    except Exception:
-        return 0
+    return 0
 
 
 if __name__ == "__main__":

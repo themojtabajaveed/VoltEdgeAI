@@ -62,3 +62,5 @@ urllib3==2.6.3
 websockets==16.0
 zope.interface
 pyotp>=2.9.0
+groq>=0.12.0
+openai>=1.40.0

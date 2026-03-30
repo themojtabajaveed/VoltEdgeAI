@@ -1,9 +1,14 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional, Dict, List
+from typing import TYPE_CHECKING, Optional, Dict, List, Callable
+import queue
 import threading
 import logging
 import os
+
+if TYPE_CHECKING:
+    # Imported only for type hints — avoids circular import at runtime.
+    from src.trading.exit_engine import ExitEngine
 
 try:
     from kiteconnect import KiteConnect, KiteTicker
@@ -60,7 +65,13 @@ class KiteLiveClient:
         # We need a way to map instrument_token to symbol
         self._token_to_symbol: Dict[int, str] = {}
         self._symbol_to_token: Dict[str, int] = {}
-        
+
+        # Push pipeline: _on_ticks enqueues; BarBuilderThread drains.
+        # SimpleQueue is lock-free for the SPSC (single-producer single-consumer)
+        # pattern: Twisted reactor thread produces, BarBuilderThread consumes.
+        # maxsize=0 means unbounded — intentional, we never want to drop ticks.
+        self._tick_queue: queue.SimpleQueue = queue.SimpleQueue()
+
         if symbol_to_token:
             self.set_instrument_mapping(symbol_to_token)
 
@@ -74,11 +85,16 @@ class KiteLiveClient:
         self._ticker.on_reconnect = self._on_reconnect
 
     def _on_ticks(self, ws, ticks):
+        """
+        Runs in Twisted reactor thread. Must be O(1) — no heavy work here.
+        Resolves symbol, builds Tick, updates _last_ticks for get_last_tick(),
+        then enqueues into _tick_queue for the BarBuilderThread to drain.
+        """
         with self._lock:
             for t in ticks:
                 token = t['instrument_token']
                 symbol = self._token_to_symbol.get(token, str(token))
-                
+
                 # Parse timestamp safely
                 ts = t.get('timestamp')
                 if not ts:
@@ -88,7 +104,7 @@ class KiteLiveClient:
                         ts = datetime.fromisoformat(ts)
                     except ValueError:
                         ts = datetime.now()
-                
+
                 tick_obj = Tick(
                     symbol=symbol,
                     instrument_token=token,
@@ -97,9 +113,29 @@ class KiteLiveClient:
                     timestamp=ts,
                     oi=t.get('oi', None),
                     bid=t['depth']['buy'][0]['price'] if 'depth' in t and t['depth']['buy'] else None,
-                    ask=t['depth']['sell'][0]['price'] if 'depth' in t and t['depth']['sell'] else None
+                    ask=t['depth']['sell'][0]['price'] if 'depth' in t and t['depth']['sell'] else None,
                 )
+                # Keep last-tick map current for instant lookups (e.g., ExitEngine)
                 self._last_ticks[symbol] = tick_obj
+
+        # Enqueue OUTSIDE the lock — SimpleQueue.put() is already thread-safe
+        # and we must not hold _lock while blocking on queue operations.
+        for t in ticks:
+            token = t['instrument_token']
+            # Re-resolve symbol (cheap dict lookup, lock not needed: read-only after init)
+            symbol = self._token_to_symbol.get(token)
+            if symbol:
+                # Push raw tick dict so BarBuilderThread reconstructs the Tick object
+                # (avoids sharing mutable Tick objects across threads)
+                self._tick_queue.put_nowait({
+                    'symbol': symbol,
+                    'ltp': t.get('last_price', 0.0),
+                    'volume': t.get('volume_traded', 0),
+                    'timestamp': t.get('timestamp'),
+                    'oi': t.get('oi'),
+                    'bid': t['depth']['buy'][0]['price'] if 'depth' in t and t['depth']['buy'] else None,
+                    'ask': t['depth']['sell'][0]['price'] if 'depth' in t and t['depth']['sell'] else None,
+                })
 
     def _on_connect(self, ws, response):
         self.logger.info("Kite WebSocket connected.")
@@ -181,6 +217,93 @@ class KiteLiveClient:
         """Return most recent Tick for a symbol, or None if no data yet."""
         with self._lock:
             return self._last_ticks.get(symbol)
+
+    def drain_tick_queue(self, max_items: int = 500) -> List[dict]:
+        """
+        Non-blocking drain of the tick queue.
+        Called by BarBuilderThread in a tight loop.
+        Returns up to max_items raw tick dicts.
+        """
+        items: List[dict] = []
+        try:
+            for _ in range(max_items):
+                items.append(self._tick_queue.get_nowait())
+        except queue.Empty:
+            pass
+        return items
+
+    def start_bar_builder_thread(
+        self,
+        bar_builder: "BarBuilder",
+        exit_engine: Optional["ExitEngine"] = None,
+        exit_signal_queue: Optional[queue.SimpleQueue] = None,
+    ) -> threading.Thread:
+        """
+        Start the dedicated BarBuilder consumer thread.
+        This replaces the bar_builder_worker polling loop in runner.py.
+
+        Optimisation 1 — event-driven exit detection:
+          If exit_engine and exit_signal_queue are provided, the thread calls
+          exit_engine.check_tick(symbol, ltp) on every incoming tick and pushes
+          any ExitSignal onto exit_signal_queue for the main runner to drain.
+          This reduces stop-loss detection latency from ~1s → <1ms.
+
+        The thread:
+          - Drains _tick_queue in a tight loop with a 10ms sleep when idle
+          - Calls bar_builder.on_tick() for each raw tick dict
+          - Runs as daemon — dies automatically when the main process exits
+        """
+        def _worker():
+            import time as _time
+            self.logger.info("[BarBuilderThread] started — event-driven push pipeline active")
+            while True:
+                try:
+                    items = self.drain_tick_queue(max_items=200)
+                    if items:
+                        for raw in items:
+                            ts = raw.get('timestamp')
+                            if not ts:
+                                ts = datetime.now()
+                            elif isinstance(ts, str):
+                                try:
+                                    ts = datetime.fromisoformat(ts)
+                                except ValueError:
+                                    ts = datetime.now()
+                            tick = Tick(
+                                symbol=raw['symbol'],
+                                instrument_token=0,  # not needed by BarBuilder
+                                ltp=raw['ltp'],
+                                volume=raw['volume'],
+                                timestamp=ts,
+                                oi=raw.get('oi'),
+                                bid=raw.get('bid'),
+                                ask=raw.get('ask'),
+                            )
+                            bar_builder.on_tick(tick)
+
+                            # ── Optimisation 1: tick-level stop-loss check ──
+                            # check_tick() is O(1) — dict lookup + 2 float comparisons.
+                            # Signals are queued for main thread execution (broker
+                            # calls must never happen in this daemon thread).
+                            if exit_engine is not None and exit_signal_queue is not None:
+                                try:
+                                    sig = exit_engine.check_tick(tick.symbol, tick.ltp)
+                                    if sig is not None:
+                                        exit_signal_queue.put_nowait(sig)
+                                except Exception as _ex:
+                                    self.logger.error(
+                                        f"[BarBuilderThread] check_tick error: {_ex}"
+                                    )
+                    else:
+                        # Idle — sleep briefly to avoid busy-waiting
+                        _time.sleep(0.01)  # 10ms — well below 1-min bar resolution
+                except Exception as exc:
+                    self.logger.error(f"[BarBuilderThread] error: {exc}")
+                    _time.sleep(0.1)
+
+        t = threading.Thread(target=_worker, name="BarBuilderThread", daemon=True)
+        t.start()
+        return t
 
     def get_snapshot(self, symbols: List[str]) -> Dict[str, Snapshot]:
         """Use Kite quote API to get a one-time snapshot for up to 500 symbols."""

@@ -101,6 +101,29 @@ def generate_pre_market_brief():
         logger.error("GEMINI_API_KEY not set — cannot generate brief.")
         return
 
+    # ── Fetch yesterday's NSE top movers as a real data anchor ────────────────
+    # This prevents Gemini from defaulting to hardcoded blue-chip names.
+    nse_movers_context = "(NSE top movers data unavailable — using Finnhub/search only)"
+    try:
+        from src.data_ingestion.nse_scraper import get_nse_top_gainers_losers
+        movers = get_nse_top_gainers_losers()
+        if movers:
+            g_str = ", ".join(f"{m['symbol']} ({m.get('pct_change',0):+.1f}%)" for m in movers.get('gainers', [])[:5])
+            l_str = ", ".join(f"{m['symbol']} ({m.get('pct_change',0):+.1f}%)" for m in movers.get('losers', [])[:5])
+            nse_movers_context = f"Yesterday's NSE Top Gainers: {g_str}\nYesterday's NSE Top Losers: {l_str}"
+    except Exception as e:
+        logger.warning(f"NSE movers fetch failed: {e}")
+        # Fallback: try momentum_scanner with yesterday's access token env
+        try:
+            from src.sniper.momentum_scanner import fetch_top_movers
+            movers = fetch_top_movers()
+            if movers.get('gainers') or movers.get('losers'):
+                g_str = ", ".join(f"{c.symbol} ({c.pct_change:+.1f}%)" for c in movers.get('gainers', [])[:5])
+                l_str = ", ".join(f"{c.symbol} ({c.pct_change:+.1f}%)" for c in movers.get('losers', [])[:5])
+                nse_movers_context = f"Yesterday's NSE Top Gainers: {g_str}\nYesterday's NSE Top Losers: {l_str}"
+        except Exception:
+            pass
+
     client = genai.Client(api_key=api_key)
 
     prompt = f"""You are VoltEdge's senior pre-market analyst with 20+ years of experience in Indian equity markets.
@@ -132,23 +155,33 @@ For each major global event above, state the DIRECT impact on Indian sectors:
 | Event | Affected Indian Sector/Stock | Expected Impact | Reasoning |
 |-------|------------------------------|-----------------|-----------|
 
-## 3. Today's 5 Stock Predictions
-Provide exactly 5 specific NSE stock calls. For each:
-| Symbol | Direction (Bullish/Bearish) | Key Level to Watch | Reason (1 sentence) |
-|--------|----------------------------|--------------------|----------------------|
+## 3. Yesterday's NSE Movers Context
+{nse_movers_context}
 
-## 4. VoltEdge Tactical Directives
+## 4. Today's 5 Stock Predictions
+Select 5 SPECIFIC NSE stocks that are most likely to move today, based on:
+- The overnight global events and sector impacts above
+- The NSE movers context (momentum/reversal candidates)
+- Specific catalysts you found via web search
+Do NOT default to large-caps unless they have a specific catalyst.
+
+| Symbol | Direction (Bullish/Bearish) | Key Level to Watch | Reason (1 sentence, mention the catalyst) |
+|--------|----------------------------|--------------------|-------------------------------------------|
+
+## 5. VoltEdge Tactical Directives
 Provide exactly 3 concrete rules for today's trading engine:
 1. [Directive 1]
 2. [Directive 2]
 3. [Directive 3]
 
-## 5. Risk Regime Assessment
+## 6. Risk Regime Assessment
 State overall market bias for today.
 
 ---
 
-At the very end, output this JSON block (used by the trading engine):
+At the very end, output this JSON block (used by the trading engine).
+Fill predictions with the SAME 5 stocks from Section 4 — use their actual NSE trading symbols.
+Do NOT use placeholder/example symbols.
 ```json
 {{
   "trend": "bullish|bearish|sideways",
@@ -156,11 +189,11 @@ At the very end, output this JSON block (used by the trading engine):
   "top_sectors_long": ["SECTOR1", "SECTOR2"],
   "top_sectors_short": ["SECTOR3"],
   "predictions": [
-    {{"symbol": "RELIANCE", "direction": "bullish", "key_level": 1450.0, "reason": "one sentence"}},
-    {{"symbol": "INFY", "direction": "bearish", "key_level": 1750.0, "reason": "one sentence"}},
-    {{"symbol": "HDFCBANK", "direction": "bullish", "key_level": 1900.0, "reason": "one sentence"}},
-    {{"symbol": "BHARTIARTL", "direction": "bullish", "key_level": 1620.0, "reason": "one sentence"}},
-    {{"symbol": "AXISBANK", "direction": "sideways", "key_level": 1080.0, "reason": "one sentence"}}
+    {{"symbol": "ACTUAL_NSE_SYMBOL_1", "direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}},
+    {{"symbol": "ACTUAL_NSE_SYMBOL_2", "direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}},
+    {{"symbol": "ACTUAL_NSE_SYMBOL_3", "direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}},
+    {{"symbol": "ACTUAL_NSE_SYMBOL_4", "direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}},
+    {{"symbol": "ACTUAL_NSE_SYMBOL_5", "direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}}
   ]
 }}
 ```

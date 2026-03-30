@@ -1,6 +1,6 @@
 # VoltEdgeAI
 
-**Autonomous Intraday Trading Engine for Indian Markets (NSE)**
+**Autonomous Intraday Trading Engine for Indian Markets (NSE) — v3 (TA Interpretation Layer)**
 
 VoltEdgeAI is a fully automated, AI-powered intraday trading system that runs 24/7 on a VM. It handles everything from pre-market intelligence gathering to live trade execution, position management, and post-market analysis — with zero manual intervention.
 
@@ -46,7 +46,7 @@ VoltEdgeAI is a fully automated, AI-powered intraday trading system that runs 24
 
 ---
 
-## Module Reference
+ ## Module Reference
 
 ### Core Engine (`src/`)
 
@@ -91,7 +91,7 @@ VoltEdgeAI is a fully automated, AI-powered intraday trading system that runs 24
 | Module | Purpose |
 |--------|---------|
 | `executor.py` | Buy/Sell/Short/Cover via Kite orders API |
-| `exit_engine.py` | Stop-loss, trailing stop, take-profit, time-based exits |
+| `exit_engine.py` | Stop-loss, trailing stop, take-profit, time-based exits, **RSI divergence trail tighten, MACD distribution 50% partial exit** |
 | `positions.py` | Position book — tracks open positions, fills, P&L |
 | `position_monitor.py` | Real-time alerts (drawdown, momentum loss, time warnings) |
 | `sizing.py` | ATR-based position sizing with max capital checks |
@@ -250,6 +250,41 @@ WantedBy=multi-user.target
 - **Liquidity check**: Level 2 order book analysis (hard skip if illiquid)
 - **Circuit breaker**: Auto-skip stocks near circuit limits
 - **Time-of-day guard**: No new entries in last 30 min before close
+- **ADX regime gate**: -5 hard penalty on conviction score when ADX < 20 (choppy market kills marginal trades)
+- **RSI divergence exit**: Trailing stop tightened to entry on bearish RSI divergence (LONG positions only)
+- **MACD distribution exit**: 50% partial exit when MACD bearish + histogram worsening + volume shrinking
+
+---
+
+## TA Interpretation Layer v3
+
+The TA engine (shared across HYDRA + VIPER) was overhauled in 2026-03-30 to add 6 research-backed improvements:
+
+| Feature | Where | What It Does |
+|---------|---------|--------------|
+| **Regime-Aware Weighting** | `hydra.py`, `viper_rules.py` | 5-regime classifier (TRENDING/BREAKOUT/RANGING/EXHAUSTION/NORMAL) dynamically scales per-component point caps |
+| **Bollinger Band Squeeze** | `technical_body.py` → `hydra.py`, `viper_rules.py` | 20-period SMA ± 2σ bands; squeeze threshold 3.5%; awards breakout/squeeze bonus |
+| **RSI Embedded Momentum** | `viper_rules.py` | RSI 70–85 = institutional "embedded" strength (+4 pts), not overbought signal |
+| **RSI Divergence Exit** | `exit_engine.py` | Bearish RSI divergence (price high, RSI lower) tightens trailing stop to breakeven |
+| **OBV Accumulation/Distribution** | `technical_body.py` → `viper_rules.py` | Cumulative OBV + divergence detectors; +3 pts bonus on hidden accumulation/distribution |
+| **ADX Hard Gate** | `hydra.py`, `viper_rules.py` | ADX < 20 → -5 hard penalty; kills choppy-market entries more aggressively than soft multipliers |
+| **MACD Distribution Exit** | `exit_engine.py` | Bearish MACD + worsening histogram + low volume → 50% PARTIAL_EXIT |
+
+**All existing TA fields on `TechnicalSnapshot`:**
+
+```
+EMAs:      ema9, ema20, ema50, ema200, ema_alignment
+RSI:       rsi14
+MACD:      macd_line, macd_signal, macd_hist, macd_histogram, macd_histogram_prev, macd_crossover_bullish
+VWAP:      vwap, above_vwap
+ADX:       adx, plus_di, minus_di
+ORB:       orb_high, orb_low, orb_breakout, orb_breakdown
+Volume:    volume_avg, volume_current, volume_spike_ratio
+ATR:       atr14
+BB:        bb_upper, bb_lower, bb_mid, bb_width, bb_squeeze      ← v3
+OBV:       obv, obv_bullish_div, obv_bearish_div                 ← v3
+Price:     last_price, day_high, day_low, day_open
+```
 
 ---
 

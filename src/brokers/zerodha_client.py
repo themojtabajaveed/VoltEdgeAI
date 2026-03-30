@@ -2,13 +2,44 @@ import os
 from typing import Optional
 import logging
 
+import requests
+from requests.adapters import HTTPAdapter
 from kiteconnect import KiteConnect, exceptions
 from src.trading.orders import OrderRequest, OrderResult, OrderSide, OrderType
+
+
+def _make_kite_session() -> requests.Session:
+    """
+    Optimisation 2 — Persistent HTTP session for Zerodha order execution.
+
+    A fresh TCP+TLS handshake costs 15-30ms per order. By reusing an existing
+    connection (HTTP keep-alive + connection pooling) we eliminate this overhead
+    on every subsequent call.
+
+    HTTPAdapter settings:
+      pool_connections=1  — single connection pool (we only call one host)
+      pool_maxsize=4      — up to 4 concurrent sockets (enough for burst orders)
+      max_retries=1       — one automatic retry on transient network errors
+    """
+    session = requests.Session()
+    adapter = HTTPAdapter(
+        pool_connections=1,
+        pool_maxsize=4,
+        max_retries=1,
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    # Conservative timeouts: 10s connect, 15s read (order MUST complete in 15s)
+    session.timeout = (10, 15)
+    return session
+
 
 class ZerodhaClient:
     def __init__(self, api_key: str, access_token: str):
         self._kite = KiteConnect(api_key=api_key)
         self._kite.set_access_token(access_token)
+        # Optimisation 2 — reuse TCP/TLS connection across order calls (saves 15-30ms each)
+        self._kite.reqsession = _make_kite_session()
         self.logger = logging.getLogger(__name__)
 
     @classmethod

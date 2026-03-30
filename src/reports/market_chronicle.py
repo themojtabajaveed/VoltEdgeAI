@@ -23,7 +23,7 @@ if "." not in sys.path:
     sys.path.insert(0, ".")
 
 from dotenv import load_dotenv
-load_dotenv("/tmp/voltedge.env")
+load_dotenv()
 load_dotenv()
 logger = logging.getLogger(__name__)
 
@@ -161,7 +161,35 @@ def _fetch_db_context(today: date) -> dict:
         }
 
 
-def generate_market_chronicle(target_date: date | None = None) -> None:
+def _extract_dragon_events_from_log(log_tail: str) -> str:
+    """
+    Pull HYDRA/VIPER/EXIT/CONFLUENCE events from the runner log tail.
+    These are the events the Dragon Architecture produced today that never
+    made it into the DB's DecisionRecord table.
+    """
+    import re
+    relevant_lines = []
+    patterns = [
+        r"HYDRA", r"VIPER", r"CONFLUENCE", r"EXIT", r"SL_HIT", r"TP_HIT",
+        r"TRAILING", r"COIL", r"BUY \d+x", r"SHORT \d+x", r"EXECUTE",
+        r"Regime=", r"\[RSI DIV\]", r"MACD_DISTRIBUTION", r"PARTIAL_EXIT",
+        r"Grok", r"conviction=",
+    ]
+    combined = "|".join(patterns)
+    for line in log_tail.splitlines():
+        if re.search(combined, line, re.IGNORECASE):
+            relevant_lines.append(line.strip())
+    if not relevant_lines:
+        return "(No Dragon Architecture events found in log — may be first trading day)"
+    return "\n".join(relevant_lines[-60:])  # Last 60 relevant lines
+
+
+def generate_market_chronicle(
+    target_date=None,
+    traded_symbols: set = None,
+    hydra_candidates: list = None,
+    viper_candidates: list = None,
+) -> None:
     from google import genai
     from google.genai import types
 
@@ -182,10 +210,24 @@ def generate_market_chronicle(target_date: date | None = None) -> None:
     morning_brief   = _read_morning_brief(today)
     prediction_ctx  = _load_prediction_log_context(today)
     # Try both known log locations
-    runner_log_tail = _read_file_tail("/tmp/voltedge_logs/runner.log", n_lines=80)
+    runner_log_tail = _read_file_tail("/tmp/voltedge_logs/runner.log", n_lines=150)
     if "not found" in runner_log_tail:
-        runner_log_tail = _read_file_tail("logs/runner.log", n_lines=80)
+        runner_log_tail = _read_file_tail("logs/runner.log", n_lines=150)
     db_ctx          = _fetch_db_context(today)
+
+    # Build focused Dragon Architecture event timeline from log
+    dragon_events = _extract_dragon_events_from_log(runner_log_tail)
+
+    # Build context about what the system was watching/trading today
+    focus_context = ""
+    if traded_symbols:
+        focus_context += f"\n**Symbols actually traded today:** {', '.join(sorted(traded_symbols))}"
+    if hydra_candidates:
+        syms = [c.get('symbol', '?') if isinstance(c, dict) else getattr(c, 'symbol', '?') for c in hydra_candidates[:8]]
+        focus_context += f"\n**HYDRA watchlist (events watched):** {', '.join(syms)}"
+    if viper_candidates:
+        syms = [c.get('symbol', '?') if isinstance(c, dict) else getattr(c, 'symbol', '?') for c in viper_candidates[:8]]
+        focus_context += f"\n**VIPER watchlist (movers watched):** {', '.join(syms)}"
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -197,6 +239,7 @@ def generate_market_chronicle(target_date: date | None = None) -> None:
     prompt = f"""You are VoltEdge's post-market chronicle analyst — a senior trader reviewing today's entire session.
 
 Today: {today}
+{focus_context}
 
 ## This Morning's Brief (what we predicted):
 {morning_brief}
@@ -209,12 +252,19 @@ Today: {today}
 {json.dumps(db_ctx, indent=2)}
 ```
 
-## System Log (last 80 lines from runner.log):
+## Dragon Architecture Events (HYDRA + VIPER signals from runner log):
+```
+{dragon_events}
+```
+
+## System Log — Last 150 lines:
 ```
 {runner_log_tail}
 ```
 
-Generate the Market Chronicle in EXACTLY this format. Be specific, factual, and professional:
+Generate the Market Chronicle in EXACTLY this format. Be specific, factual, and professional.
+IMPORTANT: For Section 2, use the Dragon Architecture Events log above — NOT the decision_timeline from the DB (which is populated by the old V1 pipeline, now inactive).
+If traded_symbols above is empty, state "No trades executed today" rather than inventing trades.
 
 ---
 
@@ -225,10 +275,10 @@ Compare what was predicted this morning against what the market actually did.
 Be honest — state which calls were right, which were wrong, and why.
 
 ## 2. Intraday Agent Timeline
-List every significant agent event from the decision_timeline in chronological order:
+Based on the Dragon Architecture Events log, list every significant event chronologically:
 | Time | Symbol | Event | System Reaction |
-|------|--------|-------|-----------------|
-(Include: signal fires, trade entries, stop-loss hits, breakeven activations, exits)
+|------|--------|---------|-----------------|
+(Include: HYDRA events, VIPER strikes, stop-loss hits, trailing stop adjustments, exits, Grok orchestrator decisions)
 
 ## 3. Trade-by-Trade Analysis
 For each trade in the trades list:
