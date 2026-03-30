@@ -282,6 +282,24 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                 grok_last_actions = []
                 reset_streaming_state()
                 exit_engine._divergence_warned.clear()
+                
+                # ── Fix 24/7 Autonomous Token Rollover ──
+                logging.info(f"Generating fresh access token for {current_date}")
+                print(f"🔑 Attempting daily auto-login for new session: {current_date}...")
+                new_token = auto_refresh_access_token()
+                if new_token:
+                    os.environ["ZERODHA_ACCESS_TOKEN"] = new_token
+                    print(f"✅ Token refreshed successfully for new day: {new_token[:8]}...")
+                    # Rebuild Live Client to swap in the new WebSocket ticket
+                    try:
+                        client.stop()
+                    except Exception:
+                        pass
+                    client = make_default_live_client(symbol_to_token=active_map)
+                else:
+                    logging.critical("DAILY AUTO-LOGIN FAILED! Engine will not be able to trade today.")
+                    print("❌ DAILY AUTO-LOGIN FAILED.")
+
                 logging.info(f"Resetting DailyRiskState + HYDRA + Grok orchestrator for new session: {current_date}")
             
             if is_weekday:

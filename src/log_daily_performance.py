@@ -7,7 +7,7 @@ to the daily_performance_snapshots table.
 
 Previously used yfinance — fully replaced by Kite API as of Phase H.
 """
-from datetime import date
+from datetime import date, datetime
 from typing import List
 
 import pandas as pd
