@@ -30,3 +30,4 @@ VoltEdgeAI-daily-reports/
 .env
 logs/
 voltedgeai.db
+.env
