@@ -1270,39 +1270,27 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
 
                         last_eod_run_date = current_date
                         
-                # 3. 18:00 — Market Chronicle (in-process call with Dragon Architecture context)
-                if _should_fire_scheduled_job(dt_time(18, 0), runner_start_time, current_time):
+                # 3. 16:00 — Unified Post-Market Report
+                if _should_fire_scheduled_job(dt_time(16, 0), runner_start_time, current_time):
                     if last_report_date != current_date:
                         try:
-                            from src.reports.market_chronicle import generate_market_chronicle
-                            hydra_cands_eod = hydra.get_top_candidates(max_n=8) if hydra.watchlist else []
-                            viper_cands_eod = viper.get_top_candidates(max_n=8) if viper.watchlist else []
-                            generate_market_chronicle(
+                            from src.reports.post_market_report import generate_post_market_report
+                            
+                            kite_live = getattr(client, '_kite', None)
+                            if kite_live is None:
+                                # Fallback if client is entirely offline (e.g. testing)
+                                from kiteconnect import KiteConnect
+                                kite_live = KiteConnect(api_key=os.getenv("ZERODHA_API_KEY"))
+                                kite_live.set_access_token(os.getenv("ZERODHA_ACCESS_TOKEN"))
+
+                            generate_post_market_report(
+                                kite_client=kite_live,
                                 traded_symbols=set(daily_traded_symbols),
-                                hydra_candidates=hydra_cands_eod,
-                                viper_candidates=viper_cands_eod,
                             )
                         except Exception as chron_e:
-                            logging.error(f"Market Chronicle failed: {chron_e}")
-                            print(f"  ❌ Market Chronicle error: {chron_e}")
+                            logging.error(f"Post-Market Report failed: {chron_e}")
+                            print(f"  ❌ Post-Market Report error: {chron_e}")
                         last_report_date = current_date
-
-                # 2b. 16:00 — EOD Market Autopsy (pattern learning)
-                if _should_fire_scheduled_job(dt_time(16, 0), runner_start_time, current_time) and current_time < dt_time(18, 0):
-                    if last_autopsy_date != current_date:
-                        try:
-                            from src.reports.eod_autopsy import run_eod_autopsy
-                            from kiteconnect import KiteConnect
-                            kite = KiteConnect(api_key=os.getenv("ZERODHA_API_KEY"))
-                            kite.set_access_token(os.getenv("ZERODHA_ACCESS_TOKEN"))
-                            viper_syms_eod = [e.symbol for e in viper.watchlist] if viper.watchlist else []
-                            run_eod_autopsy(
-                                kite=kite,
-                                traded_symbols=set(daily_traded_symbols),
-                                viper_symbols=viper_syms_eod,
-                            )
-                        except Exception as e:
-                            logging.error(f"EOD Autopsy failed: {e}")
                         last_autopsy_date = current_date
 
                 # 4. 18:01 — Prediction Feedback Loop (score morning's calls)

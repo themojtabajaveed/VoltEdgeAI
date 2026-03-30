@@ -30,7 +30,7 @@ class CandidateStock:
     direction: str      # "LONG" | "SHORT"
 
 
-def fetch_top_movers(access_token: Optional[str] = None) -> dict:
+def fetch_top_movers(kite_client=None, access_token: Optional[str] = None) -> dict:
     """
     Query Kite Connect's quote API over all NSE instruments.
 
@@ -40,19 +40,21 @@ def fetch_top_movers(access_token: Optional[str] = None) -> dict:
             "losers":  List[CandidateStock],   # Top 10 by % change (most negative first)
         }
     """
-    load_dotenv()
-
-    api_key      = os.getenv("ZERODHA_API_KEY")
-    access_token = access_token or os.getenv("ZERODHA_ACCESS_TOKEN")
-
-    if not api_key or not access_token:
-        logger.error("Kite credentials missing — cannot run momentum_scanner.")
-        return {"gainers": [], "losers": []}
-
     try:
-        from kiteconnect import KiteConnect
-        kite = KiteConnect(api_key=api_key)
-        kite.set_access_token(access_token)
+        if kite_client:
+            kite = kite_client
+        else:
+            load_dotenv()
+            api_key      = os.getenv("ZERODHA_API_KEY")
+            access_token = access_token or os.getenv("ZERODHA_ACCESS_TOKEN")
+
+            if not api_key or not access_token:
+                logger.error("Kite credentials missing — cannot run momentum_scanner.")
+                return {"gainers": [], "losers": []}
+
+            from kiteconnect import KiteConnect
+            kite = KiteConnect(api_key=api_key)
+            kite.set_access_token(access_token)
 
         # Fetch all NSE instruments
         instruments = kite.instruments("NSE")
