@@ -40,7 +40,10 @@ from src.strategies.viper import ViperStrategy
 from src.strategies.slot_manager import SlotManager, CONFLUENCE_BONUS
 from src.strategies.technical_body import TechnicalBody, reset_streaming_state, get_or_create_streaming_state, _streaming_states
 from src.trading.exit_monitor import ExitMonitorThread
-from src.db.db_writer import get_db_writer
+try:
+    from src.db.db_writer import get_db_writer   # Mac layout: src/db/db_writer.py
+except ImportError:
+    from src.db_writer import get_db_writer       # VM layout:  src/db_writer.py
 import sys
 
 # Constants
