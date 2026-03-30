@@ -197,19 +197,8 @@ def _compute_technicals(bars_df: pd.DataFrame) -> TechnicalSnapshot:
         return snap
 
 
-def _resolve_token(kite, symbol: str) -> int:
-    try:
-        from src.data_ingestion.instruments import load_instruments_csv, build_symbol_token_map
-        token_map = build_symbol_token_map(load_instruments_csv())
-        return token_map.get(symbol, 0)
-    except Exception:
-        pass
-    try:
-        for inst in kite.instruments("NSE"):
-            if inst["tradingsymbol"] == symbol: return inst["instrument_token"]
-    except Exception:
-        pass
-    return 0
+def _resolve_token(token_map: dict, symbol: str) -> int:
+    return token_map.get(symbol, 0)
 
 
 def _build_movers_context(kite, today: date) -> str:
@@ -230,6 +219,14 @@ def _build_movers_context(kite, today: date) -> str:
         except:
             pass
 
+        import time
+        from src.data_ingestion.instruments import load_instruments_csv, build_symbol_token_map
+        try:
+            token_map = build_symbol_token_map(load_instruments_csv())
+        except Exception as e:
+            logger.warning(f"Failed to load token map: {e}")
+            token_map = {}
+
         context_lines = []
         for label, group in [("GAINERS", gainers), ("LOSERS", losers)]:
             if group:
@@ -238,11 +235,13 @@ def _build_movers_context(kite, today: date) -> str:
                     # 1. Fetch Intraday chart for technical trigger
                     bars_df = None
                     try:
-                        token = _resolve_token(kite, c.symbol)
+                        token = _resolve_token(token_map, c.symbol)
                         if token:
                             frm, to_d = datetime.combine(today, datetime.min.time()), datetime.combine(today, datetime.max.time())
                             hst = kite.historical_data(token, from_date=frm, to_date=to_d, interval="5minute")
                             if hst: bars_df = pd.DataFrame(hst)
+                            # APPLE / NVIDIA Red Team: Prevent rate limit blowup
+                            time.sleep(0.35)
                     except:
                         pass
                     
@@ -361,9 +360,14 @@ Provide a markdown table assessing: PnL, Biggest Winner, Biggest Error/Miss.
 
     try:
         client = genai.Client(api_key=api_key)
+        # Red Team Fix: Introduce explicit timeout (provided by genai client config)
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction="You are VoltEdge's senior post-market analyst.",
+                temperature=0.3
+            )
         )
         report_md = response.text
 
