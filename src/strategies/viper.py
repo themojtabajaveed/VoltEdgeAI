@@ -41,7 +41,7 @@ class ViperStrategy(StrategyHead):
         self.rules = ViperRules()
 
         # State
-        self._watchlist: List[WatchlistEntry] = []
+        self.watchlist: List[WatchlistEntry] = []
         self._classified_movers: List[ClassifiedMover] = []
         self._scan_count_today = 0
         self._last_scan_time: Optional[datetime] = None
@@ -88,7 +88,7 @@ class ViperStrategy(StrategyHead):
             self.classifier.enrich_with_groq(tradeable)
 
         # 5. Build watchlist entries
-        self._watchlist = []
+        self.watchlist = []
         for cm in self._classified_movers:
             if cm.trade_mode == TradeMode.SKIP:
                 continue
@@ -113,16 +113,16 @@ class ViperStrategy(StrategyHead):
                 "is_sector_leader": cm.is_sector_leader,
                 "groq_summary": cm.groq_summary,
             }
-            self._watchlist.append(entry)
+            self.watchlist.append(entry)
 
         self._last_scan_time = datetime.now()
         logger.info(
             f"[VIPER] Scan #{self._scan_count_today} complete: "
-            f"{len(self._watchlist)} tradeable movers "
-            f"({sum(1 for w in self._watchlist if w.metadata.get('trade_mode') == 'STRIKE')} STRIKE, "
-            f"{sum(1 for w in self._watchlist if w.metadata.get('trade_mode') == 'COIL')} COIL)"
+            f"{len(self.watchlist)} tradeable movers "
+            f"({sum(1 for w in self.watchlist if w.metadata.get('trade_mode') == 'STRIKE')} STRIKE, "
+            f"{sum(1 for w in self.watchlist if w.metadata.get('trade_mode') == 'COIL')} COIL)"
         )
-        return self._watchlist
+        return self.watchlist
 
     def evaluate(
         self,
@@ -258,7 +258,7 @@ class ViperStrategy(StrategyHead):
         Called by runner.py at orchestrator decision points.
         """
         candidates = []
-        for entry in sorted(self._watchlist, key=lambda e: e.urgency, reverse=True)[:max_n]:
+        for entry in sorted(self.watchlist, key=lambda e: e.urgency, reverse=True)[:max_n]:
             meta = getattr(entry, 'metadata', {}) or {}
             conv = entry.conviction
             candidates.append({
@@ -514,16 +514,12 @@ class ViperStrategy(StrategyHead):
         if self._coil_signals:
             self.save_coil_report()
 
-        self._watchlist = []
+        self.watchlist = []
         self._classified_movers = []
         self._coil_signals = []
         self._scan_count_today = 0
         self._last_scan_time = None
         logger.info("[VIPER] Daily reset complete")
-
-    @property
-    def watchlist(self) -> List[WatchlistEntry]:
-        return self._watchlist
 
     def check_confluence(self, hydra_symbols: List[str]) -> List[str]:
         """
@@ -535,7 +531,7 @@ class ViperStrategy(StrategyHead):
         Returns:
             List of symbols that appear in both.
         """
-        viper_symbols = {e.symbol for e in self._watchlist}
+        viper_symbols = {e.symbol for e in self.watchlist}
         overlap = viper_symbols.intersection(set(hydra_symbols))
         if overlap:
             logger.info(
