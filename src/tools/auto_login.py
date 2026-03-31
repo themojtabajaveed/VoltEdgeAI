@@ -25,6 +25,7 @@ Usage:
   token = auto_refresh_access_token()
 """
 import os
+import re
 import logging
 import time
 from typing import Optional
@@ -67,29 +68,32 @@ def auto_refresh_access_token(
     Steps:
       1. POST user_id + password to /api/login → get request_id
       2. POST request_id + TOTP to /api/twofa → get redirect with request_token
-      3. Use KiteConnect.generate_session(request_token) → access_token
-      4. Save to env file (if provided)
+      3. Walk the redirect chain manually (allow_redirects=False) until
+         request_token appears in a Location header — no ConnectionError dependency
+      4. Use KiteConnect.generate_session(request_token) → access_token
+      5. Persist to env_file if provided
 
     Returns:
         The new access_token string, or None on failure.
     """
     # Load from env if not provided
-    api_key = api_key or os.getenv("ZERODHA_API_KEY", "")
+    api_key    = api_key    or os.getenv("ZERODHA_API_KEY", "")
     api_secret = api_secret or os.getenv("ZERODHA_API_SECRET", "")
-    user_id = user_id or os.getenv("ZERODHA_USER_ID", "")
-    password = password or os.getenv("ZERODHA_PASSWORD", "")
+    user_id    = user_id    or os.getenv("ZERODHA_USER_ID", "")
+    password   = password   or os.getenv("ZERODHA_PASSWORD", "")
     totp_secret = totp_secret or os.getenv("ZERODHA_TOTP_SECRET", "")
 
     if not all([api_key, api_secret, user_id, password, totp_secret]):
-        missing = []
-        if not api_key: missing.append("ZERODHA_API_KEY")
-        if not api_secret: missing.append("ZERODHA_API_SECRET")
-        if not user_id: missing.append("ZERODHA_USER_ID")
-        if not password: missing.append("ZERODHA_PASSWORD")
-        if not totp_secret: missing.append("ZERODHA_TOTP_SECRET")
-        logger.error(f"Auto-login missing credentials: {', '.join(missing)}")
-        print(f"❌ Auto-login missing: {', '.join(missing)}")
-        print("   Set these in your .env file for fully automated login.")
+        missing = [
+            name for name, val in [
+                ("ZERODHA_API_KEY", api_key),
+                ("ZERODHA_API_SECRET", api_secret),
+                ("ZERODHA_USER_ID", user_id),
+                ("ZERODHA_PASSWORD", password),
+                ("ZERODHA_TOTP_SECRET", totp_secret),
+            ] if not val
+        ]
+        logger.error(f"[AutoLogin] Missing credentials: {', '.join(missing)}")
         return None
 
     session = requests.Session()
@@ -103,15 +107,13 @@ def auto_refresh_access_token(
         login_data = login_resp.json()
 
         if login_data.get("status") != "success":
-            logger.error(f"Auto-login Step 1 failed: {login_data}")
-            print(f"❌ Login failed: {login_data.get('message', 'Unknown error')}")
+            logger.error(f"[AutoLogin] Step 1 failed: {login_data.get('message', login_data)}")
             return None
 
         request_id = login_data["data"]["request_id"]
-        logger.info(f"Auto-login Step 1 OK: got request_id")
+        logger.info("[AutoLogin] Step 1 OK: password accepted")
     except Exception as e:
-        logger.error(f"Auto-login Step 1 error: {e}")
-        print(f"❌ Login request failed: {e}")
+        logger.error(f"[AutoLogin] Step 1 error: {type(e).__name__}: {e}")
         return None
 
     # ── Step 2: Submit TOTP for 2FA ──────────────────────────────────────
@@ -119,83 +121,91 @@ def auto_refresh_access_token(
         totp_code = _generate_totp(totp_secret)
 
         twofa_resp = session.post(TWOFA_URL, data={
-            "user_id": user_id,
-            "request_id": request_id,
+            "user_id":     user_id,
+            "request_id":  request_id,
             "twofa_value": totp_code,
-            "twofa_type": "totp",
+            "twofa_type":  "totp",
         })
         twofa_data = twofa_resp.json()
 
         if twofa_data.get("status") != "success":
-            # TOTP might have just expired — wait and retry once
-            logger.warning("TOTP may have expired, retrying in 30s...")
+            # TOTP window may have just rolled — wait one cycle and retry once
+            logger.warning("[AutoLogin] Step 2: TOTP rejected, retrying in 30s...")
             time.sleep(30)
             totp_code = _generate_totp(totp_secret)
             twofa_resp = session.post(TWOFA_URL, data={
-                "user_id": user_id,
-                "request_id": request_id,
+                "user_id":     user_id,
+                "request_id":  request_id,
                 "twofa_value": totp_code,
-                "twofa_type": "totp",
+                "twofa_type":  "totp",
             })
             twofa_data = twofa_resp.json()
             if twofa_data.get("status") != "success":
-                logger.error(f"Auto-login Step 2 failed: {twofa_data}")
-                print(f"❌ 2FA failed: {twofa_data.get('message', 'Unknown')}")
+                logger.error(f"[AutoLogin] Step 2 failed: {twofa_data.get('message', twofa_data)}")
                 return None
 
-        logger.info("Auto-login Step 2 OK: 2FA passed")
+        logger.info("[AutoLogin] Step 2 OK: 2FA passed")
     except Exception as e:
-        logger.error(f"Auto-login Step 2 error: {e}")
-        print(f"❌ 2FA request failed: {e}")
+        logger.error(f"[AutoLogin] Step 2 error: {type(e).__name__}: {e}")
         return None
 
-    # ── Step 3: Get request_token from redirect ──────────────────────────
+    # ── Step 3: Walk redirect chain to extract request_token ─────────────
+    #
+    # After successful 2FA the session cookie is set. Kite responds to
+    # GET /connect/login with a chain of 302s terminating at the registered
+    # redirect_uri, which carries request_token as a query parameter.
+    #
+    # We NEVER follow redirects automatically. On each hop we read the
+    # Location header; the moment it contains request_token= we extract it
+    # and stop — we never need to reach the redirect_uri host itself.
+    # This makes the approach redirect_uri-agnostic and removes all
+    # dependency on ConnectionError, which is unreliable on GCP.
     request_token = None
+    url = f"{CONNECT_URL}?v=3&api_key={api_key}"
     try:
-        # Kite redirects: kite.trade → kite.zerodha.com → <redirect_uri>?request_token=...
-        # The redirect_uri is typically 127.0.0.1 or localhost, which won't be running.
-        # Strategy: follow redirects and catch the ConnectionError when it hits localhost.
-        # The request_token is embedded in THAT final URL.
-        try:
-            redirect_resp = session.get(
-                f"{CONNECT_URL}?v=3&api_key={api_key}",
-                allow_redirects=True,
-                timeout=10,
+        for hop in range(10):
+            resp = session.get(url, allow_redirects=False, timeout=10)
+            location = resp.headers.get("Location", "")
+
+            logger.debug(
+                f"[AutoLogin] Step 3 hop {hop + 1}: "
+                f"status={resp.status_code} "
+                f"location={location[:120] if location else '(none)'}"
             )
-            # If we somehow get a successful response, parse its URL
-            final_url = redirect_resp.url
-            parsed = urlparse(final_url)
-            params = parse_qs(parsed.query)
-            request_token = params.get("request_token", [None])[0]
-        except requests.exceptions.ConnectionError as ce:
-            # Expected! The final redirect to 127.0.0.1 will fail.
-            # Extract the request_token from the error's URL.
-            error_str = str(ce)
-            if "request_token=" in error_str:
-                import re
-                match = re.search(r'request_token=([a-zA-Z0-9]+)', error_str)
+
+            if "request_token=" in location:
+                match = re.search(r"request_token=([a-zA-Z0-9]+)", location)
                 if match:
                     request_token = match.group(1)
-                    logger.info(f"Auto-login Step 3 OK: extracted request_token from redirect error")
+                    logger.info(f"[AutoLogin] Step 3 OK: request_token found at hop {hop + 1}")
+                else:
+                    logger.error(
+                        f"[AutoLogin] Step 3: 'request_token=' in Location but "
+                        f"regex found nothing — location={location[:200]!r}"
+                    )
+                break
 
-        if not request_token:
-            # Fallback: try with allow_redirects=False and check Location header chain
-            r = session.get(f"{CONNECT_URL}?v=3&api_key={api_key}", allow_redirects=False, timeout=10)
-            loc = r.headers.get("Location", "")
-            if "request_token=" in loc:
-                parsed = urlparse(loc)
-                params = parse_qs(parsed.query)
-                request_token = params.get("request_token", [None])[0]
+            if location:
+                url = location
+                continue
 
-        if not request_token:
-            logger.error("Auto-login Step 3: Could not extract request_token from any redirect")
-            print("❌ No request_token found in redirect chain")
-            return None
-
-        logger.info(f"Auto-login Step 3 OK: got request_token")
+            # Non-redirect response with no token — log for diagnosis
+            logger.error(
+                f"[AutoLogin] Step 3 stalled at hop {hop + 1}: "
+                f"status={resp.status_code} url={url[:120]} "
+                f"body_snippet={resp.text[:300]!r}"
+            )
+            break
+        else:
+            logger.error(
+                "[AutoLogin] Step 3: exhausted 10 redirect hops without "
+                "finding request_token — check redirect_uri in Kite developer console"
+            )
     except Exception as e:
-        logger.error(f"Auto-login Step 3 error: {e}")
-        print(f"❌ Redirect/token extraction failed: {e}")
+        logger.error(f"[AutoLogin] Step 3 error: {type(e).__name__}: {e}")
+
+    if not request_token:
+        logger.error("[AutoLogin] Step 3 failed — aborting login")
         return None
 
     # ── Step 4: Generate access_token ────────────────────────────────────
@@ -206,29 +216,26 @@ def auto_refresh_access_token(
         access_token = data.get("access_token")
 
         if not access_token:
-            logger.error("Auto-login Step 4: No access_token in session data")
-            print("❌ No access_token returned from generate_session")
+            logger.error("[AutoLogin] Step 4: generate_session returned no access_token")
             return None
 
-        logger.info("Auto-login Step 4 OK: access_token generated")
-        print(f"✅ Auto-login successful! Token: {access_token[:8]}...")
+        logger.info(f"[AutoLogin] Step 4 OK: access_token generated ({access_token[:8]}...)")
 
         # Update environment for this process
         os.environ["ZERODHA_ACCESS_TOKEN"] = access_token
 
-        # ── Step 5 (optional): Write back to env file ────────────────
+        # ── Step 5 (optional): Persist to env file ───────────────────────
         if env_file and os.path.exists(env_file):
             _update_env_file(env_file, access_token)
 
         return access_token
 
     except Exception as e:
-        logger.error(f"Auto-login Step 4 error: {e}")
-        print(f"❌ generate_session failed: {e}")
+        logger.error(f"[AutoLogin] Step 4 error: {type(e).__name__}: {e}")
         return None
 
 
-def _update_env_file(env_path: str, new_token: str):
+def _update_env_file(env_path: str, new_token: str) -> None:
     """Update ZERODHA_ACCESS_TOKEN in the .env file."""
     try:
         lines = []
@@ -247,27 +254,36 @@ def _update_env_file(env_path: str, new_token: str):
         with open(env_path, "w") as f:
             f.writelines(lines)
 
-        logger.info(f"Updated access_token in {env_path}")
+        logger.info(f"[AutoLogin] Token persisted to {env_path}")
     except Exception as e:
-        logger.warning(f"Could not update env file: {e}")
+        logger.warning(f"[AutoLogin] Could not update env file: {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":
     import sys
     from dotenv import load_dotenv
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        stream=sys.stderr,
+    )
+
     # Try project .env first, then /tmp shadow
-    for env_path in [".env", "/tmp/voltedge.env"]:
-        if os.path.exists(env_path):
+    env_path = ".env"
+    for candidate in [".env", "/tmp/voltedge.env"]:
+        if os.path.exists(candidate):
+            env_path = candidate
             load_dotenv(env_path)
             break
 
     token = auto_refresh_access_token(env_file=env_path)
     if token:
-        print(f"\nNew ZERODHA_ACCESS_TOKEN={token}")
-        print("Token has been saved to your .env file.")
+        logger.info(f"Auto-login successful. New token: {token[:8]}... written to {env_path}")
         sys.exit(0)
     else:
-        print("\n⚠️ Auto-login failed. Please check your credentials.")
-        print("Required env vars: ZERODHA_USER_ID, ZERODHA_PASSWORD, ZERODHA_TOTP_SECRET")
+        logger.error(
+            "Auto-login failed. Check credentials: "
+            "ZERODHA_USER_ID, ZERODHA_PASSWORD, ZERODHA_TOTP_SECRET"
+        )
         sys.exit(1)
