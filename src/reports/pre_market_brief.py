@@ -145,10 +145,24 @@ Generate a markdown report with EXACTLY this structure:
 
 # VoltEdge Global Intelligence Brief — {today}
 
-## 1. Overnight Global Events
-Summarize US market close, key earnings releases, Fed/macro events, commodity moves (oil, gold, DXY).
-Include Asian market morning action and GIFT Nifty futures indication.
-Be specific — include actual numbers (Nasdaq +X%, Oil at $X, etc.)
+## 1. Overnight Global Markets
+Fill BOTH tables with real numbers from the last 12 hours. Use 🟢/🔴/➖ for Bias.
+
+| Index / Asset | Close / Level | Chg% | Bias |
+|---------------|---------------|------|------|
+| S&P 500       | …             | …    | …    |
+| Nasdaq        | …             | …    | …    |
+| Dow Jones     | …             | …    | …    |
+| Nikkei 225    | …             | …    | …    |
+| Hang Seng     | …             | …    | …    |
+| GIFT Nifty    | …             | …    | …    |
+
+| Asset     | Level | Chg%  | India Impact (1 phrase) |
+|-----------|-------|-------|-------------------------|
+| Crude Oil | $…    | …     | …                       |
+| Gold      | $…    | …     | …                       |
+| DXY       | …     | …     | …                       |
+| US 10Y    | …%    | …bps  | …                       |
 
 ## 2. Indian Market Impact Assessment
 For each major global event above, state the DIRECT impact on Indian sectors:
@@ -175,7 +189,7 @@ Provide exactly 3 concrete rules for today's trading engine:
 3. [Directive 3]
 
 ## 6. Risk Regime Assessment
-State overall market bias for today.
+Single line only: **Regime: BULLISH|BEARISH|SIDEWAYS (strength 0.0–1.0)** — one sentence stating the primary driver of this regime call.
 
 ---
 

@@ -338,7 +338,14 @@ Write the report in strictly the following markdown format. Be specific and fact
 # VoltEdge Post-Market Report — {today}
 
 ## I. Pre-Market Plan vs Reality
-Compare our morning predictions to real-market outcome.
+Fill this table using the morning predictions and the actual day's data:
+
+| Symbol | Predicted Dir | Key Level | Actual % | Score |
+|--------|---------------|-----------|----------|-------|
+
+**Key Statements** (2–3 bullets max, no paragraphs):
+- [Most important accuracy insight or pattern miss]
+- [Second insight if warranted]
 
 ## II. Top Movers & The Catalysts
 For the top 3-4 Movers provided in the Kite data, state the Symbol, % Change, and write 1 sentence classifying WHY it moved (Pattern or News).
