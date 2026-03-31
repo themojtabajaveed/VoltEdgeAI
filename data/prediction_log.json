@@ -8,6 +8,51 @@
       "reason": "test",
       "score": null,
       "actual_change_pct": null
+    },
+    {
+      "symbol": "OIL",
+      "direction": "bullish",
+      "key_level": 350.0,
+      "reason": "Surging global crude oil prices directly boost realizations for upstream oil producers.",
+      "date": "2026-03-31",
+      "score": null,
+      "actual_change_pct": null
+    },
+    {
+      "symbol": "INDIGO",
+      "direction": "bearish",
+      "key_level": 3000.0,
+      "reason": "Elevated crude oil prices will sharply increase aviation turbine fuel (ATF) costs, impacting airline profitability.",
+      "date": "2026-03-31",
+      "score": null,
+      "actual_change_pct": null
+    },
+    {
+      "symbol": "HAL",
+      "direction": "bullish",
+      "key_level": 4000.0,
+      "reason": "Heightened global geopolitical tensions typically lead to increased defence spending and order visibility for aerospace companies.",
+      "date": "2026-03-31",
+      "score": null,
+      "actual_change_pct": null
+    },
+    {
+      "symbol": "VEDL",
+      "direction": "bullish",
+      "key_level": 450.0,
+      "reason": "Global commodity price inflation and potential supply chain shifts following the Iran conflict could benefit diversified metals and mining companies.",
+      "date": "2026-03-31",
+      "score": null,
+      "actual_change_pct": null
+    },
+    {
+      "symbol": "TCS",
+      "direction": "bearish",
+      "key_level": 4100.0,
+      "reason": "Global risk-off sentiment, weakness in US tech markets, and potential FII outflows could weigh on Indian IT services stocks.",
+      "date": "2026-03-31",
+      "score": null,
+      "actual_change_pct": null
     }
   ],
   "system_lessons": [
