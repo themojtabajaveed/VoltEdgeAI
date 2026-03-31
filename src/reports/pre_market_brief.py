@@ -51,7 +51,7 @@ def _build_lessons_context(log: dict) -> str:
         for p in recent_preds:
             score_label = {1: "✅ CORRECT", 0: "➖ FLAT", -1: "❌ WRONG"}.get(p.get("score"), "?")
             out.append(
-                f"- {p['date']} | {p['symbol']} | Predicted: {p['predicted_direction'].upper()} | "
+                f"- {p['date']} | {p['symbol']} | Predicted: {(p.get('predicted_direction') or p.get('direction', '?')).upper()} | "
                 f"Actual: {p.get('actual_change_pct', '?')}% | {score_label}"
             )
 
@@ -189,11 +189,11 @@ Do NOT use placeholder/example symbols.
   "top_sectors_long": ["SECTOR1", "SECTOR2"],
   "top_sectors_short": ["SECTOR3"],
   "predictions": [
-    {{"symbol": "ACTUAL_NSE_SYMBOL_1", "direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}},
-    {{"symbol": "ACTUAL_NSE_SYMBOL_2", "direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}},
-    {{"symbol": "ACTUAL_NSE_SYMBOL_3", "direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}},
-    {{"symbol": "ACTUAL_NSE_SYMBOL_4", "direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}},
-    {{"symbol": "ACTUAL_NSE_SYMBOL_5", "direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}}
+    {{"symbol": "ACTUAL_NSE_SYMBOL_1", "predicted_direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}},
+    {{"symbol": "ACTUAL_NSE_SYMBOL_2", "predicted_direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}},
+    {{"symbol": "ACTUAL_NSE_SYMBOL_3", "predicted_direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}},
+    {{"symbol": "ACTUAL_NSE_SYMBOL_4", "predicted_direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}},
+    {{"symbol": "ACTUAL_NSE_SYMBOL_5", "predicted_direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}}
   ]
 }}
 ```

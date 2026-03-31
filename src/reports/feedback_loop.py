@@ -77,7 +77,7 @@ def _generate_lessons(scored_today: list) -> list[str]:
         client = genai.Client(api_key=api_key)
 
         summary = "\n".join(
-            f"- {p['symbol']} | Predicted: {p['predicted_direction']} | "
+            f"- {p['symbol']} | Predicted: {p.get('predicted_direction') or p.get('direction', '?')} | "
             f"Actual: {p.get('actual_change_pct', '?')}% | "
             f"Score: {'+1 CORRECT' if p['score']==1 else ('❌ WRONG' if p['score']==-1 else 'FLAT')}"
             for p in scored_today
@@ -123,7 +123,7 @@ def run_feedback_loop():
         actual_pct = actuals.get(symbol)
         if actual_pct is not None:
             pred["actual_change_pct"] = round(actual_pct, 2)
-            pred["score"] = _score_direction(pred.get("predicted_direction", ""), actual_pct)
+            pred["score"] = _score_direction(pred.get("predicted_direction") or pred.get("direction", ""), actual_pct)
         else:
             # No data for this symbol today — leave as None
             pred["score"] = None
@@ -146,7 +146,7 @@ def run_feedback_loop():
         print(f"\n[VoltEdge Feedback] Today's prediction accuracy: {correct}/{total} correct ({accuracy:.0f}%)")
         for p in scored_today:
             icon = "✅" if p["score"] == 1 else ("❌" if p["score"] == -1 else "➖")
-            print(f"  {icon} {p['symbol']}: predicted {p['predicted_direction']}, actual {p['actual_change_pct']}%")
+            print(f"  {icon} {p['symbol']}: predicted {p.get('predicted_direction') or p.get('direction', '?')}, actual {p['actual_change_pct']}%")
 
         # Generate and store lessons
         lessons = _generate_lessons(scored_today)

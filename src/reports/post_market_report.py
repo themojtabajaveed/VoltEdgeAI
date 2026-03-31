@@ -73,7 +73,7 @@ def _load_prediction_log_context(today: date) -> str:
             if p.get("score") is not None:
                 icon = {1: "✅", 0: "➖", -1: "❌"}.get(p["score"], "?")
                 score_str = f" → {icon} actual {p.get('actual_change_pct', '?')}%"
-            lines.append(f"- {p['symbol']} | {p['predicted_direction'].upper()} @ {p.get('key_level', '?')}{score_str}")
+            lines.append(f"- {p['symbol']} | {(p.get('predicted_direction') or p.get('direction', '?')).upper()} @ {p.get('key_level', '?')}{score_str}")
         return "\n".join(lines)
     except Exception as e:
         return f"(Error loading prediction log: {e})"
@@ -216,7 +216,7 @@ def _build_movers_context(kite, today: date) -> str:
         try:
             from src.data_ingestion.news_context import NewsClient
             news_client = NewsClient()
-        except:
+        except Exception:
             pass
 
         import time
