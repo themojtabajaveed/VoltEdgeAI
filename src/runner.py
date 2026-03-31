@@ -1317,8 +1317,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         run_script("reports/feedback_loop.py")
                         last_feedback_date = current_date
 
-                # 5. 06:00 — Morning Global Intelligence Brief
-                if _should_fire_scheduled_job(dt_time(6, 0), runner_start_time, current_time):
+                # 5. 09:00 IST (03:30 UTC) — Morning Global Intelligence Brief
+                if _should_fire_scheduled_job(dt_time(9, 0), runner_start_time, current_time):
                     if last_premarket_date != current_date:
                         run_script("reports/pre_market_brief.py")
                         last_premarket_date = current_date
