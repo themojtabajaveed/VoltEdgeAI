@@ -774,7 +774,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                 risk_state_data = {
                                     "daily_pnl": float(risk_state.realized_pnl),
                                     "trades_taken": risk_state.trades_taken,
-                                    "slots_used": slot_manager.used,
+                                    "slots_used": slot_manager.trades_today,
                                     "slots_remaining": slot_manager.remaining,
                                     "daily_loss_cap": risk_cfg.max_daily_loss_rupees,
                                 }
