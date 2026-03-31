@@ -290,7 +290,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                 # ── Fix 24/7 Autonomous Token Rollover ──
                 logging.info(f"Generating fresh access token for {current_date}")
                 print(f"🔑 Attempting daily auto-login for new session: {current_date}...")
-                new_token = auto_refresh_access_token()
+                new_token = auto_refresh_access_token(env_file=".env")
                 if new_token:
                     os.environ["ZERODHA_ACCESS_TOKEN"] = new_token
                     print(f"✅ Token refreshed successfully for new day: {new_token[:8]}...")
