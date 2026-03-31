@@ -262,7 +262,9 @@ Do NOT use placeholder/example symbols.
 
 
 def _send_email(subject: str, report_md: str, report_path: str) -> None:
-    if os.getenv("REPORT_EMAIL_ENABLED") != "1":
+    enabled = os.getenv("REPORT_EMAIL_ENABLED")
+    if enabled != "1":
+        logger.info(f"[EMAIL] Skipped — REPORT_EMAIL_ENABLED='{enabled}' (not '1')")
         return
     to_addr   = os.getenv("REPORT_EMAIL_TO")
     smtp_host = os.getenv("REPORT_SMTP_HOST", "smtp.gmail.com")
@@ -271,7 +273,7 @@ def _send_email(subject: str, report_md: str, report_path: str) -> None:
     smtp_pass = os.getenv("REPORT_SMTP_PASSWORD")
 
     if not all([to_addr, smtp_user, smtp_pass]):
-        logger.warning("SMTP credentials missing — skipping email.")
+        logger.warning(f"[EMAIL] Credentials missing — TO={to_addr}, USER={smtp_user}, PASS={'set' if smtp_pass else 'MISSING'}")
         return
     try:
         import markdown as md_lib
@@ -288,14 +290,15 @@ def _send_email(subject: str, report_md: str, report_path: str) -> None:
     with open(report_path, "rb") as fh:
         msg.add_attachment(fh.read(), maintype="text", subtype="markdown",
                            filename=os.path.basename(report_path))
+    logger.info(f"[EMAIL] Attempting: {smtp_user} → {to_addr} via {smtp_host}:{smtp_port}")
     try:
         with smtplib.SMTP(smtp_host, smtp_port) as srv:
             srv.starttls()
             srv.login(smtp_user, smtp_pass)
             srv.send_message(msg)
-        logger.info(f"Morning brief emailed to {to_addr}")
+        logger.info(f"[EMAIL] ✓ Sent to {to_addr}")
     except Exception as e:
-        logger.warning(f"Email failed: {e}")
+        logger.error(f"[EMAIL] SMTP failed: {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":

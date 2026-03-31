@@ -109,7 +109,11 @@ def run_script(script_name: str):
         )
         print(f"[{datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')}] Successfully finished job: {script_name}")
         logging.info(f"Successfully finished job: {script_name}")
-        
+        if result.stdout.strip():
+            logging.info(f"[{script_name}] stdout:\n{result.stdout.strip()}")
+        if result.stderr.strip():
+            logging.warning(f"[{script_name}] stderr:\n{result.stderr.strip()}")
+
     except subprocess.CalledProcessError as e:
         print(f"[{datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')}] Job failed: {script_name} (Exit {e.returncode})")
         if e.stderr:
