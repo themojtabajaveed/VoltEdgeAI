@@ -10,15 +10,27 @@ Sources combined:
   3. NSE bulk/block deals (per-symbol)
   4. Market regime (Nifty/BankNifty sentiment from Kite)
 
-The runner calls `refresh_macro_context()` periodically (every 2 hours)
+The runner calls `refresh_macro_context()` periodically (every 90 min)
 and the scorer/catalyst analyzer can read the cached context.
+
+v2 (2026-04-01): Direction-aware tiered risk system.
+  RISK-OFF dampens LONG, boosts SHORT. RISK-ON does the opposite.
+  Tiers are based on FII flow magnitude vs 7-day rolling average,
+  NOT fixed thresholds — adapts to market conditions automatically.
 """
+import json
 import logging
-from datetime import datetime
+import os
+from datetime import datetime, date
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from enum import Enum
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+FII_HISTORY_PATH = "data/fii_history.json"
+FII_HISTORY_MAX_ENTRIES = 30
+
 
 # Lazy imports to avoid circular dependencies
 def _import_finnhub():
@@ -30,6 +42,105 @@ def _import_nse():
     return get_institutional_signal, fetch_bulk_block_deals
 
 
+# ── Tiered Risk System ────────────────────────────────────────────────────
+
+class MacroRiskTier(str, Enum):
+    """
+    5-tier macro risk classification.
+    Tier determines direction-specific conviction adjustments.
+    """
+    RISK_ON  = "RISK_ON"    # FII buying, positive macro → favor LONG
+    CLEAR    = "CLEAR"      # No significant macro signal → neutral
+    CAUTION  = "CAUTION"    # Mild stress → slight LONG dampener
+    RISK_OFF = "RISK_OFF"   # Significant stress → strong LONG dampener, SHORT boost
+    EXTREME  = "EXTREME"    # Crisis-level → full LONG halt, SHORT still ok
+
+
+# Direction-aware dampener table: (points_adjustment, min_conviction_to_trade)
+# Positive adjustment = boost, Negative = dampen
+TIER_DAMPENERS: Dict[MacroRiskTier, Dict[str, Tuple[int, int]]] = {
+    MacroRiskTier.RISK_ON: {
+        "LONG":  (+10, 60),   # Boost LONG, lower bar
+        "SHORT": (-15, 80),   # Dampen SHORT, higher bar
+        "BUY":   (+10, 60),   # Alias
+    },
+    MacroRiskTier.CLEAR: {
+        "LONG":  (0, 70),     # Neutral
+        "SHORT": (0, 70),
+        "BUY":   (0, 70),
+    },
+    MacroRiskTier.CAUTION: {
+        "LONG":  (-10, 65),   # Slight dampener
+        "SHORT": (+5, 60),    # Slight boost
+        "BUY":   (-10, 65),
+    },
+    MacroRiskTier.RISK_OFF: {
+        "LONG":  (-20, 75),   # Strong dampener — only high-conviction LONG survives
+        "SHORT": (+10, 60),   # Boost — risk-off is SHORT-friendly
+        "BUY":   (-20, 75),
+    },
+    MacroRiskTier.EXTREME: {
+        "LONG":  (-999, 999), # Full halt — no LONG trades
+        "SHORT": (+15, 65),   # Strong boost — best SHORT environment
+        "BUY":   (-999, 999),
+    },
+}
+
+
+# ── FII History for Rolling Averages ──────────────────────────────────────
+
+def _load_fii_history() -> List[Dict]:
+    """Load FII flow history from disk. Returns list of {date, fii_net_cr}."""
+    if os.path.exists(FII_HISTORY_PATH):
+        try:
+            with open(FII_HISTORY_PATH) as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data[-FII_HISTORY_MAX_ENTRIES:]
+        except Exception:
+            pass
+    return []
+
+
+def _save_fii_history(history: List[Dict]) -> None:
+    """Persist FII history to disk."""
+    os.makedirs("data", exist_ok=True)
+    trimmed = history[-FII_HISTORY_MAX_ENTRIES:]
+    with open(FII_HISTORY_PATH, "w") as f:
+        json.dump(trimmed, f, indent=2)
+
+
+def _record_fii_flow(fii_net_cr: float) -> None:
+    """Add today's FII flow to history (one entry per date)."""
+    today_str = str(date.today())
+    history = _load_fii_history()
+
+    # Update existing entry for today or append new
+    for entry in history:
+        if entry.get("date") == today_str:
+            entry["fii_net_cr"] = fii_net_cr
+            _save_fii_history(history)
+            return
+
+    history.append({"date": today_str, "fii_net_cr": fii_net_cr})
+    _save_fii_history(history)
+
+
+def _compute_fii_7d_avg() -> Optional[float]:
+    """Compute 7-day average of FII net flows. Returns None if insufficient data."""
+    history = _load_fii_history()
+    if len(history) < 3:
+        # Need at least 3 days of data for a meaningful average
+        return None
+    recent = history[-7:]  # Last 7 entries (or fewer if not enough)
+    values = [e["fii_net_cr"] for e in recent if "fii_net_cr" in e]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+# ── MacroContext Dataclass ────────────────────────────────────────────────
+
 @dataclass
 class MacroContext:
     """Single snapshot of all macro intelligence at a point in time."""
@@ -40,6 +151,7 @@ class MacroContext:
     gold_change_pct: float = 0.0
     usd_inr_change_pct: float = 0.0
     dxy_change_pct: float = 0.0
+    dxy_price: float = 0.0
     macro_bias: str = "neutral"         # "risk_on" | "neutral" | "risk_off"
     macro_details: str = ""
 
@@ -55,26 +167,183 @@ class MacroContext:
     # Bulk/block deals today
     deal_count: int = 0
 
+    # v2: Tier system
+    _risk_tier: Optional[MacroRiskTier] = field(default=None, repr=False)
+    _fii_7d_avg: Optional[float] = field(default=None, repr=False)
+    _fii_ratio: Optional[float] = field(default=None, repr=False)
+    _nifty_open_change_pct: float = 0.0    # Set by runner after first Nifty tick
+    _circuit_breaker_active: bool = False   # Set by runner if index circuit hit
+
     def is_risk_off(self) -> bool:
-        """True if macro conditions suggest caution."""
-        return self.macro_bias == "risk_off" or self.institutional_signal == "bearish"
+        """True if macro conditions suggest caution. Backward-compatible."""
+        tier = self.get_risk_tier()
+        return tier in (MacroRiskTier.CAUTION, MacroRiskTier.RISK_OFF, MacroRiskTier.EXTREME)
+
+    def get_risk_tier(self) -> MacroRiskTier:
+        """
+        Compute the macro risk tier from FII flows and macro signals.
+
+        Logic:
+          1. Index circuit breaker → EXTREME (override everything)
+          2. FII selling > 3x 7-day avg OR Nifty down >2% at open → EXTREME
+          3. FII selling 1.5x-3x 7-day avg → RISK_OFF
+          4. FII selling 1.0x-1.5x 7-day avg → CAUTION
+          5. FII net positive + macro risk_on → RISK_ON
+          6. Everything else → CLEAR
+
+        When 7-day average is unavailable (first few days), falls back to
+        absolute FII thresholds calibrated for Indian markets.
+        """
+        if self._risk_tier is not None:
+            return self._risk_tier
+
+        # Circuit breaker override — all bets off
+        if self._circuit_breaker_active:
+            self._risk_tier = MacroRiskTier.EXTREME
+            return self._risk_tier
+
+        fii = self.fii_net_cr  # Negative = selling
+        avg_7d = self._fii_7d_avg if self._fii_7d_avg is not None else _compute_fii_7d_avg()
+        self._fii_7d_avg = avg_7d
+
+        # Nifty opening gap check
+        if self._nifty_open_change_pct <= -2.0:
+            self._risk_tier = MacroRiskTier.EXTREME
+            return self._risk_tier
+
+        # Compute FII ratio vs 7-day average
+        if avg_7d is not None and avg_7d < 0:
+            # Average is negative (net selling trend) — ratio is today vs avg
+            # fii=-11000, avg=-4000 → ratio = 11000/4000 = 2.75x
+            self._fii_ratio = abs(fii) / abs(avg_7d) if fii < 0 else 0.0
+        elif avg_7d is not None and avg_7d >= 0 and fii < 0:
+            # Average was buying, today is selling — clearly elevated
+            # Treat any selling day against a buying-average as at least CAUTION
+            self._fii_ratio = 2.0  # Force at least RISK_OFF consideration
+        else:
+            self._fii_ratio = None
+
+        # Determine tier
+        if self._fii_ratio is not None and fii < 0:
+            ratio = self._fii_ratio
+            if ratio >= 3.0:
+                self._risk_tier = MacroRiskTier.EXTREME
+            elif ratio >= 1.5:
+                self._risk_tier = MacroRiskTier.RISK_OFF
+            elif ratio >= 1.0:
+                self._risk_tier = MacroRiskTier.CAUTION
+            else:
+                # Selling but below average — mild
+                self._risk_tier = MacroRiskTier.CAUTION if fii < -500 else MacroRiskTier.CLEAR
+        elif self._fii_ratio is None and fii < 0:
+            # Fallback: no history available, use absolute thresholds
+            # Calibrated for Indian markets (₹ Crores)
+            if fii < -12000:
+                self._risk_tier = MacroRiskTier.EXTREME
+            elif fii < -5000:
+                self._risk_tier = MacroRiskTier.RISK_OFF
+            elif fii < -2000:
+                self._risk_tier = MacroRiskTier.CAUTION
+            else:
+                self._risk_tier = MacroRiskTier.CLEAR
+        elif fii > 500 and self.macro_bias == "risk_on":
+            self._risk_tier = MacroRiskTier.RISK_ON
+        elif fii > 0 and self.institutional_signal == "bullish":
+            self._risk_tier = MacroRiskTier.RISK_ON
+        else:
+            self._risk_tier = MacroRiskTier.CLEAR
+
+        # Commodity stress can escalate tier by one level
+        commodity_stress = (
+            (self.macro_bias == "risk_off")
+            and self._risk_tier in (MacroRiskTier.CLEAR, MacroRiskTier.CAUTION)
+        )
+        if commodity_stress:
+            if self._risk_tier == MacroRiskTier.CLEAR:
+                self._risk_tier = MacroRiskTier.CAUTION
+            elif self._risk_tier == MacroRiskTier.CAUTION:
+                self._risk_tier = MacroRiskTier.RISK_OFF
+
+        return self._risk_tier
+
+    def get_direction_dampener(self, direction: str) -> Tuple[int, int]:
+        """
+        Get (points_adjustment, min_conviction) for a given trade direction.
+
+        Args:
+            direction: "LONG", "SHORT", or "BUY"
+
+        Returns:
+            (adjustment_points, minimum_conviction_to_trade)
+            adjustment_points: positive = boost, negative = dampen
+            Add this to the raw conviction score.
+
+        Example:
+            dampener, min_conv = macro_ctx.get_direction_dampener("LONG")
+            adjusted_score = raw_score + dampener
+            if adjusted_score < min_conv: skip
+        """
+        tier = self.get_risk_tier()
+
+        # EXTREME tier with circuit breaker = halt ALL trades
+        if tier == MacroRiskTier.EXTREME and self._circuit_breaker_active:
+            return (-999, 999)  # Block everything — liquidity risk too high
+
+        tier_rules = TIER_DAMPENERS.get(tier, TIER_DAMPENERS[MacroRiskTier.CLEAR])
+        # Normalize direction
+        d = direction.upper()
+        if d == "BUY":
+            d = "LONG"
+        return tier_rules.get(d, (0, 70))
 
     def get_score_modifier(self) -> float:
         """
-        Returns a multiplier for technical scores based on macro conditions.
-        risk_off: reduce scores by 20%  →  0.8
-        risk_on:  boost scores by 10%   →  1.1
-        neutral:  no change             →  1.0
+        DEPRECATED — backward-compatible multiplicative modifier.
+        New code should use get_direction_dampener() instead.
+        Kept so any old code paths don't break.
         """
-        if self.macro_bias == "risk_off" and self.institutional_signal == "bearish":
-            return 0.7   # Very cautious — double risk-off
-        elif self.macro_bias == "risk_off" or self.institutional_signal == "bearish":
-            return 0.85  # Mild caution
-        elif self.macro_bias == "risk_on" and self.institutional_signal == "bullish":
-            return 1.15  # Strong conviction
-        elif self.macro_bias == "risk_on" or self.institutional_signal == "bullish":
-            return 1.05  # Mild boost
+        tier = self.get_risk_tier()
+        if tier == MacroRiskTier.EXTREME:
+            return 0.7
+        elif tier == MacroRiskTier.RISK_OFF:
+            return 0.85
+        elif tier == MacroRiskTier.CAUTION:
+            return 0.90
+        elif tier == MacroRiskTier.RISK_ON:
+            return 1.10
         return 1.0
+
+    def format_tier_log(self) -> str:
+        """
+        Single audit line for journalctl — complete regime decision visibility.
+
+        Example:
+          [MacroRisk] Tier-2 RISK_OFF | FII=-11163Cr | 7d_avg=-4200Cr
+          | ratio=2.66x | LONG: -20pts (min 75) | SHORT: +10pts (min 60)
+        """
+        tier = self.get_risk_tier()
+        tier_num = {
+            MacroRiskTier.RISK_ON: "R+",
+            MacroRiskTier.CLEAR: "0",
+            MacroRiskTier.CAUTION: "1",
+            MacroRiskTier.RISK_OFF: "2",
+            MacroRiskTier.EXTREME: "3",
+        }.get(tier, "?")
+
+        avg_str = f"{self._fii_7d_avg:+.0f}Cr" if self._fii_7d_avg is not None else "N/A"
+        ratio_str = f"{self._fii_ratio:.2f}x" if self._fii_ratio is not None else "N/A"
+
+        long_adj, long_min = self.get_direction_dampener("LONG")
+        short_adj, short_min = self.get_direction_dampener("SHORT")
+
+        long_str = "HALT" if long_adj <= -999 else f"{long_adj:+d}pts (min {long_min})"
+        short_str = "HALT" if short_adj <= -999 else f"{short_adj:+d}pts (min {short_min})"
+
+        return (
+            f"[MacroRisk] Tier-{tier_num} {tier.value} | "
+            f"FII={self.fii_net_cr:+.0f}Cr | 7d_avg={avg_str} | ratio={ratio_str} | "
+            f"LONG: {long_str} | SHORT: {short_str}"
+        )
 
     @property
     def summary(self) -> str:
@@ -92,15 +361,16 @@ class MacroContext:
 
 _cached_context: Optional[MacroContext] = None
 _last_refresh: Optional[datetime] = None
-REFRESH_INTERVAL_SECONDS = 7200  # 2 hours
+_last_values: Optional[Dict] = None  # For staleness detection
+REFRESH_INTERVAL_SECONDS = 5400  # 90 minutes (was 7200)
 
 
 def refresh_macro_context(force: bool = False) -> MacroContext:
     """
-    Refresh all macro data sources. Caches for 2 hours.
+    Refresh all macro data sources. Caches for 90 minutes.
     Call this from the runner on every cycle — it handles caching internally.
     """
-    global _cached_context, _last_refresh
+    global _cached_context, _last_refresh, _last_values
 
     now = datetime.now()
     if not force and _cached_context and _last_refresh:
@@ -129,6 +399,26 @@ def refresh_macro_context(force: bool = False) -> MacroContext:
                 ctx.usd_inr_change_pct = q.change_pct
             elif "DXY" in name:
                 ctx.dxy_change_pct = q.change_pct
+                ctx.dxy_price = q.price
+
+                # DXY sanity validation (P0-3)
+                if q.price > 0 and (q.price < 70 or q.price > 130):
+                    logger.error(
+                        f"[Macro] DXY value out of valid range: {q.price:.2f} — discarding. "
+                        f"Expected 70-130 for USD index / 20-35 for UUP ETF proxy."
+                    )
+                    ctx.dxy_change_pct = 0.0  # Don't let bad data influence regime
+
+        # Staleness detection
+        new_values = {name: q.price for name, q in quotes.items()}
+        if _last_values is not None and new_values == _last_values:
+            stale_minutes = (now - _last_refresh).total_seconds() / 60 if _last_refresh else 0
+            if stale_minutes >= 90:
+                logger.warning(
+                    f"[Macro] All macro values unchanged for {stale_minutes:.0f}+ min — "
+                    f"possible stale cache. Values: {new_values}"
+                )
+        _last_values = new_values
 
         # Global news headlines
         news = fetch_global_sentiment()
@@ -146,6 +436,11 @@ def refresh_macro_context(force: bool = False) -> MacroContext:
         ctx.dii_net_cr = inst.get("dii_net_cr", 0)
         ctx.institutional_signal = inst.get("signal", "neutral")
         ctx.institutional_summary = inst.get("summary", "")
+
+        # Record FII flow for rolling average computation
+        if ctx.fii_net_cr != 0:
+            _record_fii_flow(ctx.fii_net_cr)
+
     except Exception as e:
         logger.warning(f"FII/DII fetch failed: {e}")
 
@@ -161,6 +456,7 @@ def refresh_macro_context(force: bool = False) -> MacroContext:
     _last_refresh = now
 
     logger.info(f"Macro context refreshed: {ctx.summary}")
+    logger.info(ctx.format_tier_log())
     return ctx
 
 

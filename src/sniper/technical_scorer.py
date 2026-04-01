@@ -616,8 +616,8 @@ def meets_entry_threshold(
         thresholds = {"bullish": 55, "sideways": 65, "bearish": 75}
         return score.total >= thresholds.get(market_trend, 65)
     elif score.direction == "SHORT":
-        if market_trend == "bullish":
-            return False  # don't short in a bull market
-        thresholds = {"bearish": 55, "sideways": 65}
+        # Bullish market: allow shorts only with high conviction (>=80)
+        # A conviction-90 HYDRA SHORT with FDA rejection must survive
+        thresholds = {"bearish": 55, "sideways": 65, "bullish": 80}
         return score.total >= thresholds.get(market_trend, 65)
     return False

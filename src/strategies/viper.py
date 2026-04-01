@@ -49,6 +49,10 @@ class ViperStrategy(StrategyHead):
         # COIL dry-run log
         self._coil_signals: List[dict] = []
 
+        # Scan health tracking (P0-2)
+        self._scan_success_count: int = 0
+        self._scan_empty_count: int = 0
+
     # ── Core Interface ────────────────────────────────────
 
     def scan(self, access_token: str = None) -> List[WatchlistEntry]:
@@ -439,48 +443,69 @@ class ViperStrategy(StrategyHead):
         return min(score, 30.0)
 
     def _fetch_movers(self, access_token: str = None) -> List[dict]:
-        """Fetch top movers from momentum_scanner."""
-        try:
-            from src.sniper.momentum_scanner import fetch_top_movers
-            result = fetch_top_movers(access_token=access_token)
+        """Fetch top movers from momentum_scanner with retry on empty."""
+        import time as _time
 
-            movers = []
-            for c in result.get("gainers", []) + result.get("losers", []):
-                m = {
-                    "symbol": c.symbol if hasattr(c, 'symbol') else c.get("symbol", ""),
-                    "last_price": c.last_price if hasattr(c, 'last_price') else c.get("last_price", 0),
-                    "prev_close": c.prev_close if hasattr(c, 'prev_close') else c.get("prev_close", 0),
-                    "pct_change": c.pct_change if hasattr(c, 'pct_change') else c.get("pct_change", 0),
-                    "volume": c.volume if hasattr(c, 'volume') else c.get("volume", 0),
-                    "direction": c.direction if hasattr(c, 'direction') else c.get("direction", ""),
-                }
-                # Compute gap % and volume ratio from available data
-                prev = float(m["prev_close"])
-                if prev > 0:
-                    open_p = float(m.get("open_price", m["last_price"]))
-                    m["gap_pct"] = round((open_p - prev) / prev * 100, 2)
+        for attempt in range(1, 3):  # max 2 attempts
+            try:
+                from src.sniper.momentum_scanner import fetch_top_movers
+                result = fetch_top_movers(access_token=access_token)
+
+                movers = []
+                for c in result.get("gainers", []) + result.get("losers", []):
+                    m = {
+                        "symbol": c.symbol if hasattr(c, 'symbol') else c.get("symbol", ""),
+                        "last_price": c.last_price if hasattr(c, 'last_price') else c.get("last_price", 0),
+                        "prev_close": c.prev_close if hasattr(c, 'prev_close') else c.get("prev_close", 0),
+                        "pct_change": c.pct_change if hasattr(c, 'pct_change') else c.get("pct_change", 0),
+                        "volume": c.volume if hasattr(c, 'volume') else c.get("volume", 0),
+                        "direction": c.direction if hasattr(c, 'direction') else c.get("direction", ""),
+                    }
+                    prev = float(m["prev_close"])
+                    if prev > 0:
+                        open_p = float(m.get("open_price", m["last_price"]))
+                        m["gap_pct"] = round((open_p - prev) / prev * 100, 2)
+                    else:
+                        m["gap_pct"] = 0
+                    # ⚠️ PROXY WARNING: volume_ratio is derived from price change,
+                    # not actual relative volume. momentum_scanner does not provide
+                    # average volume data. All downstream volume-based rules
+                    # (COIL exhaust, GAP_AND_TRAP, etc.) use this proxy.
+                    m["volume_ratio"] = max(1.0, abs(float(m["pct_change"])) / 2.0)
+                    m["open_price"] = m.get("open_price", m["last_price"])
+                    movers.append(m)
+
+                if movers:
+                    if self._scan_count_today <= 1:
+                        logger.warning(
+                            "[VIPER] volume_ratio is a price-derived proxy (abs(pct_change)/2), "
+                            "not actual relative volume. Volume-based rules operate on estimated data."
+                        )
+                    self._scan_success_count += 1
+                    return movers
+
+                # Empty result
+                if attempt == 1:
+                    logger.warning(f"[VIPER] Mover fetch returned empty (attempt {attempt}/2) — retrying in 30s")
+                    _time.sleep(30)
                 else:
-                    m["gap_pct"] = 0
-                # ⚠️ PROXY WARNING: volume_ratio is derived from price change,
-                # not actual relative volume. momentum_scanner does not provide
-                # average volume data. All downstream volume-based rules
-                # (COIL exhaust, GAP_AND_TRAP, etc.) use this proxy.
-                m["volume_ratio"] = max(1.0, abs(float(m["pct_change"])) / 2.0)
-                m["open_price"] = m.get("open_price", m["last_price"])
+                    logger.error("[VIPER] Mover fetch empty after 2 attempts — skipping scan")
+                    self._scan_empty_count += 1
 
-                movers.append(m)
+            except Exception as e:
+                logger.error(f"[VIPER] Mover fetch failed (attempt {attempt}/2): {e}")
+                if attempt == 1:
+                    _time.sleep(30)
+                else:
+                    self._scan_empty_count += 1
 
-            if movers and self._scan_count_today <= 1:
-                logger.warning(
-                    "[VIPER] volume_ratio is a price-derived proxy (abs(pct_change)/2), "
-                    "not actual relative volume. Volume-based rules operate on estimated data."
-                )
+        return []
 
-            return movers
-
-        except Exception as e:
-            logger.error(f"[VIPER] Mover fetch failed: {e}")
-            return []
+    @property
+    def scan_health_summary(self) -> str:
+        """Return scan health for EOD report: 'X/Y scans returned data'."""
+        total = self._scan_success_count + self._scan_empty_count
+        return f"{self._scan_success_count}/{total} scans returned data"
 
     def _get_sector_map(self) -> dict:
         """Get symbol→sector mapping from sector_guard."""
@@ -519,6 +544,8 @@ class ViperStrategy(StrategyHead):
         self._coil_signals = []
         self._scan_count_today = 0
         self._last_scan_time = None
+        self._scan_success_count = 0
+        self._scan_empty_count = 0
         logger.info("[VIPER] Daily reset complete")
 
     def check_confluence(self, hydra_symbols: List[str]) -> List[str]:

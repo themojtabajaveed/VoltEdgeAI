@@ -19,7 +19,7 @@ from src.trading.execution_logger import get_executions_logger, log_execution
 from src.trading.positions import PositionBook
 from src.trading.exit_engine import ExitEngine, ExitSignal
 from src.trading.position_monitor import PositionMonitor
-from src.trading.sizing import MarketRegime, SymbolStats, allow_new_long
+from src.trading.sizing import MarketRegime, SymbolStats, allow_new_long, allow_new_short
 from src.trading.atr import compute_atr, compute_stop_distance, compute_atr_position_size
 from src.trading.trading_costs import compute_breakeven_move_pct, is_trade_viable
 from src.trading.circuit_limits import is_safe_to_enter_long, is_safe_to_enter_short
@@ -257,6 +257,9 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     viper_rescan_index = 0       # Which re-scan slot are we at
     scanner_short_symbols: list = []
 
+    # ── Mid-session bearish discovery (SHORT-4) ──
+    last_neg_pulse_date = None
+
     # ── Grok 4.20 Portfolio Orchestrator state ──
     grok_call_count = 0          # Global daily Grok call counter
     grok_morning_plan = None     # Output of grok_morning_strategist()
@@ -284,6 +287,11 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                 grok_morning_plan = None
                 grok_optimizer_index = 0
                 grok_last_actions = []
+                try:
+                    from src.llm.grok_client import reset_conviction_history
+                    reset_conviction_history()
+                except Exception:
+                    pass
                 reset_streaming_state()
                 exit_engine._divergence_warned.clear()
                 
@@ -522,6 +530,24 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         logging.error(f"VIPER re-scan #{viper_rescan_index + 1} failed: {viper_e}")
                     last_viper_scan_time = now
                     viper_rescan_index += 1
+
+                # 0d. 12:00 IST — Mid-session negative news pulse (SHORT-4)
+                if (current_time >= dt_time(12, 0) and current_time <= dt_time(12, 5)
+                        and last_neg_pulse_date != current_date):
+                    try:
+                        news_client = NewsClient()
+                        neg_news = news_client.fetch_negative_market_pulse()
+                        if neg_news:
+                            print(f"\n[{datetime.now(IST).strftime('%H:%M:%S')}] 📉 Negative market pulse: {len(neg_news)} bearish headlines")
+                            for item in neg_news[:5]:
+                                headline = getattr(item, 'title', '') or getattr(item, 'headline', '') or str(item)[:80]
+                                print(f"    • {headline[:100]}")
+                            logging.info(f"[NegPulse] {len(neg_news)} negative headlines at 12:00 IST")
+                        else:
+                            print(f"\n[{datetime.now(IST).strftime('%H:%M:%S')}] 📉 Negative pulse: no bearish headlines found")
+                    except Exception as neg_e:
+                        logging.warning(f"Negative market pulse fetch failed: {neg_e}")
+                    last_neg_pulse_date = current_date
 
                 # 1. Intraday tasks between 9:15 and 15:30
                 if MARKET_START <= current_time <= MARKET_END:
@@ -886,8 +912,9 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             try:
                                 macro_ctx = refresh_macro_context()
                                 print(f"  🌍 {macro_ctx.summary}")
-                                if macro_ctx.is_risk_off():
-                                    print(f"  ⚠️ MACRO RISK-OFF — trade scores will be dampened")
+                                tier_log = macro_ctx.format_tier_log()
+                                print(f"  {tier_log}")
+                                logging.info(tier_log)
                             except Exception as e:
                                 macro_ctx = None
                                 logging.warning(f"Macro context failed: {e}")
@@ -965,12 +992,16 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                     adjusted_score = adjust_score_for_time(tech_score.total, datetime.now(IST))
                                     tech_score.total = adjusted_score
                                     
-                                    # V4: Apply macro score modifier
+                                    # V4: Direction-aware macro dampener (tiered)
                                     if macro_ctx:
-                                        macro_mod = macro_ctx.get_score_modifier()
-                                        tech_score.total = tech_score.total * macro_mod
-                                        if macro_mod != 1.0:
-                                            print(f"    Macro modifier: {macro_mod:.2f}x → adjusted score={tech_score.total:.0f}")
+                                        dampener_pts, min_conviction = macro_ctx.get_direction_dampener(ds.direction)
+                                        raw_score = tech_score.total
+                                        tech_score.total = raw_score + dampener_pts
+                                        if dampener_pts != 0:
+                                            print(f"    Macro {ds.direction}: {dampener_pts:+d}pts → {raw_score:.0f} → {tech_score.total:.0f} (min {min_conviction})")
+                                        if tech_score.total < min_conviction:
+                                            print(f"    ❌ {sym} score {tech_score.total:.0f} below macro min conviction {min_conviction} for {ds.direction}")
+                                            continue
                                     
                                     # Check threshold
                                     if not meets_entry_threshold(tech_score, market_regime.trend):
@@ -1090,6 +1121,9 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                             )
                                             print(f"  ✅ EXECUTED LONG: {qty}x {sym} @ {ltp:.2f} SL={stop_price:.2f}")
                                     else:  # SHORT
+                                        sym_stats = SymbolStats(symbol=sym, last_price=ltp, avg_daily_turnover_rupees=ds.volume * ltp if ds.volume > 0 else 5_000_000.0)
+                                        if not allow_new_short(sym_stats, market_regime, risk_cfg):
+                                            continue
                                         result = executor.execute_short_sell(symbol=sym, ltp=ltp, qty=qty)
                                         if result.success:
                                             risk_state.trades_taken += 1
@@ -1262,6 +1296,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         run_script("log_daily_performance.py")
                         # ── VIPER: Save COIL dry-run report + daily reset ──
                         try:
+                            print(f"  🐍 VIPER scan health: {viper.scan_health_summary}")
+                            logging.info(f"[VIPER] EOD scan health: {viper.scan_health_summary}")
                             coil_path = viper.save_coil_report()
                             if coil_path:
                                 print(f"  🐍 VIPER: COIL report saved to {coil_path}")

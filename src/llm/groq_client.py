@@ -75,14 +75,19 @@ Headline: {headline}
 Body: {body_truncated}
 
 Urgency Scale:
-  9-10: Market-moving NOW (earnings beat >10%, major acquisition, regulatory approval)
-  7-8:  Significant catalyst (earnings inline but strong guidance, bulk deal by FII)
+  9-10: Market-moving NOW (earnings beat >10%, major acquisition, regulatory approval, FDA rejection, earnings miss >15%, fraud allegation, sudden CEO exit)
+  7-8:  Significant catalyst (earnings inline but strong guidance, bulk deal by FII, promoter pledge increase, large block sell by insider)
   5-6:  Moderate (board meeting outcome, minor corporate action)
   3-4:  Low (routine filings, AGM notice)
   1-2:  Noise (compliance filing, minor updates)
 
-Event Types: EARNINGS_SURPRISE, REGULATORY_APPROVAL, MERGER_ACQUISITION, BULK_BLOCK_DEAL, 
-PROMOTER_ACTIVITY, CAPEX_EXPANSION, SECTOR_POLICY, MANAGEMENT_CHANGE, DIVIDEND, OTHER
+Direction guidance:
+  BUY:     Positive catalyst (earnings beat, order win, regulatory approval, expansion, FII accumulation)
+  SHORT:   Negative catalyst (earnings miss, FDA rejection, promoter selling, fraud allegation, downgrade, management exit, regulatory penalty)
+  NEUTRAL: Ambiguous or unclear impact (board meeting scheduled, routine filing)
+
+Event Types: EARNINGS_SURPRISE, REGULATORY_APPROVAL, REGULATORY_REJECTION, MERGER_ACQUISITION, BULK_BLOCK_DEAL,
+PROMOTER_ACTIVITY, CAPEX_EXPANSION, SECTOR_POLICY, MANAGEMENT_CHANGE, DIVIDEND, FRAUD_GOVERNANCE, OTHER
 
 Return ONLY valid JSON:
 {{"urgency": <1-10>, "direction": "<BUY|SHORT|NEUTRAL>", "event_type": "<type>", "summary": "<1 sentence>", "material": <true|false>}}"""

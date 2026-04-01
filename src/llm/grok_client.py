@@ -42,6 +42,48 @@ _GROK_BASE_URL = "https://api.x.ai/v1"
 # Daily call budget — tracked by runner, not by individual strategies
 GROK_DAILY_BUDGET = 10  # generous upper bound; typical usage = 7
 
+# ── Conviction stability tracker (P1-2) ──────────────────────────────────
+# Tracks symbol → (last_conviction, timestamp) to detect wild swings
+_conviction_history: Dict[str, List[Dict]] = {}  # symbol → [{conviction, timestamp}]
+
+def _check_conviction_stability(symbol: str, new_conviction: float) -> float:
+    """
+    Check if conviction changed >30pts in <30min with no new data.
+    If unstable, log WARNING and return average of old and new.
+    Otherwise return new_conviction unchanged.
+    """
+    from datetime import datetime, timedelta
+    now = datetime.now()
+
+    history = _conviction_history.get(symbol, [])
+
+    # Prune entries older than 60 min
+    cutoff = now - timedelta(minutes=60)
+    history = [h for h in history if h["ts"] > cutoff]
+
+    adjusted = new_conviction
+    if history:
+        last = history[-1]
+        delta = abs(new_conviction - last["conviction"])
+        elapsed_min = (now - last["ts"]).total_seconds() / 60
+        if delta > 30 and elapsed_min < 30:
+            avg = (last["conviction"] + new_conviction) / 2
+            logger.warning(
+                f"[Grok/Stability] {symbol}: conviction swing {last['conviction']:.0f} → "
+                f"{new_conviction:.0f} ({delta:+.0f}pts in {elapsed_min:.0f}min) — "
+                f"using average {avg:.0f}"
+            )
+            adjusted = avg
+
+    history.append({"conviction": adjusted, "ts": now})
+    _conviction_history[symbol] = history
+    return adjusted
+
+
+def reset_conviction_history() -> None:
+    """Called at daily reset to clear stale conviction data."""
+    _conviction_history.clear()
+
 
 def _get_client():
     """Lazy-init the OpenAI client pointing at xAI."""
@@ -57,6 +99,26 @@ def _get_client():
         return None
 
     return OpenAI(api_key=api_key, base_url=_GROK_BASE_URL, timeout=45.0)
+
+
+def _classify_grok_error(e: Exception, raw_response: str = "") -> str:
+    """Classify a Grok API failure into a human-readable reason."""
+    err_type = type(e).__name__
+    err_str = str(e).lower()
+
+    if "timeout" in err_str or "timed out" in err_str:
+        return "timeout"
+    if "rate" in err_str or "429" in err_str or "too many" in err_str:
+        return "rate_limit"
+    if isinstance(e, (json.JSONDecodeError, ValueError)) or "json" in err_str:
+        return f"json_error (raw={raw_response[:200]})" if raw_response else "json_error"
+    if "api_key" in err_str or "auth" in err_str or "401" in err_str:
+        return "auth_error"
+    if "connection" in err_str or "network" in err_str:
+        return "network_error"
+    if not raw_response or raw_response.strip() == "":
+        return "empty_response"
+    return f"unknown ({err_type}: {str(e)[:100]})"
 
 
 def _extract_json(raw: str) -> Any:
@@ -181,7 +243,8 @@ Based on your experience, produce a TRADING PLAN for today.
 
 Rules:
 - Be CONSERVATIVE. Most days should deploy 40-60% capital, not 100%.
-- If macro is risk-off, recommend deploying ≤30% or SITTING OUT entirely.
+- If macro is risk-off, FAVOR SHORT candidates over sitting out. Deploy ≤30% on LONG, but SHORT setups with strong catalysts (earnings miss, FDA rejection, promoter selling) should be prioritized.
+- If macro is risk-on, favor LONG candidates. SHORT setups need higher conviction (≥80) to justify.
 - Rank at most 5 symbols across BOTH lists. Do NOT rank more than you'd actually trade.
 - Set realistic entry zones, stops, and targets based on ATR-appropriate levels.
 - Flag any symbols that appear in BOTH HYDRA events and VIPER movers (confluence = higher priority).
@@ -207,6 +270,7 @@ Return ONLY valid JSON:
     "risk_stance": "1 sentence on capital deployment"
 }}"""
 
+    raw = ""
     try:
         response = client.chat.completions.create(
             model=_GROK_MODEL,
@@ -215,6 +279,9 @@ Return ONLY valid JSON:
             max_tokens=1200,
         )
         raw = response.choices[0].message.content.strip()
+        if not raw:
+            logger.warning("[Grok/Morning] Empty response — reason: empty_response")
+            return None
         result = _extract_json(raw)
         logger.info(
             f"[Grok/Morning] regime={result.get('regime', '?')} "
@@ -222,7 +289,8 @@ Return ONLY valid JSON:
         )
         return result
     except Exception as e:
-        logger.error(f"[Grok/Morning] strategist call failed: {e}")
+        reason = _classify_grok_error(e, raw)
+        logger.warning(f"[Grok/Morning] Empty response — reason: {reason}")
         return None
 
 
@@ -359,7 +427,8 @@ Rules:
 - Confluence symbols get priority — both strategy heads agree.
 - Max 2 actions per call (we execute one at a time).
 - Be HARSH on conviction. Only recommend BUY/SHORT if you'd bet your own money.
-- If the morning plan said "sit out" or regime is bearish, respect that unless a genuinely strong catalyst overrides.
+- If the morning plan said "sit out" or regime is bearish, respect that for LONG entries. However, in a bearish/risk-off regime, SHORT candidates with strong catalysts should be MORE favorable — this is exactly when shorts work best.
+- In a risk-on/bullish regime, SHORT candidates need conviction ≥80 to override the macro tailwind.
 
 Return ONLY valid JSON array:
 [
@@ -375,6 +444,7 @@ Return ONLY valid JSON array:
     }}
 ]"""
 
+    raw = ""
     try:
         response = client.chat.completions.create(
             model=_GROK_MODEL,
@@ -383,11 +453,27 @@ Return ONLY valid JSON array:
             max_tokens=1000,
         )
         raw = response.choices[0].message.content.strip()
+        if not raw:
+            logger.warning("[Grok/Optimizer] Empty response — reason: empty_response")
+            return None
         result = _extract_json(raw)
 
         # Normalize: ensure we always return a list
         if isinstance(result, dict):
             result = [result]
+
+        # Apply conviction stability check (P1-2)
+        for action in result:
+            sym = action.get("symbol", "")
+            conv = action.get("conviction", 0)
+            reason = action.get("reason", "")
+            if sym and conv > 0:
+                stabilized = _check_conviction_stability(sym, conv)
+                action["conviction"] = stabilized
+                logger.info(
+                    f"[Grok/Optimizer] {sym} {action.get('action','?')}: "
+                    f"conviction={stabilized:.0f} | {reason}"
+                )
 
         logger.info(
             f"[Grok/Optimizer] actions="
@@ -395,7 +481,8 @@ Return ONLY valid JSON array:
         )
         return result
     except Exception as e:
-        logger.error(f"[Grok/Optimizer] portfolio optimizer call failed: {e}")
+        reason = _classify_grok_error(e, raw)
+        logger.warning(f"[Grok/Optimizer] Empty response — reason: {reason}")
         return None
 
 
@@ -485,6 +572,7 @@ Return ONLY valid JSON:
     "tomorrow_watch": ["SYMBOL — why to watch"]
 }}"""
 
+    raw = ""
     try:
         response = client.chat.completions.create(
             model=_GROK_MODEL,
@@ -493,9 +581,13 @@ Return ONLY valid JSON:
             max_tokens=800,
         )
         raw = response.choices[0].message.content.strip()
+        if not raw:
+            logger.warning("[Grok/EOD] Empty response — reason: empty_response")
+            return None
         result = _extract_json(raw)
         logger.info(f"[Grok/EOD] grade={result.get('grade', '?')} pnl=₹{daily_pnl:+.2f}")
         return result
     except Exception as e:
-        logger.error(f"[Grok/EOD] review call failed: {e}")
+        reason = _classify_grok_error(e, raw)
+        logger.warning(f"[Grok/EOD] Empty response — reason: {reason}")
         return None
