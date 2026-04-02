@@ -50,8 +50,15 @@ def _score_direction(predicted: str, actual_pct: float) -> int:
     return 1 if predicted == actual_dir else -1
 
 
-def _fetch_actual_changes(today: date) -> dict:
-    """Return {symbol: pct_change} from DailyPerformanceSnapshot for today."""
+def _fetch_actual_changes(today: date, predicted_symbols: list = None) -> dict:
+    """
+    Return {symbol: pct_change} for today.
+    Primary: DailyPerformanceSnapshot from DB.
+    Fallback: Kite OHLC API for symbols not in DB.
+    """
+    result = {}
+
+    # Primary: DB lookup
     try:
         from src.db import SessionLocal, DailyPerformanceSnapshot, init_db
         init_db()
@@ -59,10 +66,36 @@ def _fetch_actual_changes(today: date) -> dict:
             rows = session.query(DailyPerformanceSnapshot).filter(
                 DailyPerformanceSnapshot.date == today
             ).all()
-        return {r.symbol: r.pct_change for r in rows if r.pct_change is not None}
+        result = {r.symbol: r.pct_change for r in rows if r.pct_change is not None}
     except Exception as e:
         logger.warning(f"Could not fetch DailyPerformanceSnapshot: {e}")
-        return {}
+
+    # Fallback: Kite OHLC for missing symbols
+    if predicted_symbols:
+        missing = [s for s in predicted_symbols if s not in result]
+        if missing:
+            try:
+                from kiteconnect import KiteConnect
+                ka = os.getenv("ZERODHA_API_KEY")
+                at = os.getenv("ZERODHA_ACCESS_TOKEN")
+                if ka and at:
+                    kite = KiteConnect(api_key=ka)
+                    kite.set_access_token(at)
+                    nse_syms = [f"NSE:{s}" for s in missing]
+                    ohlc_data = kite.ohlc(nse_syms)
+                    for sym in missing:
+                        key = f"NSE:{sym}"
+                        if key in ohlc_data:
+                            d = ohlc_data[key]
+                            ltp = d.get("last_price", 0)
+                            prev_c = d.get("ohlc", {}).get("close", 0)
+                            if prev_c > 0 and ltp > 0:
+                                result[sym] = round((ltp - prev_c) / prev_c * 100, 2)
+                    logger.info(f"[Feedback] Kite fallback fetched {len(result) - len([r for r in result if r in missing])} additional prices for {len(missing)} missing symbols")
+            except Exception as e:
+                logger.warning(f"Kite fallback for feedback scoring failed: {e}")
+
+    return result
 
 
 def _generate_lessons(scored_today: list) -> list[str]:
@@ -115,7 +148,8 @@ def run_feedback_loop():
         logger.info("No unscored predictions for today — feedback loop has nothing to do.")
         return
 
-    actuals = _fetch_actual_changes(today)
+    predicted_symbols = [p.get("symbol") for p in today_preds if p.get("symbol")]
+    actuals = _fetch_actual_changes(today, predicted_symbols=predicted_symbols)
     scored_today = []
 
     for pred in today_preds:

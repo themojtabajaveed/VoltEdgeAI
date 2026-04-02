@@ -27,6 +27,11 @@ from src.trading.market_phase import (
     compute_layer_a, update_phase,
 )
 from src.trading.sector_guard import get_sector
+from src.trading.pattern_db import (
+    PatternDB, PatternOutcome, PatternFingerprint,
+    build_fingerprint, classify_catalyst_type, classify_time_bucket,
+    classify_vix_regime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +255,8 @@ class ConvictionEngine:
         self._threshold = threshold
         self._prev_snapshot: Optional[MarketSnapshot] = None
         self._morning_regime_bias: float = 0.0  # from Grok, -10 to +10
-        logger.info("[ConvEng] Conviction engine initialised, watchboard empty")
+        self._pattern_db = PatternDB()
+        logger.info(f"[ConvEng] Conviction engine initialised, watchboard empty | {self._pattern_db.get_summary()}")
 
     @property
     def watchboard_size(self) -> int:
@@ -273,6 +279,7 @@ class ConvictionEngine:
         """
         Add a signal to the watchboard.
         Returns True if added, False if duplicate symbol already present.
+        Computes Layer E from pattern DB if enough historical data exists.
         """
         key = f"{signal.symbol}_{signal.direction}"
         if key in self._watchboard:
@@ -287,10 +294,24 @@ class ConvictionEngine:
                 return True
             return False
 
+        # Compute Layer E from historical pattern matches
+        try:
+            vix = self._prev_snapshot.vix if self._prev_snapshot else 15.0
+            fp = build_fingerprint(
+                signal,
+                phase_value=self._phase_state.current_phase.value,
+                vix=vix,
+            )
+            layer_e = self._pattern_db.compute_layer_e(fp)
+            signal.layer_e_score = layer_e
+        except Exception as e:
+            logger.warning(f"[ConvEng] Layer E computation failed for {signal.symbol}: {e}")
+            # Keep default 50.0
+
         self._watchboard[key] = signal
         logger.info(
             f"[ConvEng] Added {signal.symbol} {signal.direction} [{signal.strategy}] "
-            f"C={signal.layer_c_score:.0f} — {signal.event_summary[:60]}"
+            f"C={signal.layer_c_score:.0f} E={signal.layer_e_score:.0f} — {signal.event_summary[:60]}"
         )
         return True
 
@@ -437,6 +458,61 @@ class ConvictionEngine:
     def get_active_signals(self) -> List[ActiveSignal]:
         """Return all WATCHING signals."""
         return [s for s in self._watchboard.values() if s.status == "WATCHING"]
+
+    def record_eod_outcomes(self, trade_records: List[dict]) -> None:
+        """
+        Record pattern outcomes for all signals on the watchboard at EOD.
+        Called before reset_daily().
+
+        Args:
+            trade_records: List of dicts with {symbol, direction, pnl, entry_price}
+                           from today's trades (from DB or positions).
+        """
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+        vix = self._prev_snapshot.vix if self._prev_snapshot else 15.0
+        phase_value = self._phase_state.current_phase.value
+
+        trade_lookup = {}
+        for tr in trade_records:
+            key = f"{tr.get('symbol', '')}_{tr.get('direction', '')}"
+            trade_lookup[key] = tr
+
+        recorded = 0
+        for key, signal in self._watchboard.items():
+            try:
+                fp = build_fingerprint(signal, phase_value=phase_value, vix=vix)
+                trade = trade_lookup.get(key)
+
+                if signal.status == "TRIGGERED" and trade:
+                    pnl = trade.get("pnl", 0)
+                    entry_price = trade.get("entry_price", 1)
+                    pnl_pct = (pnl / (entry_price * trade.get("qty", 1))) * 100 if entry_price > 0 else 0
+                    outcome = PatternOutcome(
+                        fingerprint=fp,
+                        triggered=True,
+                        pnl_pct=round(pnl_pct, 2),
+                        max_favorable=0.0,  # TODO: track MFE from positions
+                        max_adverse=0.0,    # TODO: track MAE from positions
+                        outcome="WIN" if pnl > 0 else "LOSS",
+                        date=today_str,
+                    )
+                else:
+                    outcome = PatternOutcome(
+                        fingerprint=fp,
+                        triggered=signal.status == "TRIGGERED",
+                        pnl_pct=0.0,
+                        max_favorable=0.0,
+                        max_adverse=0.0,
+                        outcome="EXPIRED" if signal.status != "TRIGGERED" else "WIN",
+                        date=today_str,
+                    )
+
+                self._pattern_db.record_outcome(outcome)
+                recorded += 1
+            except Exception as e:
+                logger.warning(f"[ConvEng] Failed to record outcome for {signal.symbol}: {e}")
+
+        logger.info(f"[ConvEng] Recorded {recorded} pattern outcomes to Layer E DB")
 
     def reset_daily(self) -> None:
         """Clear all state for new trading day."""

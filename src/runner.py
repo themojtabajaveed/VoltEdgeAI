@@ -178,6 +178,13 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     print(f"Max Daily Loss : ₹{risk_cfg.max_daily_loss_rupees:,.2f}")
     print(f"Per-Trade Risk : ₹{risk_cfg.per_trade_capital_rupees:,.2f}")
     print(f"Open Positions : {risk_cfg.max_open_positions}")
+
+    # P0-B: Email config validation at startup
+    from src.reports.email_sender import validate_email_config
+    email_status = validate_email_config()
+    print(f"  📧 {email_status}")
+    logging.info(f"Email config: {email_status}")
+
     print("\nPress Ctrl+C to stop.\n")
     
     exec_logger = get_executions_logger()
@@ -247,6 +254,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     last_scanner_date   = None
     last_feedback_date  = None
     last_discovery_run  = None
+    last_mid_session_date = None  # Mid-session pulse at 12:00
+    pre_market_ran      = False   # Track if pre-market brief succeeded today
     last_regime_update  = None    # V3: live regime updates
     last_autopsy_date   = None    # Phase G: EOD autopsy
     runner_start_time   = datetime.now(IST).time()  # Phase I: cascade prevention
@@ -624,6 +633,26 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                     except Exception as neg_e:
                         logging.warning(f"Negative market pulse fetch failed: {neg_e}")
                     last_neg_pulse_date = current_date
+
+                # 0e. 12:00 IST — Mid-Session Pulse Report (no LLM)
+                if _should_fire_scheduled_job(dt_time(12, 0), runner_start_time, current_time):
+                    if last_mid_session_date != current_date:
+                        try:
+                            from src.reports.mid_session_pulse import generate_mid_session_pulse
+                            generate_mid_session_pulse(
+                                conviction_engine=conviction_engine,
+                                market_snapshot=last_market_snapshot,
+                                positions=positions,
+                                slot_manager=slot_manager,
+                                risk_state=risk_state,
+                                risk_cfg=risk_cfg,
+                                live_client=client,
+                            )
+                            print(f"  📋 Mid-session pulse report sent")
+                        except Exception as mid_e:
+                            logging.error(f"Mid-session pulse failed: {mid_e}")
+                            print(f"  ❌ Mid-session pulse failed: {mid_e}")
+                        last_mid_session_date = current_date
 
                 # 1. Intraday tasks between 9:15 and 15:30
                 if MARKET_START <= current_time <= MARKET_END:
@@ -1499,22 +1528,51 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
 
                         last_eod_run_date = current_date
                         
-                # 3. 16:00 — Unified Post-Market Report
+                # 3. 16:00 — Unified Post-Market Report (v2)
                 if _should_fire_scheduled_job(dt_time(16, 0), runner_start_time, current_time):
                     if last_report_date != current_date:
                         try:
                             from src.reports.post_market_report import generate_post_market_report
-                            
+
                             kite_live = getattr(client, '_kite', None)
                             if kite_live is None:
-                                # Fallback if client is entirely offline (e.g. testing)
-                                from kiteconnect import KiteConnect
-                                kite_live = KiteConnect(api_key=os.getenv("ZERODHA_API_KEY"))
-                                kite_live.set_access_token(os.getenv("ZERODHA_ACCESS_TOKEN"))
+                                try:
+                                    from kiteconnect import KiteConnect
+                                    kite_live = KiteConnect(api_key=os.getenv("ZERODHA_API_KEY"))
+                                    kite_live.set_access_token(os.getenv("ZERODHA_ACCESS_TOKEN"))
+                                except Exception:
+                                    kite_live = None
 
+                            # Record pattern outcomes BEFORE generating report
+                            # (so report can reference Layer E updates)
+                            try:
+                                trade_records = []
+                                from src.db import SessionLocal, TradeRecord, init_db
+                                init_db()
+                                with SessionLocal() as sess:
+                                    trades = sess.query(TradeRecord).filter(
+                                        TradeRecord.exit_time >= datetime.combine(current_date, datetime.min.time()),
+                                        TradeRecord.exit_time <= datetime.combine(current_date, datetime.max.time()),
+                                    ).all()
+                                    for t in trades:
+                                        trade_records.append({
+                                            "symbol": t.symbol,
+                                            "direction": t.direction,
+                                            "pnl": t.pnl or 0,
+                                            "entry_price": t.entry_price or 0,
+                                            "qty": t.qty or 0,
+                                        })
+                                conviction_engine.record_eod_outcomes(trade_records)
+                            except Exception as eod_e:
+                                logging.error(f"Pattern DB EOD recording failed: {eod_e}")
+
+                            viper_health_str = getattr(viper, 'scan_health_summary', '')
                             generate_post_market_report(
                                 kite_client=kite_live,
                                 traded_symbols=set(daily_traded_symbols),
+                                conviction_engine=conviction_engine,
+                                viper_health=viper_health_str,
+                                pre_market_ran=pre_market_ran,
                             )
                         except Exception as chron_e:
                             logging.error(f"Post-Market Report failed: {chron_e}")
@@ -1522,16 +1580,30 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         last_report_date = current_date
                         last_autopsy_date = current_date
 
-                # 4. 18:01 — Prediction Feedback Loop (score morning's calls)
-                if _should_fire_scheduled_job(dt_time(18, 1), runner_start_time, current_time):
+                # 4. 16:30 — Prediction Feedback Loop (inline, after post-market)
+                if _should_fire_scheduled_job(dt_time(16, 30), runner_start_time, current_time):
                     if last_feedback_date != current_date:
-                        run_script("reports/feedback_loop.py")
+                        try:
+                            from src.reports.feedback_loop import run_feedback_loop
+                            run_feedback_loop()
+                            print(f"  📊 Feedback loop completed")
+                        except Exception as fb_e:
+                            logging.error(f"Feedback loop failed: {fb_e}")
+                            print(f"  ❌ Feedback loop failed: {fb_e}")
                         last_feedback_date = current_date
 
-                # 5. 09:00 IST (03:30 UTC) — Morning Global Intelligence Brief
+                # 5. 09:00 IST — Morning Global Intelligence Brief (inline)
                 if _should_fire_scheduled_job(dt_time(9, 0), runner_start_time, current_time):
                     if last_premarket_date != current_date:
-                        run_script("reports/pre_market_brief.py")
+                        try:
+                            from src.reports.pre_market_brief import generate_pre_market_brief
+                            generate_pre_market_brief()
+                            pre_market_ran = True
+                            print(f"  📰 Pre-market brief generated successfully")
+                        except Exception as brief_e:
+                            logging.error(f"Pre-market brief failed: {brief_e}")
+                            print(f"  ❌ Pre-market brief failed: {brief_e}")
+                            pre_market_ran = False
                         last_premarket_date = current_date
             
             # Sleep for 60 seconds before checking time again

@@ -9,9 +9,7 @@ for the evening feedback loop to score.
 import os
 import re
 import json
-import smtplib
 import logging
-from email.message import EmailMessage
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
@@ -308,43 +306,8 @@ Do NOT use placeholder/example symbols.
 
 
 def _send_email(subject: str, report_md: str, report_path: str) -> None:
-    enabled = os.getenv("REPORT_EMAIL_ENABLED")
-    if enabled != "1":
-        logger.info(f"[Brief] Email skipped — REPORT_EMAIL_ENABLED='{enabled}' (not '1')")
-        return
-    to_addr   = os.getenv("REPORT_EMAIL_TO")
-    smtp_host = os.getenv("REPORT_SMTP_HOST", "smtp.gmail.com")
-    smtp_port = int(os.getenv("REPORT_SMTP_PORT", 587))
-    smtp_user = os.getenv("REPORT_SMTP_USER")
-    smtp_pass = os.getenv("REPORT_SMTP_PASSWORD")
-
-    if not all([to_addr, smtp_user, smtp_pass]):
-        logger.warning(f"[Brief] Email failed: credentials missing — TO={to_addr}, USER={smtp_user}, PASS={'set' if smtp_pass else 'MISSING'}")
-        return
-    try:
-        import markdown as md_lib
-        html = md_lib.markdown(report_md, extensions=["tables", "nl2br"])
-    except ImportError:
-        html = f"<pre>{report_md}</pre>"
-
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = smtp_user
-    msg["To"] = to_addr
-    msg.set_content(report_md)
-    msg.add_alternative(html, subtype="html")
-    with open(report_path, "rb") as fh:
-        msg.add_attachment(fh.read(), maintype="text", subtype="markdown",
-                           filename=os.path.basename(report_path))
-    logger.info(f"[Brief] Sending email to {to_addr}...")
-    try:
-        with smtplib.SMTP(smtp_host, smtp_port) as srv:
-            srv.starttls()
-            srv.login(smtp_user, smtp_pass)
-            srv.send_message(msg)
-        logger.info(f"[Brief] Email sent successfully to {to_addr}")
-    except Exception as e:
-        logger.error(f"[Brief] Email failed: {type(e).__name__}: {e}")
+    from src.reports.email_sender import send_report_email
+    send_report_email(subject=subject, body_md=report_md, attachment_path=report_path)
 
 
 if __name__ == "__main__":
