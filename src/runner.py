@@ -31,6 +31,7 @@ from src.data_ingestion.instruments import load_instruments_csv, build_symbol_to
 from src.data_ingestion.market_sentiment import compute_index_sentiment
 from src.data_ingestion.macro_context import refresh_macro_context, get_cached_context
 from src.data_ingestion.nse_scraper import get_deal_signal
+from src.data_ingestion.short_ban_list import refresh_ban_lists, get_ban_summary
 from src.data_ingestion.pcr_tracker import compute_pcr, get_pcr_score_modifier
 from src.trading.depth_analyzer import analyze_depth, get_depth_score_modifier, should_skip_illiquid
 from src.tools.auto_login import auto_refresh_access_token
@@ -40,6 +41,8 @@ from src.strategies.viper import ViperStrategy
 from src.strategies.slot_manager import SlotManager, CONFLUENCE_BONUS
 from src.strategies.technical_body import TechnicalBody, reset_streaming_state, get_or_create_streaming_state, _streaming_states
 from src.trading.exit_monitor import ExitMonitorThread
+from src.trading.conviction_engine import ConvictionEngine, ActiveSignal
+from src.trading.market_phase import fetch_market_snapshot, MarketPhase
 from src.db.db_writer import get_db_writer
 import sys
 
@@ -64,6 +67,7 @@ def load_daily_regime() -> MarketRegime:
 MARKET_START  = dt_time(9, 15)   # 09:15 IST
 MARKET_END    = dt_time(15, 30)  # 15:30 IST
 SCANNER_TIME  = dt_time(9, 30)   # 09:30 — scanner runs once after open
+BAN_LIST_TIME = dt_time(8, 0)    # 08:00 — refresh F&O ban + T2T lists
 PREMARKET_TIME= dt_time(8, 30)   # 08:30 — pre-market macro check
 HYDRA_SCAN_TIME = dt_time(9, 0)  # 09:00 — HYDRA pre-market event scan
 INTRADAY_INTERVAL_MIN = 15
@@ -260,8 +264,15 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     # ── Mid-session bearish discovery (SHORT-4) ──
     last_neg_pulse_date = None
 
+    # ── SHORT-6/7: Ban list + T2T refresh ──
+    last_ban_refresh_date = None
+
     # ── Pre-market intelligence (v3) ──
     pre_market_intel = None  # PreMarketIntelligence result, cached daily
+
+    # ── Dynamic Conviction Engine (v4) ──
+    conviction_engine = ConvictionEngine()
+    last_market_snapshot = None  # MarketSnapshot from previous cycle
 
     # ── Grok 4.20 Portfolio Orchestrator state ──
     grok_call_count = 0          # Global daily Grok call counter
@@ -291,6 +302,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                 grok_optimizer_index = 0
                 grok_last_actions = []
                 pre_market_intel = None
+                conviction_engine.reset_daily()
+                last_market_snapshot = None
                 try:
                     from src.llm.grok_client import reset_conviction_history
                     reset_conviction_history()
@@ -319,6 +332,15 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                 logging.info(f"Resetting DailyRiskState + HYDRA + Grok orchestrator for new session: {current_date}")
             
             if is_weekday:
+                # -2. Ban List Refresh (08:00 IST) — before pre-market
+                if current_time >= BAN_LIST_TIME and last_ban_refresh_date != current_date:
+                    try:
+                        refresh_ban_lists()
+                        print(f"  🚫 {get_ban_summary()}")
+                    except Exception as ban_e:
+                        logging.error(f"Ban list refresh failed (fail-open): {ban_e}")
+                    last_ban_refresh_date = current_date
+
                 # -1. Pre-Market Macro Sentiment Check (08:30)
                 if current_time >= PREMARKET_TIME and last_premarket_date != current_date:
                     try:
@@ -417,15 +439,23 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                 grok_call_count += 1
                                 if grok_morning_plan:
                                     regime_from_grok = grok_morning_plan.get('regime', '?')
-                                    risk_stance = grok_morning_plan.get('risk_stance', '')
-                                    print(f"  🧠 Grok Morning Strategist: regime={regime_from_grok}")
-                                    print(f"     Risk stance: {risk_stance}")
+                                    morning_bias = grok_morning_plan.get('morning_regime_bias', 0)
+                                    conviction_engine.set_morning_regime_bias(morning_bias)
+                                    print(f"  🧠 Grok Morning Strategist: regime={regime_from_grok} bias={morning_bias:+d}")
                                     wl = grok_morning_plan.get('watchlist', [])
                                     for w in wl:
                                         print(f"     #{w.get('priority',0)}: {w.get('symbol','?')} {w.get('bias','?')} — {w.get('catalyst','')[:60]}")
                                     avoids = grok_morning_plan.get('avoid', [])
                                     if avoids:
                                         print(f"     ⚠️ Avoid: {avoids}")
+                                    # Inject Grok urgency adjustments into HYDRA watchlist
+                                    for w in wl:
+                                        delta = w.get('urgency_delta', 0)
+                                        if delta != 0:
+                                            for he in hydra.watchlist:
+                                                if he.symbol == w.get('symbol'):
+                                                    he.urgency = max(1.0, min(10.0, he.urgency + delta))
+                                                    logger.info(f"[Grok] {he.symbol} urgency adjusted by {delta:+d} → {he.urgency:.0f}")
                                 else:
                                     print(f"  🧠 Grok Morning Strategist: returned empty (will use mechanical rules)")
                         except Exception as grok_e:
@@ -452,7 +482,16 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                 print(f"  📡 Subscribed {len(hydra_syms)} HYDRA symbols to websocket")
                             except Exception as ws_e:
                                 logging.warning(f"HYDRA websocket subscribe failed: {ws_e}")
-                            # NOTE: Grok ranking removed (v2) — orchestrator handles this centrally
+                            # Add HYDRA signals to ConvictionEngine watchboard
+                            for entry in hydra_entries:
+                                conviction_engine.add_signal(ActiveSignal(
+                                    symbol=entry.symbol,
+                                    direction=entry.direction,
+                                    strategy="HYDRA",
+                                    layer_c_score=min(100.0, entry.urgency * 10.0),
+                                    event_summary=entry.event_summary,
+                                    metadata={"urgency": entry.urgency},
+                                ))
                         else:
                             print(f"  HYDRA: No hot events found since last close")
                     except Exception as e:
@@ -522,7 +561,19 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                     slot_manager.register_confluence(confluence_symbols)
                                     print(f"  🐉 DRAGON CONFLUENCE: {confluence_symbols} found in BOTH HYDRA + VIPER!")
 
-                                # NOTE: Grok ranking removed (v2) — orchestrator handles this centrally
+                                # Add VIPER STRIKE signals to ConvictionEngine watchboard
+                                for ve in viper_entries:
+                                    meta = getattr(ve, 'metadata', {}) or {}
+                                    if meta.get('trade_mode') == 'COIL':
+                                        continue  # COIL = dry-run only, skip watchboard
+                                    conviction_engine.add_signal(ActiveSignal(
+                                        symbol=ve.symbol,
+                                        direction=ve.direction,
+                                        strategy="VIPER",
+                                        layer_c_score=min(100.0, ve.urgency * 10.0),
+                                        event_summary=ve.event_summary,
+                                        metadata=meta,
+                                    ))
                             else:
                                 print(f"  VIPER: No tradeable movers found")
                         except Exception as viper_e:
@@ -673,6 +724,15 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                         hydra.watchlist.append(WatchlistEntry(
                                             symbol=evt.symbol, direction=evt.direction,
                                             event_summary=evt.summary or evt.headline, urgency=evt.urgency,
+                                        ))
+                                        # Also add to conviction engine watchboard
+                                        conviction_engine.add_signal(ActiveSignal(
+                                            symbol=evt.symbol,
+                                            direction=evt.direction,
+                                            strategy="HYDRA",
+                                            layer_c_score=min(100.0, evt.urgency * 10.0),
+                                            event_summary=evt.summary or evt.headline,
+                                            metadata={"urgency": evt.urgency},
                                         ))
                                     hydra.watchlist.sort(key=lambda e: e.urgency, reverse=True)
                                     hydra.watchlist = hydra.watchlist[:hydra.max_watchlist]
@@ -906,14 +966,97 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             should_run_intraday = True
                             
                     if should_run_intraday:
-                        # V1 pipeline DISABLED: run_juror_nse_live + daily_decision_engine
-                        # are orphaned — they write to JurorSignal/DecisionRecord tables
-                        # that Dragon Architecture (HYDRA+VIPER) never reads.
-                        # run_script("run_juror_nse_live.py")  # DISABLED
-                        # daily_decision_engine.main(watcher=watcher)  # DISABLED
-                        pass
-                        
                         last_intraday_run = now
+
+                        # ── V4: Dynamic Conviction Engine — phase + watchboard tick ──
+                        try:
+                            kite_raw = getattr(client, '_kite', None)
+                            mkt_snap = fetch_market_snapshot(kite_raw, last_market_snapshot)
+                            last_market_snapshot = mkt_snap
+
+                            # Build tech snapshots for all watchboard symbols
+                            import pandas as pd
+                            ce_tech_snaps = {}
+                            for sig in conviction_engine.get_active_signals():
+                                try:
+                                    bars = get_intraday_bars_for_symbol(sig.symbol, lookback_minutes=70)
+                                    if bars and len(bars) >= 5:
+                                        bars_df = pd.DataFrame([{
+                                            'date': b.timestamp, 'open': b.open, 'high': b.high,
+                                            'low': b.low, 'close': b.close, 'volume': b.volume
+                                        } for b in bars])
+                                        ce_tech_snaps[sig.symbol] = TechnicalBody.compute_or_stream(
+                                            sig.symbol, bars_df, latest_bar=bars[-1]
+                                        )
+                                except Exception:
+                                    pass
+
+                            triggered = conviction_engine.tick(mkt_snap, ce_tech_snaps)
+                            phase = conviction_engine.phase
+                            print(f"  📈 Phase: {phase.value.upper()} | Nifty={mkt_snap.nifty_pct:+.1f}% | A/D={mkt_snap.ad_ratio:.2f} | VIX={mkt_snap.vix:.1f} | {conviction_engine.get_watchboard_summary()}")
+                            logging.info(f"[Phase] {phase.value} | Nifty={mkt_snap.nifty_pct:+.1f}% | A/D={mkt_snap.ad_ratio:.2f}")
+
+                            # Execute triggered signals through existing risk stack
+                            for sig in triggered:
+                                sym = sig.symbol
+                                if sym in daily_traded_symbols:
+                                    continue
+                                if risk_state.trades_taken >= risk_cfg.max_trades_per_day:
+                                    break
+                                allowed, _ = slot_manager.can_trade(sym, sig.direction)
+                                if not allowed:
+                                    continue
+                                time_ok, _ = should_allow_new_entry(datetime.now(IST))
+                                if not time_ok:
+                                    continue
+
+                                # Get fresh price data
+                                tick = client.get_last_tick(sym)
+                                ltp = tick.ltp if tick else 0
+                                if ltp <= 0:
+                                    continue
+
+                                tech_snap = ce_tech_snaps.get(sym)
+                                atr_val = tech_snap.atr14 if tech_snap and tech_snap.atr14 > 0 else ltp * 0.015
+                                stop_dist = min(atr_val * 1.5, ltp * 0.025)
+                                capital_pct = slot_manager.get_capital_allocation(sig.last_conviction, sym)
+                                qty = compute_atr_position_size(
+                                    risk_cfg.per_trade_capital_rupees * capital_pct, stop_dist
+                                ) if stop_dist > 0 else 1
+
+                                if sig.direction == "BUY":
+                                    stop_price = round(ltp - stop_dist, 2)
+                                    result = executor.execute_buy(symbol=sym, ltp=ltp, qty=qty, market_regime=load_daily_regime())
+                                    if result.success:
+                                        risk_state.trades_taken += 1
+                                        daily_traded_symbols.add(sym)
+                                        slot_manager.allocate(sig.strategy, sym, "BUY", sig.last_conviction)
+                                        positions.on_buy_fill(
+                                            symbol=sym, qty=result.filled_qty, price=result.avg_price or ltp,
+                                            mode="INTRADAY", strategy=f"{sig.strategy}_CONV",
+                                            initial_stop_price=stop_price, atr=atr_val,
+                                        )
+                                        print(f"  ⚡ CONVICTION BUY: {qty}x {sym} @ {ltp:.2f} SL={stop_price:.2f} conviction={sig.last_conviction:.0f} [{sig.strategy}]")
+                                        log_execution(exec_logger, symbol=sym, ltp=ltp, result=result,
+                                                      meta={"strategy": f"{sig.strategy}_CONV", "conviction": sig.last_conviction, "stop": stop_price, "event": sig.event_summary})
+                                elif sig.direction == "SHORT":
+                                    stop_price = round(ltp + stop_dist, 2)
+                                    result = executor.execute_short_sell(symbol=sym, ltp=ltp, qty=qty)
+                                    if result.success:
+                                        risk_state.trades_taken += 1
+                                        daily_traded_symbols.add(sym)
+                                        slot_manager.allocate(sig.strategy, sym, "SHORT", sig.last_conviction)
+                                        positions.on_short_fill(
+                                            symbol=sym, qty=result.filled_qty, price=result.avg_price or ltp,
+                                            mode="INTRADAY", strategy=f"{sig.strategy}_CONV",
+                                            initial_stop_price=stop_price, atr=atr_val,
+                                        )
+                                        print(f"  ⚡ CONVICTION SHORT: {qty}x {sym} @ {ltp:.2f} SL={stop_price:.2f} conviction={sig.last_conviction:.0f} [{sig.strategy}]")
+                                        log_execution(exec_logger, symbol=sym, ltp=ltp, result=result,
+                                                      meta={"strategy": f"{sig.strategy}_CONV", "conviction": sig.last_conviction, "stop": stop_price, "event": sig.event_summary})
+                        except Exception as ce_e:
+                            logging.error(f"Conviction engine tick failed: {ce_e}")
+                            import traceback; traceback.print_exc()
 
                         # ── V2: STOCK DISCOVERY → SCORE → ANALYZE → EXECUTE ──────────
                         try:

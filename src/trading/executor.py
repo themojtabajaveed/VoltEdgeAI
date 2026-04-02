@@ -13,6 +13,7 @@ from src.config.risk import RiskConfig
 from src.trading.orders import OrderRequest, OrderResult, OrderSide, OrderType
 from src.trading.daily_risk_state import DailyRiskState
 from src.trading.sizing import calculate_position_size, SymbolStats, MarketRegime
+from src.data_ingestion.short_ban_list import is_safe_to_short
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,12 @@ class TradeExecutor:
                 success=False, broker_order_id=None,
                 message=f"Invalid ltp={ltp} or qty={qty} for SHORT {symbol}", filled_qty=0
             )
+
+        # SHORT-6/7: Ban list + T2T gate
+        if not is_safe_to_short(symbol):
+            msg = f"SHORT blocked by ban list / T2T restriction: {symbol}"
+            logger.warning(msg)
+            return OrderResult(success=False, broker_order_id=None, message=msg, filled_qty=0)
 
         if not self.risk.live_mode or self._zerodha is None:
             msg = f"DRY_RUN SHORT_SELL: {qty} × {symbol} @ ~{ltp:.2f}"

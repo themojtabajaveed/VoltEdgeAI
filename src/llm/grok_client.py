@@ -250,25 +250,37 @@ Rules:
 - Flag any symbols that appear in BOTH HYDRA events and VIPER movers (confluence = higher priority).
 - Check X/Twitter for real-time sentiment on the top 3 candidates — are traders bullish or fading?
 
+IMPORTANT: Your role is to set a REGIME BIAS for the mechanical trading system, NOT to make deployment decisions. The trading engine handles timing and execution autonomously. Your bias adjusts Layer A of the conviction engine.
+
 Return ONLY valid JSON:
 {{
     "regime": "<AGGRESSIVE_BULLISH|CAUTIOUS_BULLISH|NEUTRAL|CAUTIOUS_BEARISH|AGGRESSIVE_BEARISH>",
     "regime_reasoning": "<2-3 sentences>",
+    "morning_regime_bias": <integer from -10 to +10>,
     "watchlist": [
         {{
             "symbol": "SYMBOL",
             "bias": "LONG or SHORT",
             "priority": 1,
-            "entry_zone": [low_price, high_price],
-            "stop": stop_price,
-            "target": target_price,
             "catalyst": "1 sentence why",
-            "max_allocation_pct": 20
+            "urgency_delta": <-1, 0, or +1>
         }}
     ],
-    "avoid": ["SYMBOL — reason", ...],
-    "risk_stance": "1 sentence on capital deployment"
-}}"""
+    "sector_warnings": ["SECTOR — risk reason", ...],
+    "avoid": ["SYMBOL — reason", ...]
+}}
+
+morning_regime_bias guide:
+  +10: extremely bullish macro, all signals get a tailwind
+  +5: mildly bullish, favor longs
+  0: neutral, no adjustment
+  -5: mildly bearish, favor shorts
+  -10: extremely bearish, heavy penalty on longs
+
+urgency_delta: adjust the catalyst urgency score by +1/0/-1 based on your qualitative assessment.
+  +1: catalyst is stronger than the mechanical urgency suggests
+  0: urgency score is fair
+  -1: catalyst is weaker than it appears (e.g., already priced in, sector noise)"""
 
     raw = ""
     try:
@@ -283,8 +295,18 @@ Return ONLY valid JSON:
             logger.warning("[Grok/Morning] Empty response — reason: empty_response")
             return None
         result = _extract_json(raw)
+        # Extract morning_regime_bias; fallback: derive from regime string
+        if "morning_regime_bias" not in result or result["morning_regime_bias"] is None:
+            regime_str = result.get("regime", "NEUTRAL").upper()
+            bias_map = {
+                "AGGRESSIVE_BULLISH": 10, "CAUTIOUS_BULLISH": 5,
+                "NEUTRAL": 0,
+                "CAUTIOUS_BEARISH": -5, "AGGRESSIVE_BEARISH": -10,
+            }
+            result["morning_regime_bias"] = bias_map.get(regime_str, 0)
         logger.info(
             f"[Grok/Morning] regime={result.get('regime', '?')} "
+            f"bias={result.get('morning_regime_bias', 0):+d} "
             f"watchlist={[w.get('symbol') for w in result.get('watchlist', [])]}"
         )
         return result
