@@ -127,7 +127,14 @@ class PatternDB:
         if os.path.exists(self._path):
             try:
                 with open(self._path) as f:
-                    self._outcomes = json.load(f)
+                    data = json.load(f)
+                # Handle both list format and legacy dict format
+                if isinstance(data, list):
+                    self._outcomes = data
+                elif isinstance(data, dict):
+                    self._outcomes = data.get("entries", data.get("outcomes", []))
+                else:
+                    self._outcomes = []
                 logger.info(f"[PatternDB] Loaded {len(self._outcomes)} historical outcomes")
             except Exception as e:
                 logger.warning(f"[PatternDB] Load failed: {e} — starting fresh")
@@ -201,6 +208,9 @@ class PatternDB:
         """One-line summary for logging."""
         if not self._outcomes:
             return "PatternDB: empty (cold start)"
-        wins = sum(1 for o in self._outcomes if o.get("outcome") == "WIN")
         total = len(self._outcomes)
+        wins = 0
+        for o in self._outcomes:
+            if isinstance(o, dict) and o.get("outcome") == "WIN":
+                wins += 1
         return f"PatternDB: {total} outcomes, {wins} wins ({wins/total*100:.0f}%)"
