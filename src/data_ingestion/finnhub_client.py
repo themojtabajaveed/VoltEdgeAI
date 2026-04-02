@@ -106,8 +106,16 @@ MACRO_SYMBOLS = {
     "OANDA:GBP_USD": "GBP/USD",
 }
 
-# For DXY we use the US Dollar Index ETF as proxy
-DXY_SYMBOL = "UUP"
+# US market proxies for pre-market intelligence
+US_MARKET_SYMBOLS = {
+    "SPY": "S&P 500 (SPY)",
+    "QQQ": "Nasdaq 100 (QQQ)",
+}
+
+# DXY: UUP ETF proxy is broken (~$27 vs real DXY ~104).
+# We use EUR/USD inverse instead — EUR is 57% of DXY basket.
+# Dollar strengthening = EUR/USD down = bearish for EM/India.
+DXY_SYMBOL = "UUP"  # kept for backward compat, not used for scoring
 
 
 def fetch_macro_quotes() -> Dict[str, MacroQuote]:
@@ -143,6 +151,31 @@ def fetch_macro_quotes() -> Dict[str, MacroQuote]:
             timestamp=int(dxy_data.get("t", time.time())),
         )
 
+    return results
+
+
+def fetch_us_market_quotes() -> Dict[str, MacroQuote]:
+    """
+    Fetch SPY and QQQ quotes for US market close data.
+    At 08:30 IST, these reflect last night's US close.
+    """
+    results = {}
+    for symbol, name in US_MARKET_SYMBOLS.items():
+        data = _get("quote", {"symbol": symbol})
+        if data and "c" in data:
+            price = float(data["c"])
+            prev = float(data.get("pc", price))
+            change_pct = ((price - prev) / prev * 100) if prev > 0 else 0
+            ts = int(data.get("t", 0))
+            # Staleness check: discard if quote is older than 48 hours
+            if ts > 0 and (time.time() - ts) > 172800:
+                logger.warning(f"[Finnhub] {symbol} quote is >48h old (ts={ts}) — stale, skipping")
+                continue
+            results[name] = MacroQuote(
+                symbol=symbol, name=name, price=price,
+                change_pct=round(change_pct, 3),
+                timestamp=ts,
+            )
     return results
 
 

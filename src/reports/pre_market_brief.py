@@ -124,12 +124,40 @@ def generate_pre_market_brief():
         except Exception:
             pass
 
+    # ── Pre-Market Intelligence (v3): Machine-computed regime section ────────
+    section_0_md = ""
+    intel_context = "(Pre-market intelligence unavailable)"
+    try:
+        from src.data_ingestion.pre_market_intelligence import fetch_and_compute
+        # Try to get Kite client for VIX
+        kite_for_brief = None
+        try:
+            from kiteconnect import KiteConnect
+            ka = os.getenv("ZERODHA_API_KEY")
+            at = os.getenv("ZERODHA_ACCESS_TOKEN")
+            if ka and at:
+                kite_for_brief = KiteConnect(api_key=ka)
+                kite_for_brief.set_access_token(at)
+        except Exception:
+            pass
+
+        intel = fetch_and_compute(kite_client=kite_for_brief)
+        if intel:
+            section_0_md = intel.format_email_table() + "\n\n---\n\n"
+            intel_context = intel.format_log_line()
+            logger.info(f"[Brief] {intel_context}")
+    except Exception as intel_e:
+        logger.warning(f"[Brief] Pre-market intelligence failed: {intel_e}")
+
     client = genai.Client(api_key=api_key)
 
     prompt = f"""You are VoltEdge's senior pre-market analyst with 20+ years of experience in Indian equity markets.
 
 Today is {today}. Your task is to deliver a structured, factual, actionable morning intelligence brief.
 Focus ONLY on events from the last 12 hours (since 6 PM yesterday). Do NOT repeat stale information.
+
+## VoltEdge Machine Intelligence (real data, not hallucinated):
+{intel_context}
 
 ## Feedback Loop Context (Learn from past predictions):
 {lessons_context}
@@ -220,6 +248,10 @@ Do NOT use placeholder/example symbols.
             config=types.GenerateContentConfig(tools=[{"google_search": {}}]),
         )
         report_md = response.text
+
+        # Prepend Section 0 (machine-computed) before AI-generated content
+        if section_0_md:
+            report_md = section_0_md + report_md
 
         # ── Parse and save regime JSON ──────────────────────────────────────
         match = re.search(r"```json\s*(\{.*?\})\s*```", report_md, re.DOTALL)

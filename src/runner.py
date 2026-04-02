@@ -260,6 +260,9 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     # ── Mid-session bearish discovery (SHORT-4) ──
     last_neg_pulse_date = None
 
+    # ── Pre-market intelligence (v3) ──
+    pre_market_intel = None  # PreMarketIntelligence result, cached daily
+
     # ── Grok 4.20 Portfolio Orchestrator state ──
     grok_call_count = 0          # Global daily Grok call counter
     grok_morning_plan = None     # Output of grok_morning_strategist()
@@ -287,6 +290,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                 grok_morning_plan = None
                 grok_optimizer_index = 0
                 grok_last_actions = []
+                pre_market_intel = None
                 try:
                     from src.llm.grok_client import reset_conviction_history
                     reset_conviction_history()
@@ -363,6 +367,27 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             
                             print(f"[08:30 PRE-MARKET ORACLE] Overnight Sentiment: {trend.upper()} ({score:+.2f})")
                             logging.info(f"Pre-Market regime updated: {regime_data}")
+
+                        # ── Pre-Market Intelligence (v3) ──
+                        # Composite forward-looking score: US markets, crude, DXY, FII, VIX, PCR
+                        try:
+                            from src.data_ingestion.pre_market_intelligence import fetch_and_compute
+                            # Get Kite client for India VIX fetch
+                            kite_raw = getattr(client, '_kite', None)
+                            # Get existing macro context for FII/DII data
+                            existing_macro = get_cached_context() if get_cached_context().fii_net_cr != 0 else None
+                            pre_market_intel = fetch_and_compute(
+                                kite_client=kite_raw,
+                                macro_context=existing_macro,
+                            )
+                            if pre_market_intel:
+                                print(f"  📊 {pre_market_intel.format_log_line()}")
+                                logging.info(pre_market_intel.format_log_line())
+                            else:
+                                print(f"  ⚠️ Pre-market intelligence: no signals available")
+                        except Exception as pmi_e:
+                            logging.warning(f"Pre-market intelligence failed: {pmi_e}")
+                            print(f"  ⚠️ Pre-market intelligence failed: {pmi_e}")
 
                         # ── Grok Morning Strategist (v2) ──
                         # Full portfolio-level pre-market call: macro + events + movers → daily plan
@@ -911,6 +936,9 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             # V4: Macro context refresh (commodity/forex/FII/DII)
                             try:
                                 macro_ctx = refresh_macro_context()
+                                # Inject pre-market intelligence if available
+                                if pre_market_intel:
+                                    macro_ctx.set_composite_intelligence(pre_market_intel)
                                 print(f"  🌍 {macro_ctx.summary}")
                                 tier_log = macro_ctx.format_tier_log()
                                 print(f"  {tier_log}")

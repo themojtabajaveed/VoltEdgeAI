@@ -174,25 +174,36 @@ class MacroContext:
     _nifty_open_change_pct: float = 0.0    # Set by runner after first Nifty tick
     _circuit_breaker_active: bool = False   # Set by runner if index circuit hit
 
+    # v3: Composite pre-market intelligence score
+    _composite_score: Optional[int] = field(default=None, repr=False)
+    _composite_intelligence: Optional[object] = field(default=None, repr=False)  # PreMarketIntelligence
+
     def is_risk_off(self) -> bool:
         """True if macro conditions suggest caution. Backward-compatible."""
         tier = self.get_risk_tier()
         return tier in (MacroRiskTier.CAUTION, MacroRiskTier.RISK_OFF, MacroRiskTier.EXTREME)
 
+    def set_composite_intelligence(self, intel) -> None:
+        """Inject pre-market intelligence into macro context.
+        Called by runner after compute_pre_market_intelligence()."""
+        self._composite_intelligence = intel
+        self._composite_score = intel.composite_score if intel else None
+        # Reset cached tier so it gets recomputed with composite data
+        self._risk_tier = None
+
     def get_risk_tier(self) -> MacroRiskTier:
         """
-        Compute the macro risk tier from FII flows and macro signals.
+        Compute the macro risk tier.
 
-        Logic:
-          1. Index circuit breaker → EXTREME (override everything)
-          2. FII selling > 3x 7-day avg OR Nifty down >2% at open → EXTREME
-          3. FII selling 1.5x-3x 7-day avg → RISK_OFF
-          4. FII selling 1.0x-1.5x 7-day avg → CAUTION
-          5. FII net positive + macro risk_on → RISK_ON
-          6. Everything else → CLEAR
+        v3 logic (priority order):
+          1. Circuit breaker → EXTREME (override everything)
+          2. Nifty gap down >2% at open → EXTREME
+          3. Composite pre-market score (if available) → tier from score
+          4. FALLBACK: FII-ratio logic (if composite unavailable)
 
-        When 7-day average is unavailable (first few days), falls back to
-        absolute FII thresholds calibrated for Indian markets.
+        The composite score integrates US markets, crude, DXY, FII/DII,
+        VIX, and PCR into a single 0-100 score. When available, it
+        replaces the old FII-only tier determination.
         """
         if self._risk_tier is not None:
             return self._risk_tier
@@ -202,28 +213,45 @@ class MacroContext:
             self._risk_tier = MacroRiskTier.EXTREME
             return self._risk_tier
 
-        fii = self.fii_net_cr  # Negative = selling
-        avg_7d = self._fii_7d_avg if self._fii_7d_avg is not None else _compute_fii_7d_avg()
-        self._fii_7d_avg = avg_7d
-
         # Nifty opening gap check
         if self._nifty_open_change_pct <= -2.0:
             self._risk_tier = MacroRiskTier.EXTREME
             return self._risk_tier
 
+        # ── v3: Composite score path (primary) ────────────────────────
+        if self._composite_score is not None:
+            score = self._composite_score
+            if score >= 70:
+                self._risk_tier = MacroRiskTier.RISK_ON
+            elif score >= 55:
+                self._risk_tier = MacroRiskTier.CLEAR
+            elif score >= 40:
+                self._risk_tier = MacroRiskTier.CAUTION
+            elif score >= 25:
+                self._risk_tier = MacroRiskTier.RISK_OFF
+            else:
+                self._risk_tier = MacroRiskTier.EXTREME
+            return self._risk_tier
+
+        # ── v2 FALLBACK: FII-ratio logic (when composite unavailable) ──
+        logger.info(
+            "[PreMkt] Composite unavailable — falling back to FII-ratio "
+            "logic. Reason: pre-market intelligence not computed or all signals failed"
+        )
+
+        fii = self.fii_net_cr  # Negative = selling
+        avg_7d = self._fii_7d_avg if self._fii_7d_avg is not None else _compute_fii_7d_avg()
+        self._fii_7d_avg = avg_7d
+
         # Compute FII ratio vs 7-day average
         if avg_7d is not None and avg_7d < 0:
-            # Average is negative (net selling trend) — ratio is today vs avg
-            # fii=-11000, avg=-4000 → ratio = 11000/4000 = 2.75x
             self._fii_ratio = abs(fii) / abs(avg_7d) if fii < 0 else 0.0
         elif avg_7d is not None and avg_7d >= 0 and fii < 0:
-            # Average was buying, today is selling — clearly elevated
-            # Treat any selling day against a buying-average as at least CAUTION
-            self._fii_ratio = 2.0  # Force at least RISK_OFF consideration
+            self._fii_ratio = 2.0
         else:
             self._fii_ratio = None
 
-        # Determine tier
+        # Determine tier from FII ratio
         if self._fii_ratio is not None and fii < 0:
             ratio = self._fii_ratio
             if ratio >= 3.0:
@@ -233,11 +261,8 @@ class MacroContext:
             elif ratio >= 1.0:
                 self._risk_tier = MacroRiskTier.CAUTION
             else:
-                # Selling but below average — mild
                 self._risk_tier = MacroRiskTier.CAUTION if fii < -500 else MacroRiskTier.CLEAR
         elif self._fii_ratio is None and fii < 0:
-            # Fallback: no history available, use absolute thresholds
-            # Calibrated for Indian markets (₹ Crores)
             if fii < -12000:
                 self._risk_tier = MacroRiskTier.EXTREME
             elif fii < -5000:
@@ -339,8 +364,10 @@ class MacroContext:
         long_str = "HALT" if long_adj <= -999 else f"{long_adj:+d}pts (min {long_min})"
         short_str = "HALT" if short_adj <= -999 else f"{short_adj:+d}pts (min {short_min})"
 
+        composite_str = f"composite={self._composite_score}/100 | " if self._composite_score is not None else ""
+
         return (
-            f"[MacroRisk] Tier-{tier_num} {tier.value} | "
+            f"[MacroRisk] Tier-{tier_num} {tier.value} | {composite_str}"
             f"FII={self.fii_net_cr:+.0f}Cr | 7d_avg={avg_str} | ratio={ratio_str} | "
             f"LONG: {long_str} | SHORT: {short_str}"
         )
