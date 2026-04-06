@@ -17,7 +17,9 @@ Key concepts:
   - Signals wait for conditions to align, then fire automatically
   - Catalyst (Layer C) is immutable — timing layers change around it
 """
+import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -54,12 +56,29 @@ SIGNAL_MAX_AGE_HOURS = 4.0
 SIGNAL_EXPIRY_TIME = (14, 30)  # 14:30 IST — no new entries last hour
 
 
+def classify_signal_type(metadata: dict) -> str:
+    """
+    Classify signal by expected valid time window using ATR% and gap%.
+
+    SCALP    — valid < 5 min: high gap + low ATR (fast mean-reversion)
+    MOMENTUM — valid 5–30 min: typical momentum setup
+    SWING    — valid > 30 min: high ATR or low-gap directional move
+    """
+    atr_pct = float(metadata.get("atr_pct", 2.0))
+    gap_pct = abs(float(metadata.get("gap_pct", 0.0)))
+    if gap_pct > 2.0 and atr_pct < 1.5:
+        return "SCALP"
+    if atr_pct > 3.0:
+        return "SWING"
+    return "MOMENTUM"
+
+
 @dataclass
 class ActiveSignal:
     """A signal on the conviction watchboard, recomputed every cycle."""
     symbol: str
     direction: str              # "BUY" or "SHORT"
-    strategy: str               # "HYDRA", "VIPER", "V2_DISCOVERY"
+    strategy: str               # "HYDRA", "VIPER", "V2_DISCOVERY", "VIPER-COIL"
     layer_c_score: float        # Catalyst quality (0–100, FROZEN)
     layer_e_score: float = 50.0 # Pattern match (cold start at 50)
     event_summary: str = ""
@@ -70,10 +89,16 @@ class ActiveSignal:
     status: str = "WATCHING"    # WATCHING, TRIGGERED, EXPIRED
     last_conviction: float = 0.0
     metadata: dict = field(default_factory=dict)  # strategy-specific extras
+    is_dry_run: bool = False    # True for COIL/observation-only — NEVER executes live
+    window_status: str = "ACTIVE"  # ACTIVE, EXPIRED, MISSED
+    signal_type: str = "MOMENTUM"  # SCALP, MOMENTUM, SWING
 
     def __post_init__(self):
         if self.created_at is None:
             self.created_at = datetime.now(IST)
+        # Auto-classify on creation if metadata is available
+        if self.metadata:
+            self.signal_type = classify_signal_type(self.metadata)
 
 
 def compute_layer_b(symbol: str, snapshot: MarketSnapshot, direction: str) -> float:
@@ -384,14 +409,19 @@ class ConvictionEngine:
                 f"| prev={prev_conviction:.0f} | Δ={delta:+.0f}"
             )
 
-            # Check threshold
-            if new_conviction >= self._threshold:
+            # Check threshold — dry-run signals NEVER trigger execution
+            if new_conviction >= self._threshold and not signal.is_dry_run:
                 signal.status = "TRIGGERED"
                 triggered.append(signal)
                 logger.info(
                     f"[ConvEng] *** TRIGGERED *** {signal.symbol} {signal.direction} "
                     f"conviction={new_conviction:.0f} >= {self._threshold:.0f} "
                     f"| waited {len(signal.conviction_history)} cycles"
+                )
+            elif new_conviction >= self._threshold and signal.is_dry_run:
+                logger.info(
+                    f"[ConvEng] [DRY-RUN] {signal.symbol} {signal.direction} "
+                    f"conviction={new_conviction:.0f} would trigger but is_dry_run=True — observing only"
                 )
 
         self._prev_snapshot = market_snapshot
@@ -513,6 +543,69 @@ class ConvictionEngine:
                 logger.warning(f"[ConvEng] Failed to record outcome for {signal.symbol}: {e}")
 
         logger.info(f"[ConvEng] Recorded {recorded} pattern outcomes to Layer E DB")
+
+    def update_window_statuses(self, price_map: Dict[str, float]) -> None:
+        """
+        Update window_status for all watchboard signals based on current prices.
+
+        MISSED  = price moved >0.5% in the signal direction but conviction never triggered
+        EXPIRED = signal already expired without triggering
+        ACTIVE  = signal still valid and watching
+        """
+        for key, signal in self._watchboard.items():
+            if signal.status == "EXPIRED":
+                signal.window_status = "EXPIRED"
+                continue
+            if signal.status == "TRIGGERED":
+                signal.window_status = "ACTIVE"
+                continue
+            # WATCHING — check if price has moved past entry zone
+            current_price = price_map.get(signal.symbol)
+            if current_price and signal.metadata.get("entry_price"):
+                entry = float(signal.metadata["entry_price"])
+                if entry > 0:
+                    move_pct = (current_price - entry) / entry * 100
+                    if signal.direction == "BUY" and move_pct > 0.5:
+                        signal.window_status = "MISSED"
+                    elif signal.direction == "SHORT" and move_pct < -0.5:
+                        signal.window_status = "MISSED"
+                    else:
+                        signal.window_status = "ACTIVE"
+
+    def persist_watchboard_to_json(self) -> str:
+        """
+        Persist all watchboard signals to a daily JSON file for post-mortem analysis.
+        Called at EOD before reset_daily(). Returns the file path.
+        """
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+        data = []
+        for key, sig in self._watchboard.items():
+            data.append({
+                "symbol": sig.symbol,
+                "direction": sig.direction,
+                "strategy": sig.strategy,
+                "status": sig.status,
+                "window_status": sig.window_status,
+                "signal_type": sig.signal_type,
+                "is_dry_run": sig.is_dry_run,
+                "created_at": sig.created_at.isoformat() if sig.created_at else None,
+                "last_conviction": sig.last_conviction,
+                "layer_c_score": sig.layer_c_score,
+                "layer_e_score": sig.layer_e_score,
+                "conviction_history": list(sig.conviction_history),
+                "event_summary": sig.event_summary,
+                "metadata": {k: v for k, v in sig.metadata.items()
+                             if isinstance(v, (str, int, float, bool, type(None)))},
+            })
+        path = os.path.join("logs", "conviction_signals", f"{today_str}_signals.json")
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, default=str)
+            logger.info(f"[ConvEng] Persisted {len(data)} signals to {path}")
+        except Exception as e:
+            logger.error(f"[ConvEng] Failed to persist watchboard: {e}")
+        return path
 
     def reset_daily(self) -> None:
         """Clear all state for new trading day."""

@@ -5,7 +5,6 @@ import os
 class RiskConfig:
     live_mode: bool
     max_trades_per_day: int
-    max_daily_loss_rupees: float
     per_trade_capital_rupees: float  # Minimum ₹5000 to keep brokerage costs < 1%
     max_open_positions: int
     intraday_stop_pct: float = 0.025       # 2.5% hard stop cap
@@ -16,6 +15,7 @@ class RiskConfig:
     strong_market_size_factor: float = 1.0
     min_avg_daily_turnover_rupees: float = 2_000_000.0
     min_price_rupees: float = 50.0
+    dry_run_conviction_threshold: float = 60.0  # Lower threshold for paper trades only
 
 def load_risk_config() -> RiskConfig:
     """
@@ -23,7 +23,6 @@ def load_risk_config() -> RiskConfig:
     For example:
     - VOLTEDGE_LIVE_MODE: "0" or "1"
     - VOLTEDGE_MAX_TRADES_PER_DAY: default 5
-    - VOLTEDGE_MAX_DAILY_LOSS: default 500.0
     - VOLTEDGE_PER_TRADE_CAPITAL: default 100.0
     - VOLTEDGE_MAX_OPEN_POSITIONS: default 3
     """
@@ -43,11 +42,6 @@ def load_risk_config() -> RiskConfig:
         max_positions = 5
         
     # Safely cast floats with a fallback
-    try:
-        max_loss = float(os.getenv("VOLTEDGE_MAX_DAILY_LOSS", "2500.0"))
-    except ValueError:
-        max_loss = 2500.0
-        
     try:
         trade_capital = float(os.getenv("VOLTEDGE_PER_TRADE_CAPITAL", "5000.0"))
     except ValueError:
@@ -90,10 +84,14 @@ def load_risk_config() -> RiskConfig:
     except ValueError:
         min_price = 50.0
 
+    try:
+        dry_run_threshold = float(os.getenv("VOLTEDGE_DRY_RUN_CONVICTION_THRESHOLD", "60.0"))
+    except ValueError:
+        dry_run_threshold = 60.0
+
     return RiskConfig(
         live_mode=live_mode,
         max_trades_per_day=max_trades,
-        max_daily_loss_rupees=max_loss,
         per_trade_capital_rupees=trade_capital,
         max_open_positions=max_positions,
         intraday_stop_pct=stop_pct,
@@ -103,5 +101,6 @@ def load_risk_config() -> RiskConfig:
         weak_market_size_factor=weak_factor,
         strong_market_size_factor=strong_factor,
         min_avg_daily_turnover_rupees=min_turnover,
-        min_price_rupees=min_price
+        min_price_rupees=min_price,
+        dry_run_conviction_threshold=dry_run_threshold,
     )

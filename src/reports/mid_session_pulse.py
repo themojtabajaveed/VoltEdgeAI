@@ -79,8 +79,8 @@ def generate_mid_session_pulse(
     if conviction_engine:
         active = conviction_engine.get_active_signals()
         if active:
-            lines.append("| Symbol | Dir | Strategy | Conv | A | B | C | D | E | Trend | Event |")
-            lines.append("|--------|-----|----------|------|---|---|---|---|---|-------|-------|")
+            lines.append("| Symbol | Dir | Strategy | Conv | C | E | Type | Detected | Window | Trend | Event |")
+            lines.append("|--------|-----|----------|------|---|---|------|----------|--------|-------|-------|")
             for sig in sorted(active, key=lambda s: s.last_conviction, reverse=True):
                 history = sig.conviction_history
                 if len(history) >= 2:
@@ -88,12 +88,15 @@ def generate_mid_session_pulse(
                     trend = "^" if delta > 2 else ("v" if delta < -2 else "=")
                 else:
                     trend = "~"
-                # Extract last layer values from log (approximate from history)
-                event_short = sig.event_summary[:40] if sig.event_summary else ""
+                event_short = sig.event_summary[:35] if sig.event_summary else ""
+                detected = sig.created_at.strftime("%H:%M") if getattr(sig, "created_at", None) else "?"
+                sig_type = getattr(sig, "signal_type", "MOMENTUM")
+                win_status = getattr(sig, "window_status", "ACTIVE")
+                dry_tag = " [DRY]" if getattr(sig, "is_dry_run", False) else ""
                 lines.append(
-                    f"| {sig.symbol} | {sig.direction} | {sig.strategy} | "
-                    f"{sig.last_conviction:.0f} | - | - | {sig.layer_c_score:.0f} | - | {sig.layer_e_score:.0f} | "
-                    f"{trend} | {event_short} |"
+                    f"| {sig.symbol}{dry_tag} | {sig.direction} | {sig.strategy} | "
+                    f"{sig.last_conviction:.0f} | {sig.layer_c_score:.0f} | {sig.layer_e_score:.0f} | "
+                    f"{sig_type} | {detected} | {win_status} | {trend} | {event_short} |"
                 )
             lines.append(f"\n**Total**: {len(active)} signals watching, "
                         f"threshold = {conviction_engine._threshold:.0f}")
@@ -144,12 +147,10 @@ def generate_mid_session_pulse(
         slots_used = slot_manager.trades_today if hasattr(slot_manager, 'trades_today') else 0
         slots_remaining = slot_manager.remaining if hasattr(slot_manager, 'remaining') else "?"
         daily_pnl = float(risk_state.realized_pnl) if hasattr(risk_state, 'realized_pnl') else 0
-        max_loss = risk_cfg.max_daily_loss_rupees if risk_cfg else "?"
 
         lines.append(f"- **Open Positions**: {len(open_pos)}")
         lines.append(f"- **Slots Used / Remaining**: {slots_used} / {slots_remaining}")
         lines.append(f"- **Realized PnL**: {daily_pnl:+.2f}")
-        lines.append(f"- **Daily Loss Cap**: {max_loss}")
         lines.append(f"- **Trades Taken**: {risk_state.trades_taken if hasattr(risk_state, 'trades_taken') else '?'}\n")
 
         if open_pos:
@@ -177,10 +178,6 @@ def generate_mid_session_pulse(
     # ── Section 5: Flags ─────────────────────────────────────────────────
     lines.append("\n## 5. Flags\n")
     flags = []
-    if risk_state and risk_cfg:
-        daily_pnl = float(risk_state.realized_pnl) if hasattr(risk_state, 'realized_pnl') else 0
-        if daily_pnl < 0 and abs(daily_pnl) > risk_cfg.max_daily_loss_rupees * 0.7:
-            flags.append(f"APPROACHING LOSS CAP: PnL={daily_pnl:+.2f} vs cap={risk_cfg.max_daily_loss_rupees}")
     if market_snapshot:
         if market_snapshot.vix > 22:
             flags.append(f"HIGH VIX: {market_snapshot.vix:.1f} — elevated volatility regime")
@@ -247,7 +244,18 @@ def _get_current_pct(symbol: str, live_client) -> Optional[float]:
                 ltp = d.get("last_price", 0)
                 prev_c = d.get("ohlc", {}).get("close", 0)
                 if prev_c > 0 and ltp > 0:
+                    try:
+                        from cache.data_cache import CacheManager
+                        CacheManager().write_ltp(symbol, ltp)
+                    except Exception:
+                        pass
                     return (ltp - prev_c) / prev_c * 100
-    except Exception:
-        pass
+    except Exception as e:
+        try:
+            from kiteconnect import exceptions as _ke
+            if isinstance(e, _ke.TokenException):
+                from cache.data_cache import handle_token_expiry
+                handle_token_expiry(f"mid_session_pulse._get_current_pct for {symbol}")
+        except Exception:
+            pass
     return None

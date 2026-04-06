@@ -95,9 +95,9 @@ def generate_pre_market_brief():
         finnhub_data = {}
 
     api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        logger.error("GEMINI_API_KEY not set — cannot generate brief.")
-        return
+    gemini_available = bool(api_key)
+    if not gemini_available:
+        logger.warning("[Brief] GEMINI_API_KEY not set — will send partial data-only brief.")
 
     # ── Fetch yesterday's NSE top movers as a real data anchor ────────────────
     # This prevents Gemini from defaulting to hardcoded blue-chip names.
@@ -130,14 +130,21 @@ def generate_pre_market_brief():
         # Try to get Kite client for VIX
         kite_for_brief = None
         try:
-            from kiteconnect import KiteConnect
+            from kiteconnect import KiteConnect, exceptions as _kite_exc
             ka = os.getenv("ZERODHA_API_KEY")
             at = os.getenv("ZERODHA_ACCESS_TOKEN")
             if ka and at:
                 kite_for_brief = KiteConnect(api_key=ka)
                 kite_for_brief.set_access_token(at)
-        except Exception:
-            pass
+        except _kite_exc.TokenException as te:
+            logger.warning(f"[Brief] Kite token expired during VIX init: {te}")
+            try:
+                from cache.data_cache import handle_token_expiry
+                handle_token_expiry("pre_market_brief kite initialization")
+            except Exception:
+                pass
+        except Exception as kite_init_e:
+            logger.warning(f"[Brief] Kite init failed (non-token error): {kite_init_e}")
 
         intel = fetch_and_compute(kite_client=kite_for_brief)
         if intel:
@@ -147,7 +154,8 @@ def generate_pre_market_brief():
     except Exception as intel_e:
         logger.warning(f"[Brief] Pre-market intelligence failed: {intel_e}")
 
-    client = genai.Client(api_key=api_key)
+    if gemini_available:
+        client = genai.Client(api_key=api_key)
 
     prompt = f"""You are VoltEdge's senior pre-market analyst with 20+ years of experience in Indian equity markets.
 
@@ -239,75 +247,112 @@ Do NOT use placeholder/example symbols.
 ```
 """
 
-    try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(tools=[{"google_search": {}}]),
-        )
-        report_md = response.text
+    report_md = None
 
-        # Prepend Section 0 (machine-computed) before AI-generated content
+    if gemini_available:
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(tools=[{"google_search": {}}]),
+            )
+            report_md = response.text
+
+            # Prepend Section 0 (machine-computed) before AI-generated content
+            if section_0_md:
+                report_md = section_0_md + report_md
+
+            # ── Parse and save regime JSON ──────────────────────────────────────
+            match = re.search(r"```json\s*(\{.*?\})\s*```", report_md, re.DOTALL)
+            if match:
+                try:
+                    regime_data = json.loads(match.group(1))
+
+                    os.makedirs("data", exist_ok=True)
+                    regime_path = "data/daily_regime.json"
+                    with open(regime_path, "w") as jf:
+                        json.dump(
+                            {"trend": regime_data.get("trend", "sideways"),
+                             "strength": regime_data.get("strength", 0.5)},
+                            jf, indent=2
+                        )
+                    logger.info(f"Regime saved: {regime_data.get('trend')} / {regime_data.get('strength')}")
+
+                    # ── Persist today's predictions to the feedback log ──────────
+                    new_predictions = regime_data.get("predictions", [])
+                    for pred in new_predictions:
+                        pred["date"] = str(today)
+                        pred["score"] = None   # will be filled by feedback_loop.py tonight
+                        pred["actual_change_pct"] = None
+                        # Remove duplicates for same symbol+date
+                        log["predictions"] = [
+                            p for p in log["predictions"]
+                            if not (p["date"] == str(today) and p["symbol"] == pred["symbol"])
+                        ]
+                        log["predictions"].append(pred)
+
+                    _save_prediction_log(log)
+                    logger.info(f"Saved {len(new_predictions)} predictions to prediction_log.json")
+
+                except Exception as parse_err:
+                    logger.warning(f"Failed to parse regime JSON from report: {parse_err}")
+
+        except Exception as gemini_e:
+            logger.error(f"[Brief] Gemini generation failed: {gemini_e}")
+            report_md = None
+
+    # ── Fallback: assemble partial report if Gemini unavailable or failed ─────
+    if report_md is None:
+        fallback_lines = [
+            f"# VoltEdge Morning Brief — {today} (Partial — Gemini Unavailable)\n",
+            "> **Note:** Gemini API unavailable. Report contains machine-computed data only.\n",
+        ]
         if section_0_md:
-            report_md = section_0_md + report_md
+            fallback_lines.append(section_0_md)
+        if nse_movers_context:
+            fallback_lines.append(f"## NSE Movers Context\n{nse_movers_context}\n")
+        if finnhub_data:
+            fallback_lines.append(
+                f"## Global Sentiment (Finnhub)\n"
+                f"```json\n{json.dumps(finnhub_data, indent=2)[:2000]}\n```\n"
+            )
+        report_md = "\n".join(fallback_lines)
+        logger.warning("[Brief] Sending partial data-only brief because Gemini was unavailable.")
 
-        # ── Parse and save regime JSON ──────────────────────────────────────
-        match = re.search(r"```json\s*(\{.*?\})\s*```", report_md, re.DOTALL)
-        if match:
-            try:
-                regime_data = json.loads(match.group(1))
-
-                os.makedirs("data", exist_ok=True)
-                regime_path = "data/daily_regime.json"
-                with open(regime_path, "w") as jf:
-                    json.dump(
-                        {"trend": regime_data.get("trend", "sideways"),
-                         "strength": regime_data.get("strength", 0.5)},
-                        jf, indent=2
-                    )
-                logger.info(f"Regime saved: {regime_data.get('trend')} / {regime_data.get('strength')}")
-
-                # ── Persist today's predictions to the feedback log ──────────
-                new_predictions = regime_data.get("predictions", [])
-                for pred in new_predictions:
-                    pred["date"] = str(today)
-                    pred["score"] = None   # will be filled by feedback_loop.py tonight
-                    pred["actual_change_pct"] = None
-                    # Remove duplicates for same symbol+date
-                    log["predictions"] = [
-                        p for p in log["predictions"]
-                        if not (p["date"] == str(today) and p["symbol"] == pred["symbol"])
-                    ]
-                    log["predictions"].append(pred)
-
-                _save_prediction_log(log)
-                logger.info(f"Saved {len(new_predictions)} predictions to prediction_log.json")
-
-            except Exception as parse_err:
-                logger.warning(f"Failed to parse regime JSON from report: {parse_err}")
-
-        # ── Save Markdown report ────────────────────────────────────────────
+    # ── Save Markdown report ────────────────────────────────────────────
+    try:
         os.makedirs(os.path.join("logs", "daily_reports"), exist_ok=True)
         report_path = os.path.join("logs", "daily_reports", f"{today}_morning_brief.md")
         with open(report_path, "w") as f:
             f.write(report_md)
         print(f"[VoltEdge] Morning brief saved to: {report_path}")
+    except Exception as save_e:
+        logger.error(f"[Brief] Failed to save report: {save_e}")
+        report_path = ""
 
-        # ── Email dispatch ─────────────────────────────────────────────────
-        _send_email(
-            subject=f"VoltEdge Morning Brief — {today}",
-            report_md=report_md,
-            report_path=report_path,
+    # ── Email dispatch ─────────────────────────────────────────────────
+    subject = f"VoltEdge Morning Brief — {today}"
+    if report_md and "Partial" in report_md.split("\n")[0]:
+        subject = f"[PARTIAL] {subject}"
+    email_ok = _send_email(subject=subject, report_md=report_md, report_path=report_path)
+    now_ist = datetime.now(IST).strftime("%H:%M:%S")
+    if email_ok:
+        logger.info(f"[EMAIL] Pre-market email sent at {now_ist}")
+    else:
+        logger.error(f"[EMAIL] Pre-market email FAILED at {now_ist} — check SMTP config or email_sender logs")
+
+
+def _send_email(subject: str, report_md: str, report_path: str) -> bool:
+    try:
+        from src.reports.email_sender import send_report_email
+        return send_report_email(
+            subject=subject,
+            body_md=report_md,
+            attachment_path=report_path if report_path else None,
         )
-
     except Exception as e:
-        logger.error(f"pre_market_brief failed: {e}")
-        raise
-
-
-def _send_email(subject: str, report_md: str, report_path: str) -> None:
-    from src.reports.email_sender import send_report_email
-    send_report_email(subject=subject, body_md=report_md, attachment_path=report_path)
+        logger.error(f"[EMAIL] _send_email raised exception: {e}")
+        return False
 
 
 if __name__ == "__main__":

@@ -185,7 +185,7 @@ def grok_morning_strategist(
         hydra_events: Top 5-8 events [{symbol, direction, urgency, event_summary}]
         viper_movers: Top 5-10 pre-market movers [{symbol, pct_change, volume_ratio, move_type, direction}]
         previous_day_pnl: Yesterday's realized P&L in ₹
-        risk_budget: {daily_loss_cap, per_trade_capital, max_trades, slots_available}
+        risk_budget: {per_trade_capital, max_trades, slots_available}
 
     Returns:
         {
@@ -228,7 +228,6 @@ It is 08:30 IST, market opens at 09:15. You must set today's trading plan.
 ₹{previous_day_pnl:,.2f}
 
 ## Risk Budget
-Daily loss cap: ₹{risk_info.get('daily_loss_cap', 2500):,}
 Per trade capital: ₹{risk_info.get('per_trade_capital', 5000):,}
 Max trades today: {risk_info.get('max_trades', 5)}
 Slots available: {risk_info.get('slots_available', 5)}
@@ -341,7 +340,7 @@ def grok_portfolio_optimizer(
         open_positions: [{symbol, side, qty, entry_price, current_pnl, time_in_trade_min, strategy}]
         hydra_candidates: Top 5 [{symbol, direction, urgency, event_summary, ta_score, vwap_dist}]
         viper_candidates: Top 5 [{symbol, direction, move_type, pct_change, ta_score, volume_ratio}]
-        risk_state: {daily_pnl, trades_taken, slots_used, slots_remaining, daily_loss_cap}
+        risk_state: {daily_pnl, trades_taken, slots_used, slots_remaining}
         market_pulse: {nifty_change_pct, breadth, pcr, volume_regime, time_bucket}
         morning_plan: Output from grok_morning_strategist() if available
 
@@ -429,7 +428,6 @@ Symbols in BOTH HYDRA + VIPER: {confluence_str}
 Daily P&L so far: ₹{risk_state.get('daily_pnl', 0):+,.2f}
 Trades taken: {risk_state.get('trades_taken', 0)}
 Slots used/remaining: {risk_state.get('slots_used', 0)}/{risk_state.get('slots_remaining', 5)}
-Daily loss cap: ₹{risk_state.get('daily_loss_cap', 2500):,}
 
 ## Market Pulse
 {json.dumps(market_pulse, indent=2, default=str)}
@@ -612,4 +610,153 @@ Return ONLY valid JSON:
     except Exception as e:
         reason = _classify_grok_error(e, raw)
         logger.warning(f"[Grok/EOD] Empty response — reason: {reason}")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 4. DEEP POST-MARKET ANALYSIS — Root cause + conviction post-mortem (~16:10 IST)
+# ═══════════════════════════════════════════════════════════════════════
+
+def grok_deep_analysis(
+    top_gainers: List[Dict[str, Any]],
+    top_losers: List[Dict[str, Any]],
+    watchboard_signals: List[Dict[str, Any]],
+    market_summary: str = "",
+    current_call_count: int = 0,
+) -> Optional[Dict[str, Any]]:
+    """
+    Combined deep post-market analysis: root cause for movers + conviction post-mortem.
+
+    Single Grok call combining Sections 7+8+9 of post-market report.
+    Budget: 1 call/day at ~16:10 IST.
+
+    Args:
+        top_gainers:   List of {symbol, pct_change, volume} dicts for top 5 gainers
+        top_losers:    List of {symbol, pct_change, volume} dicts for top 5 losers
+        watchboard_signals: Persisted signals from logs/conviction_signals/{date}_signals.json
+        market_summary: Brief market context (phase, Nifty%, VIX)
+        current_call_count: Today's Grok call count (skip if near budget)
+
+    Returns:
+        {
+          "mover_analysis": [{symbol, move_pct, root_cause, ta_at_open, volume_analysis,
+                              timing_map, pre_market_signals, detectable_by_system,
+                              what_we_could_have_predicted, gap_to_close}],
+          "conviction_postmortem": [{symbol, direction, discovery_time, signal_type,
+                                     what_happened_after, time_window_minutes,
+                                     dry_run_triggered, verdict, weight_adjustment}],
+          "key_learnings": ["[LEARN] lesson 1", ...]
+        }
+    """
+    if current_call_count >= GROK_DAILY_BUDGET:
+        logger.warning(f"[Grok/DeepAnalysis] Skipping — daily budget exhausted ({current_call_count}/{GROK_DAILY_BUDGET})")
+        return None
+
+    client = _get_client()
+    if client is None:
+        return None
+
+    # Format movers for prompt
+    gainers_str = "\n".join(
+        f"  {i+1}. {g.get('symbol','?')}: {g.get('pct_change', 0):+.2f}% vol={g.get('volume', 0):,}"
+        for i, g in enumerate((top_gainers or [])[:5])
+    ) or "  (no data)"
+    losers_str = "\n".join(
+        f"  {i+1}. {l.get('symbol','?')}: {l.get('pct_change', 0):+.2f}% vol={l.get('volume', 0):,}"
+        for i, l in enumerate((top_losers or [])[:5])
+    ) or "  (no data)"
+
+    # Format conviction signals for prompt
+    signals_str = ""
+    for s in (watchboard_signals or [])[:12]:
+        signals_str += (
+            f"  {s.get('symbol','?')} {s.get('direction','?')} [{s.get('strategy','?')}] "
+            f"detected={s.get('created_at','?')[:16]} signal_type={s.get('signal_type','?')} "
+            f"peak_conv={max((h[1] for h in s.get('conviction_history',[])), default=s.get('last_conviction',0)):.0f} "
+            f"status={s.get('status','?')} window={s.get('window_status','?')} "
+            f"dry_run={s.get('is_dry_run', False)}\n"
+        )
+    if not signals_str:
+        signals_str = "  (no signals recorded today)\n"
+
+    prompt = f"""You are VoltEdgeAI's senior quant analyst performing a deep post-market debrief for Indian equity markets.
+
+## Today's Market Context
+{market_summary or "(no summary)"}
+
+## TOP GAINERS (NSE today)
+{gainers_str}
+
+## TOP LOSERS (NSE today)
+{losers_str}
+
+## VoltEdgeAI Conviction Signals Tracked Today
+{signals_str}
+
+Your task: Produce a structured analysis in three parts.
+
+PART 1 — MOVER ROOT CAUSE ANALYSIS
+For each of the top 5 gainers and top 5 losers:
+- root_cause: Real reason the stock moved (earnings, news, sector rotation, operator activity, macro)
+- ta_at_open: What the chart showed at 9:15 AM (trend, key S/R, RSI zone, volume setup)
+- volume_analysis: Was volume above average? When did the spike occur? What did it signal?
+- timing_map: Describe the move in time sequence (e.g. "09:15 breakout → 09:18 volume surge → 09:22 momentum confirmed")
+- pre_market_signals: Any pre-market signals that should have flagged this (block deals, FII/DII, index move, news)
+- detectable_by_system: Would HYDRA or VIPER have caught this? Why or why not?
+- what_we_could_have_predicted: Write as: "At 09:00 system could have issued LONG [STOCK] with X% conviction based on [reason]"
+- gap_to_close: What data source, signal weight, or logic must be added to catch this next time?
+
+PART 2 — CONVICTION POST-MORTEM
+For each signal in the watchboard list above:
+- what_happened_after: Did price move in the called direction after detection time?
+- time_window_minutes: How long was the entry window actually valid (in minutes)?
+- dry_run_triggered: True if conviction reached 60+ (dry_run=True signals); False otherwise
+- verdict: One of: CORRECT-CAUGHT / CORRECT-MISSED / WRONG-LEARNING / PARTIAL
+- weight_adjustment: Which signal component should be weighted higher/lower and why?
+
+PART 3 — KEY LEARNINGS
+Write 3-5 actionable bullet points the system carries into tomorrow.
+Format each as: [LEARN] On [date], [stock] showed [pattern]. System should [action].
+
+Return ONLY valid JSON (no markdown, no explanation outside JSON):
+{{
+  "mover_analysis": [
+    {{
+      "symbol": "...", "move_pct": 0.0, "root_cause": "...", "ta_at_open": "...",
+      "volume_analysis": "...", "timing_map": "...", "pre_market_signals": "...",
+      "detectable_by_system": "...", "what_we_could_have_predicted": "...",
+      "gap_to_close": "..."
+    }}
+  ],
+  "conviction_postmortem": [
+    {{
+      "symbol": "...", "direction": "...", "discovery_time": "...", "signal_type": "...",
+      "what_happened_after": "...", "time_window_minutes": 0,
+      "dry_run_triggered": false, "verdict": "...", "weight_adjustment": "..."
+    }}
+  ],
+  "key_learnings": ["[LEARN] ...", "[LEARN] ..."]
+}}"""
+
+    raw = ""
+    try:
+        response = client.chat.completions.create(
+            model=_GROK_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=3000,
+        )
+        raw = response.choices[0].message.content.strip()
+        if not raw:
+            logger.warning("[Grok/DeepAnalysis] Empty response")
+            return None
+        result = _extract_json(raw)
+        n_movers = len(result.get("mover_analysis", []))
+        n_pm = len(result.get("conviction_postmortem", []))
+        n_learn = len(result.get("key_learnings", []))
+        logger.info(f"[Grok/DeepAnalysis] Done: {n_movers} movers, {n_pm} postmortem, {n_learn} learnings")
+        return result
+    except Exception as e:
+        reason = _classify_grok_error(e, raw)
+        logger.warning(f"[Grok/DeepAnalysis] Failed — reason: {reason}")
         return None

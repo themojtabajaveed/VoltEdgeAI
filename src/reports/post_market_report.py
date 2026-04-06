@@ -300,6 +300,101 @@ def _build_movers_context_nse_fallback() -> str:
         return f"(NSE movers fallback failed: {e})"
 
 
+def _load_persisted_signals(today: date) -> list:
+    """Load today's conviction signals from the daily JSON snapshot."""
+    path = os.path.join("logs", "conviction_signals", f"{today}_signals.json")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load persisted signals: {e}")
+        return []
+
+
+def _build_section_7_deep_analysis(mover_analysis: list) -> str:
+    """Section 7: Deep Root Cause Analysis for top movers (Grok-powered)."""
+    if not mover_analysis:
+        return (
+            "## 7. Deep Root Cause Analysis\n\n"
+            "> Grok deep analysis not available — check Grok budget or API connectivity.\n"
+        )
+    lines = [
+        "## 7. Deep Root Cause Analysis\n",
+        "| Symbol | Move% | Root Cause | TA at Open | Volume | Detectable? | Gap to Close |",
+        "|--------|-------|------------|------------|--------|-------------|--------------|",
+    ]
+    for m in mover_analysis:
+        sym = m.get("symbol", "?")
+        move = m.get("move_pct", 0.0)
+        lines.append(
+            f"| {sym} | {move:+.2f}% | {m.get('root_cause','?')[:60]} | "
+            f"{m.get('ta_at_open','?')[:50]} | {m.get('volume_analysis','?')[:40]} | "
+            f"{m.get('detectable_by_system','?')[:40]} | {m.get('gap_to_close','?')[:50]} |"
+        )
+    lines.append("")
+    for m in mover_analysis:
+        sym = m.get("symbol", "?")
+        lines.append(f"**{sym}** — Timing: {m.get('timing_map', 'N/A')}")
+        lines.append(f"  Pre-market signals: {m.get('pre_market_signals', 'N/A')}")
+        lines.append(f"  Could have predicted: _{m.get('what_we_could_have_predicted', 'N/A')}_")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _build_section_8_conviction_postmortem(postmortem: list) -> str:
+    """Section 8: Conviction Post-Mortem — signal lifecycle analysis."""
+    if not postmortem:
+        return (
+            "## 8. Conviction Post-Mortem\n\n"
+            "> No post-mortem data available.\n"
+        )
+    lines = [
+        "## 8. Conviction Post-Mortem\n",
+        "| Symbol | Dir | Detected | Type | What Happened | Window (min) | Dry-Run? | Verdict | Weight Adj |",
+        "|--------|-----|----------|------|---------------|-------------|----------|---------|------------|",
+    ]
+    for p in postmortem:
+        lines.append(
+            f"| {p.get('symbol','?')} | {p.get('direction','?')} | "
+            f"{str(p.get('discovery_time','?'))[:16]} | {p.get('signal_type','?')} | "
+            f"{p.get('what_happened_after','?')[:50]} | {p.get('time_window_minutes','?')} | "
+            f"{'YES' if p.get('dry_run_triggered') else 'NO'} | "
+            f"{p.get('verdict','?')} | {p.get('weight_adjustment','?')[:50]} |"
+        )
+    return "\n".join(lines)
+
+
+def _build_section_9_key_learnings(learnings: list, today: date) -> str:
+    """Section 9: Key Learnings — system-writable carry-forward bullets."""
+    if not learnings:
+        return (
+            "## 9. Key Learnings\n\n"
+            "> No learnings generated today.\n"
+        )
+    lines = ["## 9. Key Learnings\n"]
+    for item in learnings:
+        lines.append(f"- {item}")
+    # Persist to prediction_log system_lessons
+    try:
+        log_path = "data/prediction_log.json"
+        if os.path.exists(log_path):
+            with open(log_path, encoding="utf-8") as f:
+                log_data = json.load(f)
+        else:
+            log_data = {"predictions": [], "system_lessons": []}
+        existing_lessons = log_data.get("system_lessons", [])
+        dated_lessons = [f"[{today}] {l}" for l in learnings]
+        log_data["system_lessons"] = (existing_lessons + dated_lessons)[-20:]
+        with open(log_path, "w", encoding="utf-8") as f:
+            json.dump(log_data, f, indent=2)
+        logger.info(f"[PostMarket] Persisted {len(dated_lessons)} learnings to prediction_log.json")
+    except Exception as e:
+        logger.warning(f"[PostMarket] Failed to persist learnings: {e}")
+    return "\n".join(lines)
+
+
 def _build_movers_context(kite_client, today: date) -> str:
     """Fetch top movers — Kite primary, NSE fallback."""
     try:
@@ -420,6 +515,53 @@ def generate_post_market_report(
     runner_log = _read_runner_log_tail(200)
     dragon_events = _extract_dragon_events(runner_log)
 
+    # ── Sections 7-9: Grok Deep Analysis ─────────────────────────────────
+    persisted_signals = _load_persisted_signals(today)
+    grok_analysis = None
+    grok_call_count = 0
+    try:
+        from src.llm.grok_client import grok_deep_analysis, GROK_DAILY_BUDGET
+        # Parse mover lists from movers_ctx for the Grok prompt
+        raw_gainers = []
+        raw_losers = []
+        try:
+            import re as _re
+            for line in movers_ctx.splitlines():
+                m = _re.match(r"- (\w+): ([+-]?\d+\.\d+)%.*Vol: (\d+)", line)
+                if m:
+                    entry = {"symbol": m.group(1), "pct_change": float(m.group(2)), "volume": int(m.group(3))}
+                    if float(m.group(2)) > 0:
+                        raw_gainers.append(entry)
+                    else:
+                        raw_losers.append(entry)
+        except Exception:
+            pass
+        mkt_summary = f"Phase: choppy | Nifty: N/A | VIX: N/A"
+        if conviction_engine:
+            try:
+                mkt_summary = f"Phase: {conviction_engine.phase.value}"
+            except Exception:
+                pass
+        grok_analysis = grok_deep_analysis(
+            top_gainers=raw_gainers[:5],
+            top_losers=raw_losers[:5],
+            watchboard_signals=persisted_signals,
+            market_summary=mkt_summary,
+            current_call_count=grok_call_count,
+        )
+    except Exception as grok_e:
+        logger.error(f"[PostMarket] Grok deep analysis failed: {grok_e}")
+
+    section_7 = _build_section_7_deep_analysis(
+        grok_analysis.get("mover_analysis", []) if grok_analysis else []
+    )
+    section_8 = _build_section_8_conviction_postmortem(
+        grok_analysis.get("conviction_postmortem", []) if grok_analysis else []
+    )
+    section_9 = _build_section_9_key_learnings(
+        grok_analysis.get("key_learnings", []) if grok_analysis else [], today
+    )
+
     # ── Assemble machine-generated sections ──────────────────────────────
     machine_report = f"""# VoltEdge Post-Market Report — {today}
 
@@ -442,6 +584,12 @@ def generate_post_market_report(
 ```
 {dragon_events}
 ```
+
+{section_7}
+
+{section_8}
+
+{section_9}
 """
 
     # ── Generate narrative via Gemini ─────────────────────────────────────

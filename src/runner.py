@@ -175,7 +175,6 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     else:
         print("VoltEdge LIVE_MODE = False (DRY_RUN only)")
     print(f"Max Trades / Day: {risk_cfg.max_trades_per_day}")
-    print(f"Max Daily Loss : ₹{risk_cfg.max_daily_loss_rupees:,.2f}")
     print(f"Per-Trade Risk : ₹{risk_cfg.per_trade_capital_rupees:,.2f}")
     print(f"Open Positions : {risk_cfg.max_open_positions}")
 
@@ -190,7 +189,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     exec_logger = get_executions_logger()
     exec_logger.info(f"VoltEdge LIVE_MODE = {risk_cfg.live_mode}")
     
-    logging.info(f"Runner started. LIVE_MODE: {risk_cfg.live_mode}, MaxTrades: {risk_cfg.max_trades_per_day}, DailyLossCap: {risk_cfg.max_daily_loss_rupees}")
+    logging.info(f"Runner started. LIVE_MODE: {risk_cfg.live_mode}, MaxTrades: {risk_cfg.max_trades_per_day}")
     
     watcher = AntigravityWatcher()
     
@@ -311,6 +310,10 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                 grok_optimizer_index = 0
                 grok_last_actions = []
                 pre_market_intel = None
+                try:
+                    conviction_engine.persist_watchboard_to_json()
+                except Exception as _persist_e:
+                    logging.error(f"[ConvEng] persist_watchboard_to_json failed: {_persist_e}")
                 conviction_engine.reset_daily()
                 last_market_snapshot = None
                 try:
@@ -433,7 +436,6 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                     "date": str(current_date),
                                 }
                                 risk_budget_info = {
-                                    "daily_loss_cap": risk_cfg.max_daily_loss_rupees,
                                     "per_trade_capital": risk_cfg.per_trade_capital_rupees,
                                     "max_trades": max_trades_per_day,
                                     "slots_available": slot_manager.remaining,
@@ -570,11 +572,28 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                     slot_manager.register_confluence(confluence_symbols)
                                     print(f"  🐉 DRAGON CONFLUENCE: {confluence_symbols} found in BOTH HYDRA + VIPER!")
 
-                                # Add VIPER STRIKE signals to ConvictionEngine watchboard
+                                # Add VIPER signals to ConvictionEngine watchboard
+                                # STRIKE signals = live candidates; COIL signals = dry-run observation only
+                                _coil_added_today = sum(
+                                    1 for s in conviction_engine._watchboard.values()
+                                    if getattr(s, "is_dry_run", False)
+                                )
                                 for ve in viper_entries:
                                     meta = getattr(ve, 'metadata', {}) or {}
                                     if meta.get('trade_mode') == 'COIL':
-                                        continue  # COIL = dry-run only, skip watchboard
+                                        # Add COIL as dry-run observation (cap at 5 per day)
+                                        if _coil_added_today < 5:
+                                            conviction_engine.add_signal(ActiveSignal(
+                                                symbol=ve.symbol,
+                                                direction=ve.direction,
+                                                strategy="VIPER-COIL",
+                                                layer_c_score=min(100.0, ve.urgency * 10.0),
+                                                event_summary=ve.event_summary,
+                                                metadata=meta,
+                                                is_dry_run=True,
+                                            ))
+                                            _coil_added_today += 1
+                                        continue
                                     conviction_engine.add_signal(ActiveSignal(
                                         symbol=ve.symbol,
                                         direction=ve.direction,
@@ -920,7 +939,6 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                     "trades_taken": risk_state.trades_taken,
                                     "slots_used": slot_manager.trades_today,
                                     "slots_remaining": slot_manager.remaining,
-                                    "daily_loss_cap": risk_cfg.max_daily_loss_rupees,
                                 }
 
                                 market_pulse_data = {
@@ -1024,6 +1042,17 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             phase = conviction_engine.phase
                             print(f"  📈 Phase: {phase.value.upper()} | Nifty={mkt_snap.nifty_pct:+.1f}% | A/D={mkt_snap.ad_ratio:.2f} | VIX={mkt_snap.vix:.1f} | {conviction_engine.get_watchboard_summary()}")
                             logging.info(f"[Phase] {phase.value} | Nifty={mkt_snap.nifty_pct:+.1f}% | A/D={mkt_snap.ad_ratio:.2f}")
+
+                            # Update window statuses using latest prices from tech snapshots
+                            try:
+                                _price_map = {
+                                    sym: float(snap.close) if hasattr(snap, "close") else 0.0
+                                    for sym, snap in ce_tech_snaps.items()
+                                    if snap is not None
+                                }
+                                conviction_engine.update_window_statuses(_price_map)
+                            except Exception as _ws_e:
+                                logging.warning(f"[ConvEng] update_window_statuses failed: {_ws_e}")
 
                             # Execute triggered signals through existing risk stack
                             for sig in triggered:
@@ -1592,8 +1621,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             print(f"  ❌ Feedback loop failed: {fb_e}")
                         last_feedback_date = current_date
 
-                # 5. 09:00 IST — Morning Global Intelligence Brief (inline)
-                if _should_fire_scheduled_job(dt_time(9, 0), runner_start_time, current_time):
+                # 5. 08:45 IST — Morning Global Intelligence Brief (inline)
+                if _should_fire_scheduled_job(dt_time(8, 45), runner_start_time, current_time):
                     if last_premarket_date != current_date:
                         try:
                             from src.reports.pre_market_brief import generate_pre_market_brief
@@ -1605,6 +1634,23 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             print(f"  ❌ Pre-market brief failed: {brief_e}")
                             pre_market_ran = False
                         last_premarket_date = current_date
+
+                # 5b. 08:50 IST — Retry if pre-market brief failed
+                if _should_fire_scheduled_job(dt_time(8, 50), runner_start_time, current_time):
+                    if not pre_market_ran and last_premarket_date == current_date:
+                        try:
+                            from src.reports.pre_market_brief import generate_pre_market_brief
+                            # Remove duplicate guard file so retry can proceed
+                            import os as _os
+                            _retry_path = _os.path.join("logs", "daily_reports", f"{current_date}_morning_brief.md")
+                            if _os.path.exists(_retry_path):
+                                _os.remove(_retry_path)
+                            generate_pre_market_brief()
+                            pre_market_ran = True
+                            print(f"  📰 Pre-market brief RETRY succeeded")
+                        except Exception as retry_e:
+                            logging.error(f"Pre-market brief RETRY also failed: {retry_e}")
+                            print(f"  ❌ Pre-market brief RETRY failed: {retry_e}")
             
             # Sleep for 60 seconds before checking time again
             time.sleep(60)

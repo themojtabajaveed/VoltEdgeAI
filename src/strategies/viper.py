@@ -243,8 +243,14 @@ class ViperStrategy(StrategyHead):
         entry.conviction = conviction
         entry.last_checked = datetime.now()
 
-        # ── 7. COIL dry-run logging ──
-        if trade_mode == "COIL" and conviction.total >= 70:
+        # ── 7. COIL dry-run logging (threshold lowered to 60 for paper trades) ──
+        _dry_run_threshold = 60.0
+        try:
+            from src.config.risk import load_risk_config as _lrc
+            _dry_run_threshold = _lrc().dry_run_conviction_threshold
+        except Exception:
+            pass
+        if trade_mode == "COIL" and conviction.total >= _dry_run_threshold:
             self._log_coil_signal(entry, conviction, snapshot, metadata)
 
         logger.info(
