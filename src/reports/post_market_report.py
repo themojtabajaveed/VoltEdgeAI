@@ -395,6 +395,170 @@ def _build_section_9_key_learnings(learnings: list, today: date) -> str:
     return "\n".join(lines)
 
 
+def _build_section_7_fallback(movers_ctx: str, persisted_signals: list) -> str:
+    """Section 7 Rule-Based Fallback: Top Movers vs System Detection audit."""
+    import re as _re
+
+    # Parse movers from context string
+    movers = []
+    for line in movers_ctx.splitlines():
+        m = _re.match(r"- (\w+): ([+-]?\d+\.\d+)%.*Vol: (\d+)", line)
+        if m:
+            movers.append({
+                "symbol": m.group(1),
+                "pct_change": float(m.group(2)),
+                "volume": int(m.group(3)),
+            })
+
+    # Build detection lookup from persisted signals
+    signal_lookup = {}
+    for s in (persisted_signals or []):
+        sym = s.get("symbol", "")
+        history = s.get("conviction_history", [])
+        peak = max((h[1] for h in history), default=s.get("last_conviction", 0))
+        signal_lookup[sym] = {
+            "direction": s.get("direction", "?"),
+            "strategy": s.get("strategy", "?"),
+            "peak_conv": peak,
+            "signal_type": s.get("signal_type", "?"),
+        }
+
+    lines = [
+        "## 7. Deep Root Cause Analysis (Rule-Based Fallback)\n",
+        "> Grok deep analysis unavailable. Showing detection audit from raw data.\n",
+        "| Symbol | Move% | Volume | Detected? | Direction | Peak Conv | Strategy |",
+        "|--------|-------|--------|-----------|-----------|-----------|----------|",
+    ]
+    for mv in movers[:10]:
+        sym = mv["symbol"]
+        sig = signal_lookup.get(sym)
+        if sig:
+            lines.append(
+                f"| {sym} | {mv['pct_change']:+.2f}% | {mv['volume']:,} | YES | "
+                f"{sig['direction']} | {sig['peak_conv']:.0f} | {sig['strategy']} |"
+            )
+        else:
+            lines.append(
+                f"| {sym} | {mv['pct_change']:+.2f}% | {mv['volume']:,} | NO | — | — | — |"
+            )
+
+    detected = sum(1 for mv in movers[:10] if mv["symbol"] in signal_lookup)
+    lines.append(f"\n**Detection rate: {detected}/{min(len(movers), 10)} top movers on watchboard**")
+    return "\n".join(lines)
+
+
+def _build_section_8_fallback(persisted_signals: list) -> str:
+    """Section 8 Rule-Based Fallback: Conviction Post-Mortem from signals JSON."""
+    if not persisted_signals:
+        return "## 8. Conviction Post-Mortem (Rule-Based Fallback)\n\n> No signals recorded today.\n"
+
+    lines = [
+        "## 8. Conviction Post-Mortem (Rule-Based Fallback)\n",
+        "| Symbol | Dir | Strategy | Detected At | Signal Type | Peak Conv | Status | Dry Run? |",
+        "|--------|-----|----------|-------------|-------------|-----------|--------|----------|",
+    ]
+    max_conv = 0
+    max_conv_sym = "?"
+    triggered_count = 0
+    expired_count = 0
+    for s in persisted_signals:
+        history = s.get("conviction_history", [])
+        peak = max((h[1] for h in history), default=s.get("last_conviction", 0))
+        if peak > max_conv:
+            max_conv = peak
+            max_conv_sym = s.get("symbol", "?")
+        status = s.get("status", "?")
+        if status == "TRIGGERED":
+            triggered_count += 1
+        elif status == "EXPIRED":
+            expired_count += 1
+        created = str(s.get("created_at", "?"))[:16]
+        lines.append(
+            f"| {s.get('symbol', '?')} | {s.get('direction', '?')} | "
+            f"{s.get('strategy', '?')} | {created} | "
+            f"{s.get('signal_type', '?')} | {peak:.0f} | "
+            f"{status} | {'YES' if s.get('is_dry_run') else 'NO'} |"
+        )
+
+    total = len(persisted_signals)
+    lines.append(
+        f"\n**Summary: {total} signals, {triggered_count} triggered, "
+        f"{expired_count} expired. Highest conviction: {max_conv_sym} at {max_conv:.0f}**"
+    )
+    return "\n".join(lines)
+
+
+def _build_section_9_fallback(persisted_signals: list, movers_ctx: str, today: date) -> str:
+    """Section 9 Rule-Based Fallback: Auto-generated stats and learnings."""
+    lines = ["## 9. Key Learnings (Auto-Generated Stats)\n"]
+
+    total = len(persisted_signals or [])
+    triggered = sum(1 for s in (persisted_signals or []) if s.get("status") == "TRIGGERED")
+    expired = sum(1 for s in (persisted_signals or []) if s.get("status") == "EXPIRED")
+    dry_run_count = sum(1 for s in (persisted_signals or []) if s.get("is_dry_run"))
+
+    # Find highest conviction
+    max_conv = 0
+    max_sym = "none"
+    for s in (persisted_signals or []):
+        history = s.get("conviction_history", [])
+        peak = max((h[1] for h in history), default=s.get("last_conviction", 0))
+        if peak > max_conv:
+            max_conv = peak
+            max_sym = s.get("symbol", "?")
+
+    lines.append(
+        f"- **Today: {total} signals detected, {triggered} triggered, "
+        f"{expired} expired. Highest conviction: {max_sym} at {max_conv:.0f}**"
+    )
+
+    # Threshold analysis
+    would_trigger_55 = sum(
+        1 for s in (persisted_signals or [])
+        if max((h[1] for h in s.get("conviction_history", [])),
+               default=s.get("last_conviction", 0)) >= 55
+    )
+    would_trigger_60 = sum(
+        1 for s in (persisted_signals or [])
+        if max((h[1] for h in s.get("conviction_history", [])),
+               default=s.get("last_conviction", 0)) >= 60
+    )
+    lines.append(
+        f"- Threshold=55 would have activated {would_trigger_55} signals; "
+        f"Threshold=60 would have activated {would_trigger_60} signals"
+    )
+
+    # Strategy breakdown
+    strategy_counts: dict = {}
+    for s in (persisted_signals or []):
+        strat = s.get("strategy", "?")
+        strategy_counts[strat] = strategy_counts.get(strat, 0) + 1
+    strat_parts = [f"{k}: {v}" for k, v in sorted(strategy_counts.items())]
+    if strat_parts:
+        lines.append(f"- Strategy breakdown: {', '.join(strat_parts)}")
+
+    # Dry run stats
+    if dry_run_count:
+        lines.append(f"- Dry-run (COIL/observation) signals: {dry_run_count}/{total}")
+
+    # Detection rate for movers
+    import re as _re
+    mover_syms = set()
+    for line in movers_ctx.splitlines():
+        m = _re.match(r"- (\w+):", line)
+        if m:
+            mover_syms.add(m.group(1))
+    signal_syms = {s.get("symbol") for s in (persisted_signals or [])}
+    detected = mover_syms & signal_syms
+    if mover_syms:
+        lines.append(
+            f"- Top mover detection rate: {len(detected)}/{len(mover_syms)} "
+            f"({'%, '.join(detected) if detected else 'none detected'})"
+        )
+
+    return "\n".join(lines)
+
+
 def _build_movers_context(kite_client, today: date) -> str:
     """Fetch top movers — Kite primary, NSE fallback."""
     try:
@@ -515,13 +679,19 @@ def generate_post_market_report(
     runner_log = _read_runner_log_tail(200)
     dragon_events = _extract_dragon_events(runner_log)
 
-    # ── Sections 7-9: Grok Deep Analysis ─────────────────────────────────
+    # ── Sections 7-9: Rule-based fallbacks FIRST, then attempt Grok ──────
     persisted_signals = _load_persisted_signals(today)
+
+    # Always build rule-based fallbacks (guaranteed non-empty)
+    section_7_fallback = _build_section_7_fallback(movers_ctx, persisted_signals)
+    section_8_fallback = _build_section_8_fallback(persisted_signals)
+    section_9_fallback = _build_section_9_fallback(persisted_signals, movers_ctx, today)
+
+    # Attempt Grok deep analysis
     grok_analysis = None
     grok_call_count = 0
     try:
         from src.llm.grok_client import grok_deep_analysis, GROK_DAILY_BUDGET
-        # Parse mover lists from movers_ctx for the Grok prompt
         raw_gainers = []
         raw_losers = []
         try:
@@ -550,17 +720,29 @@ def generate_post_market_report(
             current_call_count=grok_call_count,
         )
     except Exception as grok_e:
-        logger.error(f"[PostMarket] Grok deep analysis failed: {grok_e}")
+        logger.error(f"[PostMarket] Grok deep analysis failed: {grok_e}", exc_info=True)
 
-    section_7 = _build_section_7_deep_analysis(
-        grok_analysis.get("mover_analysis", []) if grok_analysis else []
-    )
-    section_8 = _build_section_8_conviction_postmortem(
-        grok_analysis.get("conviction_postmortem", []) if grok_analysis else []
-    )
-    section_9 = _build_section_9_key_learnings(
-        grok_analysis.get("key_learnings", []) if grok_analysis else [], today
-    )
+    # Use Grok data if available, otherwise use rule-based fallbacks
+    if grok_analysis and grok_analysis.get("mover_analysis"):
+        section_7 = _build_section_7_deep_analysis(grok_analysis["mover_analysis"])
+        section_7 += "\n\n---\n" + section_7_fallback  # Append raw data table
+    else:
+        section_7 = section_7_fallback
+        logger.info("[PostMarket] Using rule-based fallback for Section 7")
+
+    if grok_analysis and grok_analysis.get("conviction_postmortem"):
+        section_8 = _build_section_8_conviction_postmortem(grok_analysis["conviction_postmortem"])
+        section_8 += "\n\n---\n" + section_8_fallback  # Append raw data table
+    else:
+        section_8 = section_8_fallback
+        logger.info("[PostMarket] Using rule-based fallback for Section 8")
+
+    if grok_analysis and grok_analysis.get("key_learnings"):
+        section_9 = _build_section_9_key_learnings(grok_analysis["key_learnings"], today)
+        section_9 += "\n\n---\n" + section_9_fallback  # Append auto-generated stats
+    else:
+        section_9 = section_9_fallback
+        logger.info("[PostMarket] Using rule-based fallback for Section 9")
 
     # ── Assemble machine-generated sections ──────────────────────────────
     machine_report = f"""# VoltEdge Post-Market Report — {today}

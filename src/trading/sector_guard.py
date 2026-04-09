@@ -64,9 +64,21 @@ SECTOR_MAP: Dict[str, str] = {
 MAX_PER_SECTOR = 2
 
 
-def get_sector(symbol: str) -> str:
-    """Return the sector for a symbol. Unknown symbols get 'OTHER'."""
-    return SECTOR_MAP.get(symbol.upper(), "OTHER")
+def get_sector(symbol: str, strategy: str = "") -> str:
+    """Return the sector for a symbol.
+
+    For unmapped symbols, uses strategy-based fallback buckets instead
+    of generic 'OTHER' so that PatternDB segmentation stays meaningful.
+    """
+    mapped = SECTOR_MAP.get(symbol.upper())
+    if mapped:
+        return mapped
+    strategy_upper = (strategy or "").upper()
+    if "COIL" in strategy_upper or "VIPER" in strategy_upper:
+        return "SMALLCAP_MOMENTUM"
+    if "HYDRA" in strategy_upper:
+        return "NEWS_CATALYST"
+    return "OTHER"
 
 
 def check_sector_concentration(

@@ -648,12 +648,19 @@ def grok_deep_analysis(
           "key_learnings": ["[LEARN] lesson 1", ...]
         }
     """
+    logger.info(
+        f"[Grok/DeepAnalysis] Called: {len(top_gainers or [])} gainers, "
+        f"{len(top_losers or [])} losers, {len(watchboard_signals or [])} signals, "
+        f"budget={current_call_count}/{GROK_DAILY_BUDGET}"
+    )
+
     if current_call_count >= GROK_DAILY_BUDGET:
         logger.warning(f"[Grok/DeepAnalysis] Skipping — daily budget exhausted ({current_call_count}/{GROK_DAILY_BUDGET})")
         return None
 
     client = _get_client()
     if client is None:
+        logger.warning("[Grok/DeepAnalysis] Skipping — GROK_API_KEY/XAI_API_KEY not set in environment")
         return None
 
     # Format movers for prompt
@@ -758,5 +765,5 @@ Return ONLY valid JSON (no markdown, no explanation outside JSON):
         return result
     except Exception as e:
         reason = _classify_grok_error(e, raw)
-        logger.warning(f"[Grok/DeepAnalysis] Failed — reason: {reason}")
+        logger.error(f"[Grok/DeepAnalysis] Failed — reason: {reason}", exc_info=True)
         return None

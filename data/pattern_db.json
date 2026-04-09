@@ -1,4 +1,1066 @@
-{
-  "entries": [],
-  "stats": {}
-}
+[
+  {
+    "fingerprint": {
+      "strategy": "HYDRA",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "PHARMA",
+      "catalyst_type": "unknown",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-06"
+  },
+  {
+    "fingerprint": {
+      "strategy": "HYDRA",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "IT",
+      "catalyst_type": "acquisition",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-06"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-06"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-06"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-06"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-06"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-06"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-06"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-06"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-06"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-06"
+  },
+  {
+    "fingerprint": {
+      "strategy": "HYDRA",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "unknown",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-07"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER-COIL",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-07"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER-COIL",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-07"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER-COIL",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-07"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER-COIL",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-07"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER-COIL",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-07"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-07"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-07"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-07"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-07"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-07"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-07"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-07"
+  },
+  {
+    "fingerprint": {
+      "strategy": "HYDRA",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "unknown",
+      "time_bucket": "last_hour",
+      "vix_regime": "elevated",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-07"
+  },
+  {
+    "fingerprint": {
+      "strategy": "HYDRA",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "unknown",
+      "time_bucket": "first_hour",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-08"
+  },
+  {
+    "fingerprint": {
+      "strategy": "HYDRA",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "unknown",
+      "time_bucket": "first_hour",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-08"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER-COIL",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-08"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER-COIL",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-08"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER-COIL",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-08"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER-COIL",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-08"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER-COIL",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-08"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-08"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "ENERGY",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-08"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "METALS",
+      "catalyst_type": "momentum",
+      "time_bucket": "first_hour",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-08"
+  },
+  {
+    "fingerprint": {
+      "strategy": "HYDRA",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "acquisition",
+      "time_bucket": "first_hour",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-08"
+  },
+  {
+    "fingerprint": {
+      "strategy": "HYDRA",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "unknown",
+      "time_bucket": "first_hour",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-08"
+  },
+  {
+    "fingerprint": {
+      "strategy": "HYDRA",
+      "direction": "NEUTRAL",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "earnings",
+      "time_bucket": "first_hour",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-08"
+  },
+  {
+    "fingerprint": {
+      "strategy": "HYDRA",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "acquisition",
+      "time_bucket": "mid_session",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-08"
+  },
+  {
+    "fingerprint": {
+      "strategy": "HYDRA",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "unknown",
+      "time_bucket": "last_hour",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-08"
+  },
+  {
+    "fingerprint": {
+      "strategy": "HYDRA",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "unknown",
+      "time_bucket": "last_hour",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-08"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER-COIL",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "mid_session",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-09"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER-COIL",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "mid_session",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-09"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER-COIL",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "mid_session",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-09"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER-COIL",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "mid_session",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-09"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER-COIL",
+      "direction": "BUY",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "mid_session",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-09"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "mid_session",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-09"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "mid_session",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-09"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "mid_session",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-09"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "mid_session",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-09"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "mid_session",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-09"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "mid_session",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-09"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "mid_session",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-09"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "mid_session",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-09"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "mid_session",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-09"
+  },
+  {
+    "fingerprint": {
+      "strategy": "VIPER",
+      "direction": "SHORT",
+      "phase_at_trigger": "choppy",
+      "sector": "OTHER",
+      "catalyst_type": "momentum",
+      "time_bucket": "mid_session",
+      "vix_regime": "normal",
+      "primary_type": "",
+      "event_type": ""
+    },
+    "triggered": false,
+    "pnl_pct": 0.0,
+    "max_favorable": 0.0,
+    "max_adverse": 0.0,
+    "outcome": "LEGACY_UNCATEGORIZED",
+    "date": "2026-04-09"
+  }
+]

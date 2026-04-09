@@ -43,9 +43,13 @@ class PreMarketIntelligence:
     signals: List[SignalContribution] = field(default_factory=list)
     signals_available: int = 0
     signals_total: int = 8
+    incomplete: bool = False
+    missing_count: int = 0
 
     @property
     def tier_name(self) -> str:
+        if self.incomplete:
+            return "INCOMPLETE"
         s = self.composite_score
         if s >= 70:
             return "RISK_ON"
@@ -59,6 +63,20 @@ class PreMarketIntelligence:
 
     def format_log_line(self) -> str:
         """Single audit line for journalctl — grep-friendly."""
+        # Build signal-specific values for [REGIME] log
+        signal_vals = {}
+        for sig in self.signals:
+            signal_vals[sig.name] = sig.value_str if sig.available else "NA"
+        regime_line = (
+            f"[REGIME] Crude={signal_vals.get('Crude', 'NA')} "
+            f"USD={signal_vals.get('USD Strength (via EUR/USD)', 'NA')} "
+            f"PCR={signal_vals.get('Nifty PCR', 'NA')} "
+            f"USDINR={signal_vals.get('USD/INR', 'NA')} "
+            f"composite={self.composite_score}/100 tier={self.tier_name} "
+            f"missing={self.missing_count}"
+        )
+        logger.info(regime_line)
+
         parts = []
         for sig in self.signals:
             if sig.available:
@@ -89,8 +107,13 @@ class PreMarketIntelligence:
         lines.append("")
         lines.append(f"**Composite Score: {self.composite_score}/100 → Tier: {self.tier_name}**")
 
-        # Verdict
-        if self.composite_score >= 70:
+        # Verdict — INCOMPLETE overrides all other verdicts
+        if self.incomplete:
+            verdict = (
+                "INCOMPLETE DATA — regime uncertain, do not lower conviction "
+                "thresholds, treat as CAUTIOUS"
+            )
+        elif self.composite_score >= 70:
             verdict = "Global signals bullish. Favor LONG setups."
         elif self.composite_score >= 55:
             verdict = "Neutral-to-positive signals. Normal conviction thresholds."
@@ -103,6 +126,15 @@ class PreMarketIntelligence:
 
         lines.append(f"**Verdict: {verdict}**")
         lines.append(f"\n{unavail_str}")
+
+        # PCR-specific note if missing
+        if any(s.name == "Nifty PCR" and not s.available for s in self.signals):
+            lines.append(
+                "\n⚠️ **Nifty PCR unavailable** — requires Kite client with NFO "
+                "subscription and valid access token. PCR is computed from option chain "
+                "OI data via `compute_pcr()` in `src/data_ingestion/pcr_tracker.py`."
+            )
+
         lines.append("\n⚡ This section is machine-computed from live market data. All other sections are AI-generated analysis.")
 
         return "\n".join(lines)
@@ -354,30 +386,159 @@ def compute_pre_market_intelligence(
     signals.extend(_score_fii_dii(fii_net_cr, dii_net_cr))
 
     available_count = sum(1 for s in signals if s.available)
+    total_signals = len(signals)
+    missing_count = total_signals - available_count
 
     if available_count == 0:
         logger.warning("[PreMkt] No signals available — cannot compute composite score")
         return None
 
+    # Scale contribution by available signals so missing data doesn't
+    # silently pull the score toward neutral (50).
+    # Example: if 5/9 available, each signal's contribution is amplified by 9/5 = 1.8x
     total_points = sum(s.points for s in signals)
-    raw_score = 50 + total_points
-    composite = max(0, min(100, raw_score))
+    scale_factor = total_signals / available_count if available_count < total_signals else 1.0
+    adjusted_points = total_points * scale_factor
+    raw_score = 50 + adjusted_points
+    composite = max(0, min(100, int(round(raw_score))))
+
+    # Mark as incomplete if 3+ signals missing
+    incomplete = missing_count >= 3
 
     result = PreMarketIntelligence(
         composite_score=composite,
         signals=signals,
         signals_available=available_count,
-        signals_total=len(signals),
+        signals_total=total_signals,
+        incomplete=incomplete,
+        missing_count=missing_count,
     )
 
     logger.info(result.format_log_line())
     return result
 
 
+def fetch_all_global_data(kite_client=None) -> dict:
+    """
+    Single consolidated fetch for ALL global data sources.
+    Called once at brief time; result shared across Section 0 and Section 1.
+
+    Returns dict with raw values for scoring + MacroQuote objects for prompt context.
+    """
+    data: dict = {
+        "spy_change": None, "qqq_change": None,
+        "crude_change": None, "eur_usd_change": None, "usd_inr_change": None,
+        "fii_net_cr": None, "dii_net_cr": None,
+        "vix_level": None, "pcr": None,
+        "us_quotes": {}, "macro_quotes": {},
+    }
+
+    # 1. US market + macro quotes from Finnhub (single import, two calls)
+    try:
+        from src.data_ingestion.finnhub_client import fetch_us_market_quotes, fetch_macro_quotes
+
+        us_quotes = fetch_us_market_quotes()
+        data["us_quotes"] = us_quotes
+        spy = us_quotes.get("S&P 500 (SPY)")
+        qqq = us_quotes.get("Nasdaq 100 (QQQ)")
+        if spy:
+            data["spy_change"] = spy.change_pct
+        if qqq:
+            data["qqq_change"] = qqq.change_pct
+
+        macro_quotes = fetch_macro_quotes()
+        data["macro_quotes"] = macro_quotes
+        crude = macro_quotes.get("Brent Crude (USD/bbl)")
+        eur_usd = macro_quotes.get("EUR/USD")
+        usd_inr = macro_quotes.get("USD/INR")
+        if crude:
+            data["crude_change"] = crude.change_pct
+        if eur_usd:
+            data["eur_usd_change"] = eur_usd.change_pct
+        if usd_inr:
+            data["usd_inr_change"] = usd_inr.change_pct
+    except Exception as e:
+        logger.warning(f"[PreMkt] Finnhub fetch failed: {e}")
+
+    # 2. FII/DII from NSE
+    try:
+        from src.data_ingestion.nse_scraper import get_institutional_signal
+        inst = get_institutional_signal()
+        data["fii_net_cr"] = inst.get("fii_net_cr") or None
+        data["dii_net_cr"] = inst.get("dii_net_cr") or None
+    except Exception as e:
+        logger.warning(f"[PreMkt] FII/DII fetch failed: {e}")
+
+    # 3. India VIX (cache first, then Kite)
+    try:
+        from cache.data_cache import CacheManager as _CM
+        _cached_vix = _CM().read_ltp("INDIA VIX", max_age_seconds=300)
+        if _cached_vix is not None:
+            data["vix_level"] = _cached_vix
+            logger.info(f"[PreMkt] India VIX from cache: {_cached_vix:.1f}")
+    except Exception:
+        pass
+
+    if data["vix_level"] is None and kite_client:
+        try:
+            from kiteconnect import exceptions as _ke
+            _tok_exc = _ke.TokenException
+        except ImportError:
+            _tok_exc = None
+        try:
+            vix_data = kite_client.ltp("NSE:INDIA VIX")
+            if "NSE:INDIA VIX" in vix_data:
+                raw_vix = vix_data["NSE:INDIA VIX"]["last_price"]
+                if 8 <= raw_vix <= 50:
+                    data["vix_level"] = raw_vix
+                    try:
+                        from cache.data_cache import CacheManager
+                        CacheManager().write_ltp("INDIA VIX", raw_vix)
+                    except Exception:
+                        pass
+                else:
+                    logger.warning(f"[PreMkt] India VIX out of valid range (8-50): {raw_vix}")
+        except Exception as e:
+            if _tok_exc and isinstance(e, _tok_exc):
+                try:
+                    from cache.data_cache import handle_token_expiry
+                    handle_token_expiry("ltp('NSE:INDIA VIX') in pre_market_intelligence")
+                except Exception:
+                    pass
+            logger.warning(f"[PreMkt] India VIX fetch failed: {e}")
+
+    # 4. PCR (attempt at pre-market using previous day's OI)
+    if kite_client:
+        try:
+            from src.data_ingestion.pcr_tracker import compute_pcr
+            # Get Nifty spot for strike calculation
+            spot_data = kite_client.ltp("NSE:NIFTY 50")
+            spot = spot_data.get("NSE:NIFTY 50", {}).get("last_price", 0)
+            if spot > 0:
+                pcr_result = compute_pcr(kite_client, spot)
+                if pcr_result and hasattr(pcr_result, 'pcr'):
+                    data["pcr"] = pcr_result.pcr
+                    logger.info(f"[PreMkt] Nifty PCR computed: {pcr_result.pcr:.3f}")
+                else:
+                    logger.warning("[REGIME] PCR unavailable — compute_pcr returned None")
+            else:
+                logger.warning("[REGIME] PCR unavailable — Nifty spot price not available")
+        except Exception as e:
+            logger.warning(
+                f"[REGIME] PCR unavailable — requires Kite client with NFO "
+                f"subscription and valid access token: {e}"
+            )
+    else:
+        logger.warning("[REGIME] PCR unavailable — no Kite client provided")
+
+    return data
+
+
 def fetch_and_compute(
     kite_client=None,
     macro_context=None,
     pcr_data=None,
+    preloaded_data: Optional[dict] = None,
 ) -> Optional[PreMarketIntelligence]:
     """
     High-level convenience: fetch all data sources and compute score.
@@ -386,10 +547,25 @@ def fetch_and_compute(
         kite_client: KiteConnect instance for India VIX fetch
         macro_context: Existing MacroContext with FII/DII data
         pcr_data: Existing PCRData from pcr_tracker
+        preloaded_data: Pre-fetched data from fetch_all_global_data() — skips all fetching
 
     Returns:
         PreMarketIntelligence or None if total failure.
     """
+    # If preloaded data provided, use it directly (no duplicate API calls)
+    if preloaded_data:
+        return compute_pre_market_intelligence(
+            spy_change=preloaded_data.get("spy_change"),
+            qqq_change=preloaded_data.get("qqq_change"),
+            crude_change=preloaded_data.get("crude_change"),
+            eur_usd_change=preloaded_data.get("eur_usd_change"),
+            usd_inr_change=preloaded_data.get("usd_inr_change"),
+            fii_net_cr=preloaded_data.get("fii_net_cr"),
+            dii_net_cr=preloaded_data.get("dii_net_cr"),
+            vix_level=preloaded_data.get("vix_level"),
+            pcr=preloaded_data.get("pcr"),
+        )
+
     spy_change = None
     qqq_change = None
     crude_change = None
@@ -439,18 +615,43 @@ def fetch_and_compute(
         except Exception as e:
             logger.warning(f"[PreMkt] FII/DII fetch failed: {e}")
 
-    # 3. India VIX from Kite
+    # 3. India VIX from Kite (check file cache first to avoid redundant API calls)
     vix_level = None
-    if kite_client:
+    try:
+        from cache.data_cache import CacheManager as _CM, handle_token_expiry as _hte
+        _cached_vix = _CM().read_ltp("INDIA VIX", max_age_seconds=300)
+        if _cached_vix is not None:
+            vix_level = _cached_vix
+            logger.info(f"[PreMkt] India VIX from cache: {vix_level:.1f}")
+    except Exception:
+        pass
+
+    if vix_level is None and kite_client:
+        try:
+            from kiteconnect import exceptions as _ke
+            _tok_exc = _ke.TokenException
+        except ImportError:
+            _tok_exc = None
         try:
             vix_data = kite_client.ltp("NSE:INDIA VIX")
             if "NSE:INDIA VIX" in vix_data:
                 raw_vix = vix_data["NSE:INDIA VIX"]["last_price"]
                 if 8 <= raw_vix <= 50:
                     vix_level = raw_vix
+                    try:
+                        from cache.data_cache import CacheManager
+                        CacheManager().write_ltp("INDIA VIX", vix_level)
+                    except Exception:
+                        pass
                 else:
                     logger.warning(f"[PreMkt] India VIX out of valid range (8-50): {raw_vix}")
         except Exception as e:
+            if _tok_exc and isinstance(e, _tok_exc):
+                try:
+                    from cache.data_cache import handle_token_expiry
+                    handle_token_expiry("ltp('NSE:INDIA VIX') in pre_market_intelligence")
+                except Exception:
+                    pass
             logger.warning(f"[PreMkt] India VIX fetch failed (Kite may not be ready): {e}")
 
     # 4. PCR from existing data

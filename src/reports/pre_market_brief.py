@@ -122,12 +122,15 @@ def generate_pre_market_brief():
         except Exception:
             pass
 
-    # ── Pre-Market Intelligence (v3): Machine-computed regime section ────────
+    # ── Pre-Market Intelligence (v3): Unified data fetch, shared across sections ─
     section_0_md = ""
     intel_context = "(Pre-market intelligence unavailable)"
+    macro_data_context = ""  # Machine-fetched values injected into Gemini prompt
     try:
-        from src.data_ingestion.pre_market_intelligence import fetch_and_compute
-        # Try to get Kite client for VIX
+        from src.data_ingestion.pre_market_intelligence import (
+            fetch_all_global_data, fetch_and_compute,
+        )
+        # Try to get Kite client for VIX + PCR
         kite_for_brief = None
         try:
             from kiteconnect import KiteConnect, exceptions as _kite_exc
@@ -146,11 +149,36 @@ def generate_pre_market_brief():
         except Exception as kite_init_e:
             logger.warning(f"[Brief] Kite init failed (non-token error): {kite_init_e}")
 
-        intel = fetch_and_compute(kite_client=kite_for_brief)
+        # Single unified fetch — no duplicate API calls
+        global_data = fetch_all_global_data(kite_client=kite_for_brief)
+
+        # Compute Section 0 from preloaded data
+        intel = fetch_and_compute(preloaded_data=global_data)
         if intel:
             section_0_md = intel.format_email_table() + "\n\n---\n\n"
             intel_context = intel.format_log_line()
             logger.info(f"[Brief] {intel_context}")
+
+        # Build machine macro context for Gemini prompt (so Section 1 uses same numbers)
+        macro_parts = []
+        for name, val in [
+            ("Crude Oil Δ%", global_data.get("crude_change")),
+            ("EUR/USD Δ%", global_data.get("eur_usd_change")),
+            ("USD/INR Δ%", global_data.get("usd_inr_change")),
+            ("SPY Δ%", global_data.get("spy_change")),
+            ("QQQ Δ%", global_data.get("qqq_change")),
+            ("India VIX", global_data.get("vix_level")),
+            ("Nifty PCR", global_data.get("pcr")),
+            ("FII Net ₹Cr", global_data.get("fii_net_cr")),
+            ("DII Net ₹Cr", global_data.get("dii_net_cr")),
+        ]:
+            if val is not None:
+                macro_parts.append(f"  {name}: {val}")
+        if macro_parts:
+            macro_data_context = (
+                "\n## Machine-Fetched Macro Data (use these exact numbers, do NOT hallucinate different values):\n"
+                + "\n".join(macro_parts)
+            )
     except Exception as intel_e:
         logger.warning(f"[Brief] Pre-market intelligence failed: {intel_e}")
 
@@ -172,6 +200,7 @@ Focus ONLY on events from the last 12 hours (since 6 PM yesterday). Do NOT repea
 ```json
 {json.dumps(finnhub_data, indent=2)[:4000]}
 ```
+{macro_data_context}
 
 Generate a markdown report with EXACTLY this structure:
 

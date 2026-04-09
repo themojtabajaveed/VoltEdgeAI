@@ -1591,7 +1591,29 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                             "entry_price": t.entry_price or 0,
                                             "qty": t.qty or 0,
                                         })
-                                conviction_engine.record_eod_outcomes(trade_records)
+                                # Build EOD price map for all watchboard symbols
+                                eod_price_map = {}
+                                if kite_live:
+                                    wb_symbols = [
+                                        s.symbol for s in conviction_engine._watchboard.values()
+                                    ]
+                                    if wb_symbols:
+                                        try:
+                                            nse_keys = [f"NSE:{sym}" for sym in wb_symbols]
+                                            # Kite LTP supports up to 500 symbols per call
+                                            for i in range(0, len(nse_keys), 500):
+                                                batch = nse_keys[i:i+500]
+                                                ltp_data = kite_live.ltp(batch)
+                                                for nse_key, val in ltp_data.items():
+                                                    sym = nse_key.replace("NSE:", "")
+                                                    eod_price_map[sym] = val.get("last_price", 0)
+                                            logging.info(
+                                                f"[EOD] Built price_map for {len(eod_price_map)}/{len(wb_symbols)} watchboard symbols"
+                                            )
+                                        except Exception as ltp_e:
+                                            logging.warning(f"[EOD] LTP fetch for price_map failed: {ltp_e}")
+
+                                conviction_engine.record_eod_outcomes(trade_records, price_map=eod_price_map)
                             except Exception as eod_e:
                                 logging.error(f"Pattern DB EOD recording failed: {eod_e}")
 

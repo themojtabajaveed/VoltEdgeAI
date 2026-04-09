@@ -55,6 +55,28 @@ CONVICTION_THRESHOLD = 70.0
 SIGNAL_MAX_AGE_HOURS = 4.0
 SIGNAL_EXPIRY_TIME = (14, 30)  # 14:30 IST — no new entries last hour
 
+# ── Asset Class Deduplication ──────────────────────────────────────────────
+# Keyword-based groups: if a symbol contains a keyword, it belongs to that class.
+# When multiple signals from the same class exist, keep only the highest conviction.
+ASSET_CLASS_GROUPS = {
+    "SILVER": ["SILVER", "SILVERBEES", "SILVRETF", "HDFCSILVER", "AXISILVER",
+               "SBISILVER", "MOSILVER", "SILVERIETF"],
+    "GOLD": ["GOLD", "GOLDBEES", "GOLDIETF", "AXISGOLD", "HDFCGOLD",
+             "SBIGOLD", "LICMFGOLD"],
+    "NIFTY_ETF": ["NIFTYBEES", "JUNIORBEES", "NIFTYIETF", "UTINIFTY"],
+    "BANKNIFTY_ETF": ["BANKBEES", "BANKIETF"],
+}
+ASSET_CLASS_DEDUP = True
+
+
+def _get_asset_class(symbol: str) -> Optional[str]:
+    """Return asset class name if symbol belongs to a known group, else None."""
+    sym_upper = symbol.upper()
+    for class_name, members in ASSET_CLASS_GROUPS.items():
+        if sym_upper in members:
+            return class_name
+    return None
+
 
 def classify_signal_type(metadata: dict) -> str:
     """
@@ -319,6 +341,35 @@ class ConvictionEngine:
                 return True
             return False
 
+        # Asset class deduplication: keep only highest conviction per asset class
+        if ASSET_CLASS_DEDUP:
+            new_class = _get_asset_class(signal.symbol)
+            if new_class:
+                same_class = [
+                    (k, s) for k, s in self._watchboard.items()
+                    if s.status == "WATCHING" and _get_asset_class(s.symbol) == new_class
+                ]
+                if same_class:
+                    # Keep existing if it has higher catalyst score
+                    best_existing = max(same_class, key=lambda x: x[1].layer_c_score)
+                    if signal.layer_c_score <= best_existing[1].layer_c_score:
+                        logger.info(
+                            f"[ConvEng] Deduplicated {new_class}: rejecting {signal.symbol} "
+                            f"{signal.direction} (C={signal.layer_c_score:.0f}) — "
+                            f"keeping {best_existing[1].symbol} (C={best_existing[1].layer_c_score:.0f})"
+                        )
+                        return False
+                    # New signal is better: remove all existing from same class
+                    dropped = []
+                    for old_key, old_sig in same_class:
+                        dropped.append(old_sig.symbol)
+                        del self._watchboard[old_key]
+                    logger.info(
+                        f"[ConvEng] Deduplicated {len(dropped)} {new_class} signals "
+                        f"→ keeping {signal.symbol} {signal.direction} "
+                        f"(highest C={signal.layer_c_score:.0f})"
+                    )
+
         # Compute Layer E from historical pattern matches
         try:
             vix = self._prev_snapshot.vix if self._prev_snapshot else 15.0
@@ -489,7 +540,11 @@ class ConvictionEngine:
         """Return all WATCHING signals."""
         return [s for s in self._watchboard.values() if s.status == "WATCHING"]
 
-    def record_eod_outcomes(self, trade_records: List[dict]) -> None:
+    def record_eod_outcomes(
+        self,
+        trade_records: List[dict],
+        price_map: Optional[Dict[str, float]] = None,
+    ) -> None:
         """
         Record pattern outcomes for all signals on the watchboard at EOD.
         Called before reset_daily().
@@ -497,15 +552,18 @@ class ConvictionEngine:
         Args:
             trade_records: List of dicts with {symbol, direction, pnl, entry_price}
                            from today's trades (from DB or positions).
+            price_map: Dict of symbol → current EOD price for evaluating expired signals.
+                       If not provided, expired signals get outcome=NO_DATA_EXPIRED.
         """
         today_str = datetime.now(IST).strftime("%Y-%m-%d")
         vix = self._prev_snapshot.vix if self._prev_snapshot else 15.0
         phase_value = self._phase_state.current_phase.value
+        price_map = price_map or {}
 
         trade_lookup = {}
         for tr in trade_records:
-            key = f"{tr.get('symbol', '')}_{tr.get('direction', '')}"
-            trade_lookup[key] = tr
+            tkey = f"{tr.get('symbol', '')}_{tr.get('direction', '')}"
+            trade_lookup[tkey] = tr
 
         recorded = 0
         for key, signal in self._watchboard.items():
@@ -521,21 +579,55 @@ class ConvictionEngine:
                         fingerprint=fp,
                         triggered=True,
                         pnl_pct=round(pnl_pct, 2),
-                        max_favorable=0.0,  # TODO: track MFE from positions
-                        max_adverse=0.0,    # TODO: track MAE from positions
+                        max_favorable=0.0,
+                        max_adverse=0.0,
                         outcome="WIN" if pnl > 0 else "LOSS",
                         date=today_str,
                     )
                 else:
-                    outcome = PatternOutcome(
-                        fingerprint=fp,
-                        triggered=signal.status == "TRIGGERED",
-                        pnl_pct=0.0,
-                        max_favorable=0.0,
-                        max_adverse=0.0,
-                        outcome="EXPIRED" if signal.status != "TRIGGERED" else "WIN",
-                        date=today_str,
-                    )
+                    # Expired signal: evaluate actual price movement
+                    entry_price = float(signal.metadata.get("entry_price", 0) or 0)
+                    current_price = price_map.get(signal.symbol, 0)
+
+                    if entry_price > 0 and current_price > 0:
+                        move_pct = (current_price - entry_price) / entry_price * 100
+                        directional_move = move_pct if signal.direction == "BUY" else -move_pct
+
+                        if directional_move >= 1.0:
+                            outcome_str = "CORRECT_NO_TRADE"
+                        elif directional_move <= -1.0:
+                            outcome_str = "WRONG_NO_TRADE"
+                        else:
+                            outcome_str = "CORRECT_NO_TRADE" if directional_move >= 0 else "WRONG_NO_TRADE"
+
+                        outcome = PatternOutcome(
+                            fingerprint=fp,
+                            triggered=False,
+                            pnl_pct=round(move_pct, 2),
+                            max_favorable=0.0,
+                            max_adverse=0.0,
+                            outcome=outcome_str,
+                            date=today_str,
+                        )
+                        logger.info(
+                            f"[ConvEng] {signal.symbol} {signal.direction} expired: "
+                            f"entry={entry_price:.2f} eod={current_price:.2f} "
+                            f"move={move_pct:+.2f}% → {outcome_str}"
+                        )
+                    else:
+                        outcome = PatternOutcome(
+                            fingerprint=fp,
+                            triggered=False,
+                            pnl_pct=0.0,
+                            max_favorable=0.0,
+                            max_adverse=0.0,
+                            outcome="NO_DATA_EXPIRED",
+                            date=today_str,
+                        )
+                        logger.warning(
+                            f"[ConvEng] {signal.symbol} expired: no price data "
+                            f"(entry={entry_price}, eod={current_price}) → NO_DATA_EXPIRED"
+                        )
 
                 self._pattern_db.record_outcome(outcome)
                 recorded += 1
