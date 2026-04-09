@@ -44,6 +44,7 @@ from src.trading.exit_monitor import ExitMonitorThread
 from src.trading.conviction_engine import ConvictionEngine, ActiveSignal
 from src.trading.market_phase import fetch_market_snapshot, MarketPhase
 from src.db.db_writer import get_db_writer
+from src.data_ingestion.candle_cache_writer import write_candle_cache
 import sys
 
 # Constants
@@ -219,7 +220,13 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     # Wait for connection to establish
     time.sleep(2)
     client.subscribe_symbols(list(active_map.keys()), mode="full")
-    
+
+    # ── TimesFM cache: initial 5-min candle population ───────────────────────
+    try:
+        write_candle_cache()
+    except Exception as _cwe:
+        logging.warning(f"[CacheWriter] Startup candle cache write failed (non-fatal): {_cwe}")
+
     positions = PositionBook()
     exit_engine = ExitEngine(positions=positions, live_client=client, risk=risk_cfg)
     # v4: Give ExitEngine read access to streaming TA states for RSI divergence detection
@@ -256,8 +263,9 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     last_mid_session_date = None  # Mid-session pulse at 12:00
     pre_market_ran      = False   # Track if pre-market brief succeeded today
     last_regime_update  = None    # V3: live regime updates
-    last_autopsy_date   = None    # Phase G: EOD autopsy
-    runner_start_time   = datetime.now(IST).time()  # Phase I: cascade prevention
+    last_autopsy_date        = None    # Phase G: EOD autopsy
+    runner_start_time        = datetime.now(IST).time()  # Phase I: cascade prevention
+    last_candle_cache_write  = None    # TimesFM: periodic 5-min candle refresh
     scanner_long_symbols:  list = []
 
     # ── Phase K: Dragon Architecture — HYDRA + VIPER Strategies ──
@@ -672,6 +680,16 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             logging.error(f"Mid-session pulse failed: {mid_e}")
                             print(f"  ❌ Mid-session pulse failed: {mid_e}")
                         last_mid_session_date = current_date
+
+                # ── TimesFM cache: refresh 5-min candles every 15 minutes ──────
+                if MARKET_START <= current_time <= MARKET_END:
+                    if (last_candle_cache_write is None or
+                            (now - last_candle_cache_write).total_seconds() >= 900):
+                        try:
+                            write_candle_cache()
+                            last_candle_cache_write = now
+                        except Exception as _cwe:
+                            logging.warning(f"[CacheWriter] Periodic candle cache write failed: {_cwe}")
 
                 # 1. Intraday tasks between 9:15 and 15:30
                 if MARKET_START <= current_time <= MARKET_END:
