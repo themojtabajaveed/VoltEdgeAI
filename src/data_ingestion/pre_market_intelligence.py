@@ -418,13 +418,59 @@ def compute_pre_market_intelligence(
     return result
 
 
+_GLOBAL_DATA_CACHE_PATH = "data/global_data_cache.json"
+_GLOBAL_DATA_CACHE_TTL = 900  # 15 minutes
+
+
+def _load_cached_global_data() -> Optional[dict]:
+    """Load cached global data if fresh (< 15 min old)."""
+    import os, json, time
+    try:
+        if os.path.exists(_GLOBAL_DATA_CACHE_PATH):
+            with open(_GLOBAL_DATA_CACHE_PATH) as f:
+                cached = json.load(f)
+            age = time.time() - cached.get("_cached_at", 0)
+            if age < _GLOBAL_DATA_CACHE_TTL:
+                logger.info(f"[PreMkt] Using cached global data ({age:.0f}s old)")
+                cached.pop("_cached_at", None)
+                # Restore empty dicts for non-serializable fields
+                cached.setdefault("us_quotes", {})
+                cached.setdefault("macro_quotes", {})
+                return cached
+    except Exception as e:
+        logger.debug(f"[PreMkt] Cache load failed: {e}")
+    return None
+
+
+def _save_global_data_cache(data: dict) -> None:
+    """Save global data to cache file."""
+    import os, json, time
+    try:
+        os.makedirs("data", exist_ok=True)
+        # Only cache serializable numeric values
+        cacheable = {k: v for k, v in data.items()
+                     if k not in ("us_quotes", "macro_quotes")}
+        cacheable["_cached_at"] = time.time()
+        with open(_GLOBAL_DATA_CACHE_PATH, "w") as f:
+            json.dump(cacheable, f, indent=2)
+    except Exception as e:
+        logger.debug(f"[PreMkt] Cache save failed: {e}")
+
+
 def fetch_all_global_data(kite_client=None) -> dict:
     """
     Single consolidated fetch for ALL global data sources.
     Called once at brief time; result shared across Section 0 and Section 1.
+    Uses a 15-minute file cache to avoid duplicate Finnhub calls between
+    the 08:30 pre-market intelligence run and the 08:45 brief generation.
 
     Returns dict with raw values for scoring + MacroQuote objects for prompt context.
     """
+    # Check cache first (avoids Finnhub rate limit exhaustion)
+    cached = _load_cached_global_data()
+    if cached is not None:
+        return cached
+
     data: dict = {
         "spy_change": None, "qqq_change": None,
         "crude_change": None, "eur_usd_change": None, "usd_inr_change": None,
@@ -530,6 +576,20 @@ def fetch_all_global_data(kite_client=None) -> dict:
             )
     else:
         logger.warning("[REGIME] PCR unavailable — no Kite client provided")
+
+    # 4b. NSE PCR fallback (free, no Kite subscription needed)
+    if data["pcr"] is None:
+        try:
+            from src.data_ingestion.nse_scraper import fetch_nse_pcr
+            nse_pcr = fetch_nse_pcr()
+            if nse_pcr is not None:
+                data["pcr"] = nse_pcr
+                logger.info(f"[PreMkt] Nifty PCR from NSE option chain: {nse_pcr:.3f}")
+        except Exception as e:
+            logger.warning(f"[PreMkt] NSE PCR fallback failed: {e}")
+
+    # Save to cache for reuse by brief pipeline (avoids duplicate Finnhub calls)
+    _save_global_data_cache(data)
 
     return data
 

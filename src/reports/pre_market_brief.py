@@ -62,313 +62,40 @@ def _build_lessons_context(log: dict) -> str:
 
 
 def generate_pre_market_brief():
-    from google import genai
-    from google.genai import types
-
+    """
+    Morning Brief v2 entry point — delegates to brief_pipeline.
+    Kept for backward compatibility with runner.py scheduling.
+    """
     try:
-        from src.data_ingestion.finnhub_client import fetch_global_sentiment
+        from src.reports.brief_pipeline import generate_morning_brief
+        generate_morning_brief()
     except Exception as e:
-        logger.warning(f"Could not import finnhub_client: {e}")
-        fetch_global_sentiment = lambda: {}
+        logger.error(f"[Brief] Morning Brief v2 pipeline failed: {e}")
+        # Last-resort fallback: generate minimal data-only brief
+        _generate_emergency_fallback(e)
 
+
+def _generate_emergency_fallback(error: Exception) -> None:
+    """Last-resort fallback if the v2 pipeline itself crashes."""
     import zoneinfo
     IST = zoneinfo.ZoneInfo("Asia/Kolkata")
     today = datetime.now(IST).date()
 
-    # Duplicate guard: skip if today's brief already exists
-    existing_paths = [
-        os.path.join("logs", "daily_reports", f"{today}_morning_brief.md"),
-        os.path.join("logs", "daily_reports", f"voltedge_{today}", f"{today}_morning_brief.md"),
-    ]
-    for ep in existing_paths:
-        if os.path.exists(ep):
-            print(f"[VoltEdge] Morning brief already exists at {ep} — skipping duplicate generation.")
-            return
+    report_md = (
+        f"# VoltEdge Morning Brief — {today} (EMERGENCY FALLBACK)\n\n"
+        f"> **Pipeline error:** {error}\n\n"
+        f"The morning brief v2 pipeline encountered an error. "
+        f"Check logs for details. Trading engine will use default regime (sideways/0.5).\n"
+    )
 
-    log = _load_prediction_log()
-    lessons_context = _build_lessons_context(log)
-
-    try:
-        finnhub_data = fetch_global_sentiment()
-    except Exception as e:
-        logger.warning(f"Finnhub fetch failed: {e}")
-        finnhub_data = {}
-
-    api_key = os.getenv("GEMINI_API_KEY")
-    gemini_available = bool(api_key)
-    if not gemini_available:
-        logger.warning("[Brief] GEMINI_API_KEY not set — will send partial data-only brief.")
-
-    # ── Fetch yesterday's NSE top movers as a real data anchor ────────────────
-    # This prevents Gemini from defaulting to hardcoded blue-chip names.
-    nse_movers_context = "(NSE top movers data unavailable — using Finnhub/search only)"
-    try:
-        from src.data_ingestion.nse_scraper import get_nse_top_gainers_losers
-        movers = get_nse_top_gainers_losers()
-        if movers:
-            g_str = ", ".join(f"{m['symbol']} ({m.get('pct_change',0):+.1f}%)" for m in movers.get('gainers', [])[:5])
-            l_str = ", ".join(f"{m['symbol']} ({m.get('pct_change',0):+.1f}%)" for m in movers.get('losers', [])[:5])
-            nse_movers_context = f"Yesterday's NSE Top Gainers: {g_str}\nYesterday's NSE Top Losers: {l_str}"
-    except Exception as e:
-        logger.warning(f"NSE movers fetch failed: {e}")
-        # Fallback: try momentum_scanner with yesterday's access token env
-        try:
-            from src.sniper.momentum_scanner import fetch_top_movers
-            movers = fetch_top_movers()
-            if movers.get('gainers') or movers.get('losers'):
-                g_str = ", ".join(f"{c.symbol} ({c.pct_change:+.1f}%)" for c in movers.get('gainers', [])[:5])
-                l_str = ", ".join(f"{c.symbol} ({c.pct_change:+.1f}%)" for c in movers.get('losers', [])[:5])
-                nse_movers_context = f"Yesterday's NSE Top Gainers: {g_str}\nYesterday's NSE Top Losers: {l_str}"
-        except Exception:
-            pass
-
-    # ── Pre-Market Intelligence (v3): Unified data fetch, shared across sections ─
-    section_0_md = ""
-    intel_context = "(Pre-market intelligence unavailable)"
-    macro_data_context = ""  # Machine-fetched values injected into Gemini prompt
-    try:
-        from src.data_ingestion.pre_market_intelligence import (
-            fetch_all_global_data, fetch_and_compute,
-        )
-        # Try to get Kite client for VIX + PCR
-        kite_for_brief = None
-        try:
-            from kiteconnect import KiteConnect, exceptions as _kite_exc
-            ka = os.getenv("ZERODHA_API_KEY")
-            at = os.getenv("ZERODHA_ACCESS_TOKEN")
-            if ka and at:
-                kite_for_brief = KiteConnect(api_key=ka)
-                kite_for_brief.set_access_token(at)
-        except _kite_exc.TokenException as te:
-            logger.warning(f"[Brief] Kite token expired during VIX init: {te}")
-            try:
-                from cache.data_cache import handle_token_expiry
-                handle_token_expiry("pre_market_brief kite initialization")
-            except Exception:
-                pass
-        except Exception as kite_init_e:
-            logger.warning(f"[Brief] Kite init failed (non-token error): {kite_init_e}")
-
-        # Single unified fetch — no duplicate API calls
-        global_data = fetch_all_global_data(kite_client=kite_for_brief)
-
-        # Compute Section 0 from preloaded data
-        intel = fetch_and_compute(preloaded_data=global_data)
-        if intel:
-            section_0_md = intel.format_email_table() + "\n\n---\n\n"
-            intel_context = intel.format_log_line()
-            logger.info(f"[Brief] {intel_context}")
-
-        # Build machine macro context for Gemini prompt (so Section 1 uses same numbers)
-        macro_parts = []
-        for name, val in [
-            ("Crude Oil Δ%", global_data.get("crude_change")),
-            ("EUR/USD Δ%", global_data.get("eur_usd_change")),
-            ("USD/INR Δ%", global_data.get("usd_inr_change")),
-            ("SPY Δ%", global_data.get("spy_change")),
-            ("QQQ Δ%", global_data.get("qqq_change")),
-            ("India VIX", global_data.get("vix_level")),
-            ("Nifty PCR", global_data.get("pcr")),
-            ("FII Net ₹Cr", global_data.get("fii_net_cr")),
-            ("DII Net ₹Cr", global_data.get("dii_net_cr")),
-        ]:
-            if val is not None:
-                macro_parts.append(f"  {name}: {val}")
-        if macro_parts:
-            macro_data_context = (
-                "\n## Machine-Fetched Macro Data (use these exact numbers, do NOT hallucinate different values):\n"
-                + "\n".join(macro_parts)
-            )
-    except Exception as intel_e:
-        logger.warning(f"[Brief] Pre-market intelligence failed: {intel_e}")
-
-    if gemini_available:
-        client = genai.Client(api_key=api_key)
-
-    prompt = f"""You are VoltEdge's senior pre-market analyst with 20+ years of experience in Indian equity markets.
-
-Today is {today}. Your task is to deliver a structured, factual, actionable morning intelligence brief.
-Focus ONLY on events from the last 12 hours (since 6 PM yesterday). Do NOT repeat stale information.
-
-## VoltEdge Machine Intelligence (real data, not hallucinated):
-{intel_context}
-
-## Feedback Loop Context (Learn from past predictions):
-{lessons_context}
-
-## Finnhub News Data (last 12 hours):
-```json
-{json.dumps(finnhub_data, indent=2)[:4000]}
-```
-{macro_data_context}
-
-Generate a markdown report with EXACTLY this structure:
-
----
-
-# VoltEdge Global Intelligence Brief — {today}
-
-## 1. Overnight Global Markets
-Fill BOTH tables with real numbers from the last 12 hours. Use 🟢/🔴/➖ for Bias.
-
-| Index / Asset | Close / Level | Chg% | Bias |
-|---------------|---------------|------|------|
-| S&P 500       | …             | …    | …    |
-| Nasdaq        | …             | …    | …    |
-| Dow Jones     | …             | …    | …    |
-| Nikkei 225    | …             | …    | …    |
-| Hang Seng     | …             | …    | …    |
-| GIFT Nifty    | …             | …    | …    |
-
-| Asset     | Level | Chg%  | India Impact (1 phrase) |
-|-----------|-------|-------|-------------------------|
-| Crude Oil | $…    | …     | …                       |
-| Gold      | $…    | …     | …                       |
-| DXY       | …     | …     | …                       |
-| US 10Y    | …%    | …bps  | …                       |
-
-## 2. Indian Market Impact Assessment
-For each major global event above, state the DIRECT impact on Indian sectors:
-| Event | Affected Indian Sector/Stock | Expected Impact | Reasoning |
-|-------|------------------------------|-----------------|-----------|
-
-## 3. Yesterday's NSE Movers Context
-{nse_movers_context}
-
-## 4. Today's 5 Stock Predictions
-Select 5 SPECIFIC NSE stocks that are most likely to move today, based on:
-- The overnight global events and sector impacts above
-- The NSE movers context (momentum/reversal candidates)
-- Specific catalysts you found via web search
-Do NOT default to large-caps unless they have a specific catalyst.
-
-| Symbol | Direction (Bullish/Bearish) | Key Level to Watch | Reason (1 sentence, mention the catalyst) |
-|--------|----------------------------|--------------------|-------------------------------------------|
-
-## 5. VoltEdge Tactical Directives
-Provide exactly 3 concrete rules for today's trading engine:
-1. [Directive 1]
-2. [Directive 2]
-3. [Directive 3]
-
-## 6. Risk Regime Assessment
-Single line only: **Regime: BULLISH|BEARISH|SIDEWAYS (strength 0.0–1.0)** — one sentence stating the primary driver of this regime call.
-
----
-
-At the very end, output this JSON block (used by the trading engine).
-Fill predictions with the SAME 5 stocks from Section 4 — use their actual NSE trading symbols.
-Do NOT use placeholder/example symbols.
-```json
-{{
-  "trend": "bullish|bearish|sideways",
-  "strength": 0.0_to_1.0,
-  "top_sectors_long": ["SECTOR1", "SECTOR2"],
-  "top_sectors_short": ["SECTOR3"],
-  "predictions": [
-    {{"symbol": "ACTUAL_NSE_SYMBOL_1", "predicted_direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}},
-    {{"symbol": "ACTUAL_NSE_SYMBOL_2", "predicted_direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}},
-    {{"symbol": "ACTUAL_NSE_SYMBOL_3", "predicted_direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}},
-    {{"symbol": "ACTUAL_NSE_SYMBOL_4", "predicted_direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}},
-    {{"symbol": "ACTUAL_NSE_SYMBOL_5", "predicted_direction": "bullish|bearish|sideways", "key_level": 0.0, "reason": "specific one-sentence catalyst reason"}}
-  ]
-}}
-```
-"""
-
-    report_md = None
-
-    if gemini_available:
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(tools=[{"google_search": {}}]),
-            )
-            report_md = response.text
-
-            # Prepend Section 0 (machine-computed) before AI-generated content
-            if section_0_md:
-                report_md = section_0_md + report_md
-
-            # ── Parse and save regime JSON ──────────────────────────────────────
-            match = re.search(r"```json\s*(\{.*?\})\s*```", report_md, re.DOTALL)
-            if match:
-                try:
-                    regime_data = json.loads(match.group(1))
-
-                    os.makedirs("data", exist_ok=True)
-                    regime_path = "data/daily_regime.json"
-                    with open(regime_path, "w") as jf:
-                        json.dump(
-                            {"trend": regime_data.get("trend", "sideways"),
-                             "strength": regime_data.get("strength", 0.5)},
-                            jf, indent=2
-                        )
-                    logger.info(f"Regime saved: {regime_data.get('trend')} / {regime_data.get('strength')}")
-
-                    # ── Persist today's predictions to the feedback log ──────────
-                    new_predictions = regime_data.get("predictions", [])
-                    for pred in new_predictions:
-                        pred["date"] = str(today)
-                        pred["score"] = None   # will be filled by feedback_loop.py tonight
-                        pred["actual_change_pct"] = None
-                        # Remove duplicates for same symbol+date
-                        log["predictions"] = [
-                            p for p in log["predictions"]
-                            if not (p["date"] == str(today) and p["symbol"] == pred["symbol"])
-                        ]
-                        log["predictions"].append(pred)
-
-                    _save_prediction_log(log)
-                    logger.info(f"Saved {len(new_predictions)} predictions to prediction_log.json")
-
-                except Exception as parse_err:
-                    logger.warning(f"Failed to parse regime JSON from report: {parse_err}")
-
-        except Exception as gemini_e:
-            logger.error(f"[Brief] Gemini generation failed: {gemini_e}")
-            report_md = None
-
-    # ── Fallback: assemble partial report if Gemini unavailable or failed ─────
-    if report_md is None:
-        fallback_lines = [
-            f"# VoltEdge Morning Brief — {today} (Partial — Gemini Unavailable)\n",
-            "> **Note:** Gemini API unavailable. Report contains machine-computed data only.\n",
-        ]
-        if section_0_md:
-            fallback_lines.append(section_0_md)
-        if nse_movers_context:
-            fallback_lines.append(f"## NSE Movers Context\n{nse_movers_context}\n")
-        if finnhub_data:
-            fallback_lines.append(
-                f"## Global Sentiment (Finnhub)\n"
-                f"```json\n{json.dumps(finnhub_data, indent=2)[:2000]}\n```\n"
-            )
-        report_md = "\n".join(fallback_lines)
-        logger.warning("[Brief] Sending partial data-only brief because Gemini was unavailable.")
-
-    # ── Save Markdown report ────────────────────────────────────────────
     try:
         os.makedirs(os.path.join("logs", "daily_reports"), exist_ok=True)
         report_path = os.path.join("logs", "daily_reports", f"{today}_morning_brief.md")
         with open(report_path, "w") as f:
             f.write(report_md)
-        print(f"[VoltEdge] Morning brief saved to: {report_path}")
-    except Exception as save_e:
-        logger.error(f"[Brief] Failed to save report: {save_e}")
-        report_path = ""
-
-    # ── Email dispatch ─────────────────────────────────────────────────
-    subject = f"VoltEdge Morning Brief — {today}"
-    if report_md and "Partial" in report_md.split("\n")[0]:
-        subject = f"[PARTIAL] {subject}"
-    email_ok = _send_email(subject=subject, report_md=report_md, report_path=report_path)
-    now_ist = datetime.now(IST).strftime("%H:%M:%S")
-    if email_ok:
-        logger.info(f"[EMAIL] Pre-market email sent at {now_ist}")
-    else:
-        logger.error(f"[EMAIL] Pre-market email FAILED at {now_ist} — check SMTP config or email_sender logs")
+        _send_email(f"[EMERGENCY] VoltEdge Morning Brief — {today}", report_md, report_path)
+    except Exception:
+        pass
 
 
 def _send_email(subject: str, report_md: str, report_path: str) -> bool:

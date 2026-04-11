@@ -241,3 +241,98 @@ def get_deal_signal(symbol: str) -> Optional[str]:
     elif sell_qty > buy_qty * 2:
         return "INSTITUTIONAL_SELL"
     return None
+
+
+# ── Nifty PCR from NSE Option Chain ──────────────────────────────────────
+
+def fetch_nse_pcr(symbol: str = "NIFTY") -> Optional[float]:
+    """
+    Fetch Nifty Put-Call Ratio from NSE option chain (free, no Kite needed).
+
+    Endpoint: option-chain-indices?symbol=NIFTY
+    PCR = Total PUT OI / Total CALL OI
+
+    Returns PCR as float, or None if unavailable.
+    """
+    data = _nse_get(f"option-chain-indices?symbol={symbol}")
+    if not data:
+        logger.warning(f"[NSE-PCR] Option chain returned no data for {symbol}")
+        return None
+
+    # NSE provides pre-computed totals in 'filtered'
+    filtered = data.get("filtered", {})
+    if filtered:
+        ce_total = filtered.get("CE", {}).get("totOI", 0)
+        pe_total = filtered.get("PE", {}).get("totOI", 0)
+        if ce_total > 0:
+            pcr = pe_total / ce_total
+            logger.info(f"[NSE-PCR] {symbol} PCR={pcr:.3f} (PutOI={pe_total:,} CallOI={ce_total:,}) [filtered]")
+            return round(pcr, 3)
+
+    # Fallback: compute from individual strike records
+    records = data.get("records", {}).get("data", [])
+    if not records:
+        logger.warning(f"[NSE-PCR] No option chain records for {symbol}")
+        return None
+
+    total_call_oi = 0
+    total_put_oi = 0
+    for rec in records:
+        if "CE" in rec:
+            total_call_oi += rec["CE"].get("openInterest", 0)
+        if "PE" in rec:
+            total_put_oi += rec["PE"].get("openInterest", 0)
+
+    if total_call_oi == 0:
+        logger.warning(f"[NSE-PCR] Zero call OI — data may be stale or unavailable")
+        return None
+
+    pcr = total_put_oi / total_call_oi
+    logger.info(f"[NSE-PCR] {symbol} PCR={pcr:.3f} (PutOI={total_put_oi:,} CallOI={total_call_oi:,})")
+    return round(pcr, 3)
+
+
+# ── NSE Top Gainers/Losers ───────────────────────────────────────────────
+
+def get_nse_top_gainers_losers(count: int = 5) -> Optional[Dict]:
+    """
+    Fetch today's top gainers and losers from NSE Nifty 500.
+
+    Uses equity-stockIndices endpoint, sorts by pChange.
+
+    Returns:
+        {"gainers": [{"symbol": ..., "pct_change": ..., "last_price": ...}],
+         "losers":  [{"symbol": ..., "pct_change": ..., "last_price": ...}]}
+        or None if unavailable.
+    """
+    data = _nse_get("equity-stockIndices?index=NIFTY%20500")
+    if not data or "data" not in data:
+        logger.warning("[NSE-Movers] Nifty 500 data unavailable")
+        return None
+
+    stocks = [
+        d for d in data["data"]
+        if isinstance(d, dict) and d.get("symbol") and d["symbol"] != "NIFTY 500"
+        and d.get("pChange") is not None
+    ]
+
+    if not stocks:
+        return None
+
+    stocks.sort(key=lambda x: x.get("pChange", 0), reverse=True)
+
+    def _fmt(item: dict) -> dict:
+        return {
+            "symbol": item["symbol"],
+            "pct_change": round(float(item.get("pChange", 0)), 2),
+            "last_price": float(item.get("lastPrice", 0)),
+            "prev_close": float(item.get("previousClose", 0)),
+            "open": float(item.get("open", 0)),
+        }
+
+    result = {
+        "gainers": [_fmt(s) for s in stocks[:count]],
+        "losers": [_fmt(s) for s in stocks[-count:]],
+    }
+    logger.info(f"[NSE-Movers] Top {count} gainers/losers fetched from Nifty 500")
+    return result

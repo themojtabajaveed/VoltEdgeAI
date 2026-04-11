@@ -155,8 +155,9 @@ def classify_events_batch(events: list[dict]) -> list[dict]:
                 "material": False,
             }
 
-    # Cap workers at min(len(events), 10) to avoid flooding Groq free tier.
-    max_workers = min(len(events), 10)
+    # Cap workers at 3 to stay within Groq free tier TPM limit (12K tokens/min).
+    # Each classify_event call uses ~500 tokens, so 3 concurrent = ~1500 tokens burst.
+    max_workers = min(len(events), 3)
     results = [None] * len(events)
     with ThreadPoolExecutor(max_workers=max_workers,
                             thread_name_prefix="GroqBatch") as pool:
