@@ -385,6 +385,17 @@ class ConvictionEngine:
             # Keep default 50.0
 
         self._watchboard[key] = signal
+
+        # Capture detection price for mid-session move tracking
+        try:
+            from cache.data_cache import CacheManager
+            _cache = CacheManager()
+            _ltp = _cache.read_ltp(signal.symbol, max_age_seconds=120)
+            if _ltp:
+                signal.metadata["detection_price"] = float(_ltp)
+        except Exception:
+            pass  # Non-critical — signal works fine without detection_price
+
         logger.info(
             f"[ConvEng] Added {signal.symbol} {signal.direction} [{signal.strategy}] "
             f"C={signal.layer_c_score:.0f} E={signal.layer_e_score:.0f} — {signal.event_summary[:60]}"

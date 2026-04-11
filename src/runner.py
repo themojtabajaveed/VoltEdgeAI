@@ -661,8 +661,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         logging.warning(f"Negative market pulse fetch failed: {neg_e}")
                     last_neg_pulse_date = current_date
 
-                # 0e. 12:00 IST — Mid-Session Pulse Report (no LLM)
-                if _should_fire_scheduled_job(dt_time(12, 0), runner_start_time, current_time):
+                # 0e. 12:22 IST — Mid-Session Pulse Report
+                if _should_fire_scheduled_job(dt_time(12, 22), runner_start_time, current_time):
                     if last_mid_session_date != current_date:
                         try:
                             from src.reports.mid_session_pulse import generate_mid_session_pulse

@@ -496,3 +496,262 @@ Directives must be concrete and actionable. Not vague. Example:
         "top_sectors_long": [],
         "top_sectors_short": [],
     }
+
+
+# ── Mid-Session Analysis Functions ────────────────────────────────────────
+
+
+def fetch_mover_reasons(
+    gainers: List[dict],
+    losers: List[dict],
+    max_per_side: int = 3,
+) -> Dict[str, str]:
+    """
+    Use Brave Search to find reasons behind today's top movers.
+
+    Args:
+        gainers: List of {"symbol": ..., "pct_change": ...}
+        losers: List of {"symbol": ..., "pct_change": ...}
+        max_per_side: Max stocks per side to query
+
+    Returns:
+        {symbol: "reason string"} dict
+    """
+    import zoneinfo
+    IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+
+    symbols_to_query = []
+    for g in gainers[:max_per_side]:
+        symbols_to_query.append(g.get("symbol", ""))
+    for l in losers[:max_per_side]:
+        symbols_to_query.append(l.get("symbol", ""))
+
+    symbols_to_query = [s for s in symbols_to_query if s]
+    if not symbols_to_query:
+        return {}
+
+    queries = [f"{sym} NSE stock {today} reason news" for sym in symbols_to_query]
+    brave_results = fetch_brave_news(queries, max_results_per_query=3)
+
+    if not brave_results:
+        logger.warning("[MoverReasons] Brave Search returned no results")
+        return {sym: "No catalyst identified" for sym in symbols_to_query}
+
+    # Group results by symbol
+    symbol_news: Dict[str, List[str]] = {sym: [] for sym in symbols_to_query}
+    for r in brave_results:
+        title = r.get("title", "").upper()
+        desc = r.get("description", "")
+        for sym in symbols_to_query:
+            if sym.upper() in title or sym.upper() in desc.upper():
+                symbol_news[sym].append(f"{r.get('title', '')} — {desc[:150]}")
+
+    # Ask Groq to extract reasons from news snippets
+    reasons: Dict[str, str] = {}
+    for sym in symbols_to_query:
+        snippets = symbol_news.get(sym, [])
+        if not snippets:
+            reasons[sym] = "No catalyst identified"
+            continue
+
+        snippets_block = "\n".join(snippets[:5])
+        prompt = f"""From these news snippets about {sym} (NSE), extract the ONE primary reason the stock moved today in 1 short sentence (max 15 words). If no clear reason, say "Sector/market momentum".
+
+News:
+{snippets_block}
+
+Return ONLY valid JSON: {{"reason": "the reason"}}"""
+
+        result = _call_groq(prompt, max_tokens=100)
+        if result and "reason" in result:
+            reasons[sym] = result["reason"]
+        else:
+            # Try extracting from title directly
+            reasons[sym] = snippets[0].split(" — ")[0][:80] if snippets else "No catalyst identified"
+
+    logger.info(f"[MoverReasons] Got reasons for {len(reasons)} symbols")
+    return reasons
+
+
+def analyze_mid_session(
+    market_data: dict,
+    mover_reasons: Dict[str, str],
+    predictions_status: List[dict],
+) -> dict:
+    """
+    Generate morning narrative and commentary for mid-session report.
+
+    Args:
+        market_data: {nifty_pct, vix, ad_ratio, phase, sector_changes, top_gainers, top_losers}
+        mover_reasons: {symbol: reason} from fetch_mover_reasons()
+        predictions_status: [{symbol, predicted, actual_pct, status}]
+
+    Returns:
+        {
+            "narrative": "3-4 sentence morning market summary",
+            "mover_commentary": "2-3 sentences on why top movers moved",
+            "prediction_commentary": "1-2 sentences on morning brief accuracy"
+        }
+    """
+    import zoneinfo
+    IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+    now = datetime.now(IST)
+
+    # Build market context
+    nifty_pct = market_data.get("nifty_pct", 0)
+    vix = market_data.get("vix", 0)
+    ad_ratio = market_data.get("ad_ratio", 0)
+    phase = market_data.get("phase", "UNKNOWN")
+
+    # Sector data
+    sectors = market_data.get("sector_changes", {})
+    sector_str = ", ".join(f"{k}: {v:+.2f}%" for k, v in sorted(sectors.items(), key=lambda x: x[1], reverse=True)[:5]) if sectors else "N/A"
+
+    # Movers with reasons
+    movers_lines = []
+    for g in market_data.get("top_gainers", [])[:3]:
+        sym = g.get("symbol", "?")
+        reason = mover_reasons.get(sym, "—")
+        movers_lines.append(f"GAINER: {sym} {g.get('pct_change', 0):+.1f}% — {reason}")
+    for l in market_data.get("top_losers", [])[:3]:
+        sym = l.get("symbol", "?")
+        reason = mover_reasons.get(sym, "—")
+        movers_lines.append(f"LOSER: {sym} {l.get('pct_change', 0):+.1f}% — {reason}")
+    movers_block = "\n".join(movers_lines) if movers_lines else "No mover data"
+
+    # Predictions
+    pred_lines = []
+    for p in predictions_status:
+        pred_lines.append(f"{p['symbol']}: predicted {p['predicted']} → actual {p.get('actual_pct', 'N/A')}% → {p.get('status', '?')}")
+    pred_block = "\n".join(pred_lines) if pred_lines else "No predictions to check"
+
+    prompt = f"""You are VoltEdge's mid-session analyst. Time: {now.strftime('%H:%M')} IST, {now.strftime('%Y-%m-%d')}.
+
+## Market State
+- Nifty: {nifty_pct:+.2f}% | Phase: {phase} | VIX: {vix:.1f} | A/D: {ad_ratio:.2f}
+- Sectors: {sector_str}
+
+## Top Movers & Reasons
+{movers_block}
+
+## Morning Brief Predictions vs Reality
+{pred_block}
+
+Write:
+1. A 3-4 sentence morning market narrative (what happened from open to now, key themes, institutional tone)
+2. A 2-3 sentence commentary on why the top movers moved (use the reasons provided)
+3. A 1-2 sentence commentary on morning brief prediction accuracy
+
+Return ONLY valid JSON:
+{{
+  "narrative": "3-4 sentences",
+  "mover_commentary": "2-3 sentences",
+  "prediction_commentary": "1-2 sentences"
+}}
+
+Be specific. Use real numbers and stock names. No vague statements."""
+
+    result = _call_groq(prompt, max_tokens=800)
+    if result and "narrative" in result:
+        logger.info("[MidSession] Narrative: Groq OK")
+        return result
+
+    result = _call_gemini(prompt)
+    if result and "narrative" in result:
+        logger.info("[MidSession] Narrative: Gemini fallback OK")
+        return result
+
+    # Mechanical fallback
+    logger.warning("[MidSession] Narrative: both LLMs failed, using mechanical fallback")
+    direction = "up" if nifty_pct > 0 else "down" if nifty_pct < 0 else "flat"
+    breadth = "strong" if ad_ratio > 0.6 else "weak" if ad_ratio < 0.4 else "mixed"
+    return {
+        "narrative": f"Market is in {phase} phase. Nifty {direction} {abs(nifty_pct):.2f}% with {breadth} breadth (A/D {ad_ratio:.2f}). VIX at {vix:.1f}.",
+        "mover_commentary": "LLM analysis unavailable. See scoreboard below for top movers.",
+        "prediction_commentary": "LLM analysis unavailable. See accuracy table below for prediction outcomes.",
+    }
+
+
+def analyze_second_half(
+    market_data: dict,
+    signals_summary: dict,
+    risk_flags: List[str],
+) -> dict:
+    """
+    Generate second-half outlook for mid-session report.
+
+    Args:
+        market_data: {nifty_pct, vix, ad_ratio, phase, sector_changes}
+        signals_summary: {total, by_strategy: {HYDRA: n, VIPER: n}, above_threshold: n}
+        risk_flags: List of risk flag strings
+
+    Returns:
+        {
+            "outlook": "3-4 sentence afternoon outlook",
+            "risk_flags": ["flag1", "flag2"],
+            "watchlist_highlight": "1 sentence on most interesting signal"
+        }
+    """
+    import zoneinfo
+    IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+    now = datetime.now(IST)
+
+    nifty_pct = market_data.get("nifty_pct", 0)
+    vix = market_data.get("vix", 0)
+    ad_ratio = market_data.get("ad_ratio", 0)
+    phase = market_data.get("phase", "UNKNOWN")
+
+    sectors = market_data.get("sector_changes", {})
+    sector_str = ", ".join(f"{k}: {v:+.2f}%" for k, v in sorted(sectors.items(), key=lambda x: x[1], reverse=True)[:5]) if sectors else "N/A"
+
+    flags_block = "\n".join(f"- {f}" for f in risk_flags) if risk_flags else "No flags"
+
+    total_signals = signals_summary.get("total", 0)
+    by_strat = signals_summary.get("by_strategy", {})
+    above_thresh = signals_summary.get("above_threshold", 0)
+
+    prompt = f"""You are VoltEdge's mid-session risk analyst. Time: {now.strftime('%H:%M')} IST.
+
+## Current Market State
+- Nifty: {nifty_pct:+.2f}% | Phase: {phase} | VIX: {vix:.1f} | A/D: {ad_ratio:.2f}
+- Sectors: {sector_str}
+
+## System State
+- Active signals: {total_signals} (by strategy: {by_strat})
+- Signals above conviction threshold (70): {above_thresh}
+
+## Risk Flags
+{flags_block}
+
+Write:
+1. A 3-4 sentence afternoon outlook (likely trajectory, key levels to watch, what could change the picture)
+2. List of current risk flags (keep from input + add any you identify)
+3. A 1-sentence watchlist highlight (most interesting setup for the afternoon)
+
+Return ONLY valid JSON:
+{{
+  "outlook": "3-4 sentences",
+  "risk_flags": ["flag1", "flag2"],
+  "watchlist_highlight": "1 sentence"
+}}
+
+Be specific. Use real numbers. No generic advice."""
+
+    result = _call_groq(prompt, max_tokens=600)
+    if result and "outlook" in result:
+        logger.info("[MidSession] Outlook: Groq OK")
+        return result
+
+    result = _call_gemini(prompt)
+    if result and "outlook" in result:
+        logger.info("[MidSession] Outlook: Gemini fallback OK")
+        return result
+
+    # Mechanical fallback
+    logger.warning("[MidSession] Outlook: both LLMs failed, using mechanical fallback")
+    return {
+        "outlook": f"Phase: {phase}. Nifty {nifty_pct:+.2f}% at midday. {total_signals} signals active, {above_thresh} above threshold. Continue monitoring.",
+        "risk_flags": risk_flags if risk_flags else ["None"],
+        "watchlist_highlight": f"{total_signals} signals being tracked. System in observation mode.",
+    }
