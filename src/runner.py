@@ -38,6 +38,7 @@ from src.tools.auto_login import auto_refresh_access_token
 from src.data_ingestion.news_context import NewsClient
 from src.strategies.hydra import HydraStrategy
 from src.strategies.viper import ViperStrategy
+from src.strategies.dawn import DawnStrategy
 from src.strategies.slot_manager import SlotManager, CONFLUENCE_BONUS
 from src.strategies.technical_body import TechnicalBody, reset_streaming_state, get_or_create_streaming_state, _streaming_states
 from src.trading.exit_monitor import ExitMonitorThread
@@ -277,6 +278,11 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     viper_rescan_index = 0       # Which re-scan slot are we at
     scanner_short_symbols: list = []
 
+    # ── DAWN: Pre-Market Catalyst Strategy (dry-run) ──
+    dawn = DawnStrategy()
+    last_dawn_scan_date = None
+    last_dawn_manage_time = None
+
     # ── Mid-session bearish discovery (SHORT-4) ──
     last_neg_pulse_date = None
 
@@ -311,6 +317,9 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                 daily_traded_symbols.clear()
                 discovery.reset()
                 hydra.reset_daily()
+                dawn.reset_daily()
+                last_dawn_scan_date = None
+                last_dawn_manage_time = None
                 slot_manager.reset_daily()
                 last_hydra_scan_date = None
                 grok_call_count = 0
@@ -360,6 +369,19 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                     except Exception as ban_e:
                         logging.error(f"Ban list refresh failed (fail-open): {ban_e}")
                     last_ban_refresh_date = current_date
+
+                # ── DAWN: Pre-market catalyst scan at 08:30 ──
+                if current_time >= dt_time(8, 30) and last_dawn_scan_date != current_date:
+                    try:
+                        print(f"\n[{datetime.now(IST).strftime('%H:%M:%S')}] 🌅 DAWN: Pre-market catalyst scan...")
+                        dawn_candidates = dawn.pre_market_scan()
+                        if dawn_candidates:
+                            print(f"  🌅 DAWN: {len(dawn_candidates)} candidates from independent scan")
+                        else:
+                            print(f"  🌅 DAWN: No candidates from independent scan")
+                    except Exception as dawn_scan_e:
+                        logging.error(f"DAWN pre-market scan failed: {dawn_scan_e}")
+                        print(f"  ❌ DAWN scan error: {dawn_scan_e}")
 
                 # -1. Pre-Market Macro Sentiment Check (08:30)
                 if current_time >= PREMARKET_TIME and last_premarket_date != current_date:
@@ -693,6 +715,35 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
 
                 # 1. Intraday tasks between 9:15 and 15:30
                 if MARKET_START <= current_time <= MARKET_END:
+
+                    # ── DAWN: Record virtual entries at market open ──
+                    if dawn._signals and dt_time(9, 15) <= current_time <= dt_time(9, 20):
+                        if any(s.status == "PENDING" for s in dawn._signals):
+                            try:
+                                dawn.record_entries(live_client=client)
+                                active = sum(1 for s in dawn._signals if s.status == "ACTIVE")
+                                print(f"  🌅 DAWN: {active} virtual entries recorded at open")
+                            except Exception as dawn_entry_e:
+                                logging.error(f"DAWN entry recording failed: {dawn_entry_e}")
+
+                    # ── DAWN: Manage virtual positions every 5 min ──
+                    if dawn._signals and any(s.status == "ACTIVE" for s in dawn._signals):
+                        if (last_dawn_manage_time is None or
+                                (now - last_dawn_manage_time).total_seconds() >= 300):
+                            try:
+                                dawn.manage_positions(live_client=client, technical_body=TechnicalBody)
+                                last_dawn_manage_time = now
+                            except Exception as dawn_mgmt_e:
+                                logging.error(f"DAWN position management failed: {dawn_mgmt_e}")
+
+                    # ── DAWN: Time-based exit at 15:20 ──
+                    if current_time >= dt_time(15, 20) and dawn._signals:
+                        if any(s.status == "ACTIVE" for s in dawn._signals):
+                            try:
+                                dawn.close_all(reason="TIME_EXIT_15:20", live_client=client)
+                                print(f"  🌅 DAWN: All positions closed at 15:20")
+                            except Exception as dawn_close_e:
+                                logging.error(f"DAWN time exit failed: {dawn_close_e}")
 
                     # ── HYDRA intraday evaluation (every cycle) ──────────
                     if hydra.watchlist and not hydra.trade_placed_today and slot_manager.remaining > 0:
@@ -1552,6 +1603,18 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         except Exception as viper_eod_e:
                             logging.error(f"VIPER EOD cleanup failed: {viper_eod_e}")
 
+                        # ── DAWN: EOD report + metrics ──
+                        try:
+                            dawn_csv = dawn.save_daily_report()
+                            dawn_metrics = dawn.compute_metrics()
+                            if dawn_csv:
+                                print(f"  🌅 DAWN: Report saved to {dawn_csv}")
+                                print(f"  🌅 DAWN: {dawn_metrics.total_signals} signals, "
+                                      f"W/L={dawn_metrics.win_count}/{dawn_metrics.loss_count}, "
+                                      f"PnL={dawn_metrics.total_pnl_rupees:+.0f}")
+                        except Exception as dawn_eod_e:
+                            logging.error(f"DAWN EOD cleanup failed: {dawn_eod_e}")
+
                         # ── Grok 4.20 EOD Review (v2) ──
                         try:
                             from src.llm.grok_client import grok_eod_review, GROK_DAILY_BUDGET
@@ -1691,7 +1754,27 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         except Exception as retry_e:
                             logging.error(f"Pre-market brief RETRY also failed: {retry_e}")
                             print(f"  ❌ Pre-market brief RETRY failed: {retry_e}")
-            
+
+                # ── DAWN: Merge brief + own scan, generate signals + email at 08:52 ──
+                if _should_fire_scheduled_job(dt_time(8, 52), runner_start_time, current_time):
+                    if last_dawn_scan_date != current_date:
+                        try:
+                            dawn_signals = dawn.merge_brief_and_generate(str(current_date))
+                            if dawn_signals:
+                                print(f"  🌅 DAWN: {len(dawn_signals)} qualified signals, email sent")
+                                dawn_syms = [s.symbol for s in dawn_signals]
+                                try:
+                                    client.subscribe_symbols(dawn_syms, mode="full")
+                                    print(f"  📡 Subscribed {len(dawn_syms)} DAWN symbols to websocket")
+                                except Exception as ws_e:
+                                    logging.warning(f"DAWN websocket subscribe failed: {ws_e}")
+                            else:
+                                print(f"  🌅 DAWN: No qualified signals today")
+                        except Exception as dawn_merge_e:
+                            logging.error(f"DAWN merge failed: {dawn_merge_e}")
+                            print(f"  ❌ DAWN merge error: {dawn_merge_e}")
+                        last_dawn_scan_date = current_date
+
             # Sleep for 60 seconds before checking time again
             time.sleep(60)
             
