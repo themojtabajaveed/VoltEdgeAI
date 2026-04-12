@@ -51,6 +51,15 @@ W_C = 0.30  # Catalyst quality
 W_D = 0.20  # Technical confirmation
 W_E = 0.10  # Pattern match
 
+# Catalyst-driven signal weights (HYDRA, VIPER-COIL)
+# Rationale: catalyst quality dominates; market phase matters less for
+# event-driven stocks whose movement is independent of the index.
+W_A_CATALYST = 0.10  # Market state (reduced from 0.25)
+W_B_CATALYST = 0.15  # Sector context (unchanged)
+W_C_CATALYST = 0.45  # Catalyst quality (increased from 0.30)
+W_D_CATALYST = 0.20  # Technical confirmation (unchanged)
+W_E_CATALYST = 0.10  # Pattern match (unchanged)
+
 CONVICTION_THRESHOLD = 70.0
 SIGNAL_MAX_AGE_HOURS = 4.0
 SIGNAL_EXPIRY_TIME = (14, 30)  # 14:30 IST — no new entries last hour
@@ -267,6 +276,39 @@ def compute_layer_d(snapshot, direction: str) -> float:
     return min(100.0, score)
 
 
+def _is_catalyst_signal(signal: ActiveSignal) -> bool:
+    """Catalyst-driven signals use adjusted weights favoring Layer C."""
+    return signal.strategy in ("HYDRA", "VIPER-COIL")
+
+
+def _compute_sector_independence_boost(
+    signal: ActiveSignal, snapshot: MarketSnapshot, phase: MarketPhase,
+) -> float:
+    """
+    Boost Layer A when stock's sector is independent of market weakness.
+
+    Only applies in CHOPPY or TRENDING_BEAR (not PANIC — correlations
+    spike in freefall). Returns a continuous 0–20 boost based on how
+    much the stock's sector outperforms the weak market.
+
+    Scale: +0.5% outperformance → +5, +1% → +10, +2% → +20 (capped).
+    Returns 0.0 on any error or missing data — never crashes.
+    """
+    try:
+        if phase not in (MarketPhase.CHOPPY, MarketPhase.TRENDING_BEAR):
+            return 0.0
+        sector = get_sector(signal.symbol)
+        sector_chg = snapshot.sector_changes.get(sector)
+        if sector_chg is None:
+            return 0.0  # Unmapped sector or no data → no boost
+        rel = sector_chg - snapshot.nifty_pct
+        if rel <= 0:
+            return 0.0
+        return min(20.0, rel * 10.0)
+    except Exception:
+        return 0.0
+
+
 def _compute_conviction(
     signal: ActiveSignal,
     layer_a: float,
@@ -276,15 +318,28 @@ def _compute_conviction(
     """
     Compute the weighted conviction score from all 5 layers.
 
+    Catalyst-driven signals (HYDRA, VIPER-COIL) use adjusted weights
+    that favor Layer C (catalyst quality) over Layer A (market state).
+    Momentum signals (VIPER) use the original balanced weights.
+
     Returns: float 0–100
     """
-    raw = (
-        layer_a * W_A
-        + layer_b * W_B
-        + signal.layer_c_score * W_C
-        + layer_d * W_D
-        + signal.layer_e_score * W_E
-    )
+    if _is_catalyst_signal(signal):
+        raw = (
+            layer_a * W_A_CATALYST
+            + layer_b * W_B_CATALYST
+            + signal.layer_c_score * W_C_CATALYST
+            + layer_d * W_D_CATALYST
+            + signal.layer_e_score * W_E_CATALYST
+        )
+    else:
+        raw = (
+            layer_a * W_A
+            + layer_b * W_B
+            + signal.layer_c_score * W_C
+            + layer_d * W_D
+            + signal.layer_e_score * W_E
+        )
     return max(0.0, min(100.0, raw))
 
 
@@ -441,6 +496,14 @@ class ConvictionEngine:
             # Apply morning regime bias
             layer_a = max(0.0, min(100.0, layer_a + self._morning_regime_bias))
 
+            # Sector independence boost for catalyst signals in weak markets
+            sec_boost = 0.0
+            if _is_catalyst_signal(signal):
+                sec_boost = _compute_sector_independence_boost(
+                    signal, market_snapshot, phase
+                )
+                layer_a = min(100.0, layer_a + sec_boost)
+
             # Layer B: sector context (per-sector)
             layer_b = compute_layer_b(signal.symbol, market_snapshot, signal.direction)
 
@@ -463,11 +526,13 @@ class ConvictionEngine:
             )
 
             # Log every recomputation (single line, greppable)
+            weight_tag = "CAT" if _is_catalyst_signal(signal) else "MOM"
+            boost_str = f" boost={sec_boost:+.0f}" if sec_boost > 0 else ""
             logger.info(
-                f"[ConvEng] {signal.symbol} {signal.direction} | "
-                f"A={layer_a:.0f} B={layer_b:.0f} C={signal.layer_c_score:.0f} "
+                f"[ConvEng] {signal.symbol} {signal.direction} [{weight_tag}] | "
+                f"A={layer_a:.0f}{boost_str} B={layer_b:.0f} C={signal.layer_c_score:.0f} "
                 f"D={layer_d:.0f} E={signal.layer_e_score:.0f} "
-                f"→ conviction={new_conviction:.0f} | phase={phase.value} "
+                f"→ conv={new_conviction:.0f} | phase={phase.value} "
                 f"| prev={prev_conviction:.0f} | Δ={delta:+.0f}"
             )
 

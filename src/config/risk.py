@@ -15,7 +15,7 @@ class RiskConfig:
     strong_market_size_factor: float = 1.0
     min_avg_daily_turnover_rupees: float = 2_000_000.0
     min_price_rupees: float = 50.0
-    dry_run_conviction_threshold: float = 55.0  # Lower threshold for paper trades only
+    dry_run_conviction_threshold: float = 50.0  # Lower threshold for paper trades only
 
 def load_risk_config() -> RiskConfig:
     """
@@ -85,9 +85,9 @@ def load_risk_config() -> RiskConfig:
         min_price = 50.0
 
     try:
-        dry_run_threshold = float(os.getenv("VOLTEDGE_DRY_RUN_CONVICTION_THRESHOLD", "55.0"))
+        dry_run_threshold = float(os.getenv("VOLTEDGE_DRY_RUN_CONVICTION_THRESHOLD", "50.0"))
     except ValueError:
-        dry_run_threshold = 60.0
+        dry_run_threshold = 50.0
 
     return RiskConfig(
         live_mode=live_mode,
