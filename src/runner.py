@@ -1705,6 +1705,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                 conviction_engine=conviction_engine,
                                 viper_health=viper_health_str,
                                 pre_market_ran=pre_market_ran,
+                                grok_call_count=grok_call_count,
                             )
                         except Exception as chron_e:
                             logging.error(f"Post-Market Report failed: {chron_e}")

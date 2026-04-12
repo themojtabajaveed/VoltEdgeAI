@@ -592,6 +592,7 @@ def generate_post_market_report(
     conviction_engine=None,
     viper_health: str = "",
     pre_market_ran: bool = True,
+    grok_call_count: int = 0,
 ):
     """
     Generate the unified post-market debrief.
@@ -603,12 +604,28 @@ def generate_post_market_report(
         conviction_engine: ConvictionEngine instance with today's signal history
         viper_health: VIPER scan health summary string
         pre_market_ran: Whether the pre-market brief ran successfully
+        grok_call_count: Runner's actual Grok call count for the day
     """
     import zoneinfo
     IST = zoneinfo.ZoneInfo("Asia/Kolkata")
     today = target_date or datetime.now(IST).date()
 
-    logger.info(f"Generating Post-Market Report v2 for {today}")
+    # ── Delegate to v2 pipeline ──────────────────────────────────────
+    try:
+        from src.reports.post_market_pipeline import run_post_market_pipeline
+        return run_post_market_pipeline(
+            kite_client=kite_client,
+            target_date=today,
+            grok_call_count=grok_call_count,
+            pre_market_ran=pre_market_ran,
+            viper_health=viper_health,
+            conviction_engine=conviction_engine,
+            traded_symbols=traded_symbols,
+        )
+    except Exception as e:
+        logger.error(f"[PostMarket] Pipeline v2 failed, falling back to v1: {e}", exc_info=True)
+
+    logger.info(f"Generating Post-Market Report v1 (fallback) for {today}")
 
     # ── Determine system health ──────────────────────────────────────────
     kite_ok = False

@@ -1,0 +1,9 @@
+{
+  "2026-04-11": [
+    "[LEARN-DAWN] DAWN did not generate signals today \u2014 check pre-market scanner",
+    "[LEARN-CONV] 14 signals, 0 triggered. Highest: SUNPHARMA at 67. Threshold=55 would activate 13.",
+    "[LEARN-BRIEF] Prediction accuracy: 0/0. Notable misses: none.",
+    "[LEARN-REGIME] Market phase: UNKNOWN. Choppy regime \u2014 consider tighter stops.",
+    "[LEARN-DETECT] Top mover detection: 3/10. Missed: COFORGE, DATAPATTNS, ABDL."
+  ]
+}
