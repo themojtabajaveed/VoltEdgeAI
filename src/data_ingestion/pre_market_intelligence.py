@@ -70,7 +70,6 @@ class PreMarketIntelligence:
         regime_line = (
             f"[REGIME] Crude={signal_vals.get('Crude', 'NA')} "
             f"USD={signal_vals.get('USD Strength (via EUR/USD)', 'NA')} "
-            f"PCR={signal_vals.get('Nifty PCR', 'NA')} "
             f"USDINR={signal_vals.get('USD/INR', 'NA')} "
             f"composite={self.composite_score}/100 tier={self.tier_name} "
             f"missing={self.missing_count}"
@@ -127,13 +126,7 @@ class PreMarketIntelligence:
         lines.append(f"**Verdict: {verdict}**")
         lines.append(f"\n{unavail_str}")
 
-        # PCR-specific note if missing
-        if any(s.name == "Nifty PCR" and not s.available for s in self.signals):
-            lines.append(
-                "\n⚠️ **Nifty PCR unavailable** — requires Kite client with NFO "
-                "subscription and valid access token. PCR is computed from option chain "
-                "OI data via `compute_pcr()` in `src/data_ingestion/pcr_tracker.py`."
-            )
+        # PCR note removed — PCR excluded from morning brief (market hours only)
 
         lines.append("\n⚡ This section is machine-computed from live market data. All other sections are AI-generated analysis.")
 
@@ -378,9 +371,11 @@ def compute_pre_market_intelligence(
     signals.append(_score_usd_strength(eur_usd_change))
     signals.append(_score_usd_inr(usd_inr_change))
 
-    # Tier C: Domestic sentiment (±9 max)
+    # Tier C: Domestic sentiment (±6 max — PCR excluded, market hours only)
     signals.append(_score_vix(vix_level))
-    signals.append(_score_pcr(pcr))
+    # PCR excluded from morning brief composite — requires live NSE option chain (09:15-15:30 IST).
+    # _score_pcr() retained for mid-session / post-market use.
+    logger.info("[Brief] PCR excluded from morning composite (market hours only)")
 
     # Tier D: Yesterday's flows (±11 max)
     signals.extend(_score_fii_dii(fii_net_cr, dii_net_cr))

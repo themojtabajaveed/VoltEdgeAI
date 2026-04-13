@@ -39,6 +39,7 @@ class BriefData:
     intel: object = None  # PreMarketIntelligence
     section_0_md: str = ""
     yesterday_learnings: list = field(default_factory=list)  # From system_learnings.json
+    macro_plays: list = field(default_factory=list)  # From macro_sector_mapper
 
 
 @dataclass
@@ -99,6 +100,7 @@ def generate_morning_brief() -> Optional[str]:
         regime_score=regime_score,
         intel_summary=intel_summary,
         yesterday_learnings=brief_data.yesterday_learnings,
+        macro_plays=brief_data.macro_plays,
     )
 
     # ── Stage 4: Assembly ────────────────────────────────────────────
@@ -198,8 +200,21 @@ def _collect_data() -> BriefData:
             logger.warning(f"[Brief/S1] Yesterday learnings load failed: {e}")
             return []
 
+    def _fetch_macro_impacts():
+        """Scan macro data for sector impact plays (uses Yahoo cache — no dependency)."""
+        try:
+            from src.data_ingestion.yahoo_macro_fetcher import read_macro_cache
+            from src.data_ingestion.macro_sector_mapper import scan_macro_impacts
+            macro_cache = read_macro_cache(max_age_seconds=1800)  # 30 min
+            if macro_cache:
+                return scan_macro_impacts(macro_cache)
+            return []
+        except Exception as e:
+            logger.warning(f"[Brief/S1] Macro impact scan failed: {e}")
+            return []
+
     # Run all fetches in parallel
-    with ThreadPoolExecutor(max_workers=6, thread_name_prefix="BriefS1") as pool:
+    with ThreadPoolExecutor(max_workers=7, thread_name_prefix="BriefS1") as pool:
         futures = {
             pool.submit(_fetch_global): "global",
             pool.submit(_fetch_events): "events",
@@ -207,6 +222,7 @@ def _collect_data() -> BriefData:
             pool.submit(_fetch_brave): "brave",
             pool.submit(_fetch_movers): "movers",
             pool.submit(_fetch_yesterday_learnings): "learnings",
+            pool.submit(_fetch_macro_impacts): "macro_impacts",
         }
         for future in as_completed(futures):
             name = futures[future]
@@ -226,6 +242,8 @@ def _collect_data() -> BriefData:
                     data.movers = result
                 elif name == "learnings":
                     data.yesterday_learnings = result or []
+                elif name == "macro_impacts":
+                    data.macro_plays = result or []
             except Exception as e:
                 logger.warning(f"[Brief/S1] {name} future failed: {e}")
 
@@ -233,7 +251,8 @@ def _collect_data() -> BriefData:
         f"[Brief/S1] Data collected: global={bool(data.global_data)}, "
         f"events={len(data.events)}, finnhub={len(data.finnhub_news)}, "
         f"brave={len(data.brave_news)}, movers={data.movers is not None}, "
-        f"yesterday_learnings={len(data.yesterday_learnings)}"
+        f"yesterday_learnings={len(data.yesterday_learnings)}, "
+        f"macro_plays={len(data.macro_plays)}"
     )
     return data
 
@@ -370,6 +389,7 @@ def _run_analysis(
     regime_score: int,
     intel_summary: str,
     yesterday_learnings: Optional[list] = None,
+    macro_plays: Optional[list] = None,
 ) -> BriefAnalysis:
     """Run 3 parallel Groq analysis calls. Injects yesterday's learnings into context."""
     from src.llm.brief_analyzer import (
@@ -399,7 +419,8 @@ def _run_analysis(
         enriched_brave = list(brave_news)
         if learning_context:
             enriched_brave.append({"title": "Yesterday's System Learnings", "description": learning_context, "url": "", "age": ""})
-        return analyze_hot_stocks(hot_events, movers, regime_score, enriched_brave)
+        return analyze_hot_stocks(hot_events, movers, regime_score, enriched_brave,
+                                  macro_plays=macro_plays)
 
     # Step 1: Run digest + hot_stocks in parallel (regime depends on digest)
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="BriefS3") as pool:

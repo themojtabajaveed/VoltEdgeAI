@@ -281,6 +281,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     # ── DAWN: Pre-Market Catalyst Strategy (dry-run) ──
     dawn = DawnStrategy()
     last_dawn_scan_date = None
+    last_dawn_pre_scan_date = None  # Prevents pre_market_scan from re-firing every 60s
     last_dawn_manage_time = None
 
     # ── Mid-session bearish discovery (SHORT-4) ──
@@ -319,6 +320,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                 hydra.reset_daily()
                 dawn.reset_daily()
                 last_dawn_scan_date = None
+                last_dawn_pre_scan_date = None
                 last_dawn_manage_time = None
                 slot_manager.reset_daily()
                 last_hydra_scan_date = None
@@ -370,8 +372,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         logging.error(f"Ban list refresh failed (fail-open): {ban_e}")
                     last_ban_refresh_date = current_date
 
-                # ── DAWN: Pre-market catalyst scan at 08:30 ──
-                if current_time >= dt_time(8, 30) and last_dawn_scan_date != current_date:
+                # ── DAWN: Pre-market catalyst scan at 08:30 (runs ONCE) ──
+                if current_time >= dt_time(8, 30) and last_dawn_pre_scan_date != current_date:
                     try:
                         print(f"\n[{datetime.now(IST).strftime('%H:%M:%S')}] 🌅 DAWN: Pre-market catalyst scan...")
                         dawn_candidates = dawn.pre_market_scan()
@@ -382,6 +384,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                     except Exception as dawn_scan_e:
                         logging.error(f"DAWN pre-market scan failed: {dawn_scan_e}")
                         print(f"  ❌ DAWN scan error: {dawn_scan_e}")
+                    last_dawn_pre_scan_date = current_date  # Prevent re-firing
 
                 # -1. Pre-Market Macro Sentiment Check (08:30)
                 if current_time >= PREMARKET_TIME and last_premarket_date != current_date:

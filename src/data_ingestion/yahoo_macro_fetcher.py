@@ -152,10 +152,28 @@ def fetch_global_macro() -> dict:
         return result
 
     # Log results
+    yahoo_count = sum(1 for k in ("spy_pct", "qqq_pct", "crude_wti_pct", "crude_brent_pct",
+                                   "gold_pct", "dxy_pct", "usdinr", "us_vix", "gift_nifty")
+                      if result.get(k) is not None)
     if success_parts:
         logger.info(f"[YahooMacro] {' | '.join(success_parts)}")
     if failed:
         logger.warning(f"[YahooMacro] FAILED symbols: {', '.join(failed)}")
+
+    # ── Twelve Data fallback: fill gaps if Yahoo got < 4 symbols ──
+    if yahoo_count < 4:
+        td_result = fetch_global_macro_twelvedata()
+        if td_result:
+            td_filled = 0
+            for key in ("spy_pct", "qqq_pct", "crude_wti", "crude_wti_pct",
+                         "crude_brent", "crude_brent_pct", "gold", "gold_pct",
+                         "dxy", "dxy_pct", "usdinr"):
+                if result.get(key) is None and td_result.get(key) is not None:
+                    result[key] = td_result[key]
+                    td_filled += 1
+            if td_filled > 0:
+                result["source"] = f"yahoo_finance+twelve_data({td_filled})"
+            logger.info(f"[Macro] Yahoo: {yahoo_count}/9 | TwelveData: {td_filled} gaps filled")
 
     # Write to cache
     _write_cache(result)
@@ -172,6 +190,122 @@ def _write_cache(data: dict) -> None:
         logger.info(f"[YahooMacro] Cache written: {MACRO_CACHE_PATH}")
     except Exception as e:
         logger.warning(f"[YahooMacro] Cache write failed: {e}")
+
+
+# ── Twelve Data Fallback ──────────────────────────────────────────────
+
+_TD_EQUITY_SYMBOLS = {"SPY": "spy_pct", "QQQ": "qqq_pct"}
+_TD_COMMODITY_SYMBOLS = {
+    "CL1:COM": ("crude_wti", "crude_wti_pct"),
+    "BZ1:COM": ("crude_brent", "crude_brent_pct"),
+    "GC1:COM": ("gold", "gold_pct"),
+}
+
+
+def fetch_global_macro_twelvedata() -> dict:
+    """
+    Fallback: fetch global macro data from Twelve Data API.
+    Returns same dict format as fetch_global_macro(). Never crashes.
+    Silently returns {} if TWELVE_DATA_API_KEY not set.
+    """
+    import zoneinfo
+
+    api_key = os.environ.get("TWELVE_DATA_API_KEY")
+    if not api_key:
+        return {}
+
+    IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+    result: dict = {
+        "spy_pct": None, "qqq_pct": None,
+        "crude_wti": None, "crude_wti_pct": None,
+        "crude_brent": None, "crude_brent_pct": None,
+        "gold": None, "gold_pct": None,
+        "dxy": None, "dxy_pct": None,
+        "usdinr": None, "us_vix": None, "gift_nifty": None,
+        "fetched_at": datetime.now(IST).isoformat(),
+        "source": "twelve_data",
+    }
+    filled = 0
+
+    try:
+        import requests
+    except ImportError:
+        logger.warning("[TwelveData] requests not installed")
+        return {}
+
+    def _td_get(url: str, params: dict) -> Optional[dict]:
+        try:
+            resp = requests.get(url, params=params, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                if "code" in data and data["code"] != 200:
+                    return None
+                return data
+        except Exception as e:
+            logger.debug(f"[TwelveData] Request failed: {e}")
+        return None
+
+    # Equities: SPY, QQQ
+    for symbol, pct_key in _TD_EQUITY_SYMBOLS.items():
+        try:
+            price_data = _td_get(
+                "https://api.twelvedata.com/price",
+                {"symbol": symbol, "apikey": api_key},
+            )
+            eod_data = _td_get(
+                "https://api.twelvedata.com/eod",
+                {"symbol": symbol, "apikey": api_key},
+            )
+            if price_data and eod_data and "price" in price_data and "close" in eod_data:
+                current = float(price_data["price"])
+                prev_close = float(eod_data["close"])
+                if current > 0 and prev_close > 0:
+                    pct = round(((current - prev_close) / prev_close) * 100, 2)
+                    result[pct_key] = pct
+                    filled += 1
+        except Exception as e:
+            logger.debug(f"[TwelveData] {symbol} failed: {e}")
+
+    # Commodities: crude, gold
+    for symbol, (abs_key, pct_key) in _TD_COMMODITY_SYMBOLS.items():
+        try:
+            price_data = _td_get(
+                "https://api.twelvedata.com/price",
+                {"symbol": symbol, "apikey": api_key},
+            )
+            eod_data = _td_get(
+                "https://api.twelvedata.com/eod",
+                {"symbol": symbol, "apikey": api_key},
+            )
+            if price_data and eod_data and "price" in price_data and "close" in eod_data:
+                current = float(price_data["price"])
+                prev_close = float(eod_data["close"])
+                if current > 0 and prev_close > 0:
+                    pct = round(((current - prev_close) / prev_close) * 100, 2)
+                    result[abs_key] = round(current, 2)
+                    result[pct_key] = pct
+                    filled += 1
+        except Exception as e:
+            logger.debug(f"[TwelveData] {symbol} failed: {e}")
+
+    # Forex: USD/INR
+    try:
+        fx_data = _td_get(
+            "https://api.twelvedata.com/exchange_rate",
+            {"symbol": "USD/INR", "apikey": api_key},
+        )
+        if fx_data and "rate" in fx_data:
+            result["usdinr"] = round(float(fx_data["rate"]), 4)
+            filled += 1
+    except Exception as e:
+        logger.debug(f"[TwelveData] USD/INR failed: {e}")
+
+    if filled > 0:
+        logger.info(f"[TwelveData] Fetched {filled} symbols")
+    else:
+        logger.warning("[TwelveData] No symbols fetched")
+
+    return result
 
 
 def read_macro_cache(max_age_seconds: int = 1200) -> Optional[dict]:

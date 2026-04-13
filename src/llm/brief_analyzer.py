@@ -247,6 +247,7 @@ def analyze_hot_stocks(
     movers: Optional[dict],
     regime_score: int,
     brave_news: List[dict],
+    macro_plays: Optional[List[dict]] = None,
 ) -> dict:
     """
     Identify top 5 catalyst-driven stocks and generate trade plans.
@@ -269,8 +270,17 @@ def analyze_hot_stocks(
             ]
         }
     """
-    # Build candidates from events + movers + brave news
+    # Build candidates from events + movers + brave news + macro plays
     candidates = []
+
+    # Inject macro-driven sector plays (machine-confirmed, skip catalyst validation)
+    if macro_plays:
+        for mp in macro_plays:
+            candidates.append(
+                f"[MACRO-PLAY confirmed=True] {mp.get('direction', '?')} {mp.get('symbol', '?')}: "
+                f"{mp.get('catalyst', '')} | conviction={mp.get('conviction', 0)} | "
+                f"source=MACRO_RULES | catalyst_strength={mp.get('catalyst_strength', 'HIGH')}"
+            )
 
     for e in hot_events[:15]:
         candidates.append(
@@ -318,6 +328,8 @@ Only select stocks with HIGH or MEDIUM catalyst strength:
 - HIGH: earnings beat/miss, M&A, regulatory approval/rejection, major contract
 - MEDIUM: block deal, dividend, sector event, global peer movement
 - LOW (exclude): technical pattern, routine filing, vague mention
+
+MACRO-PLAY candidates have machine-confirmed catalysts from live market data. They are ALWAYS valid catalysts with HIGH strength. Still provide entry/SL/target based on typical price levels.
 
 ## Candidates
 {candidates_block}
