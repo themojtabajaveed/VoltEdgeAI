@@ -479,32 +479,89 @@ def fetch_all_global_data(kite_client=None) -> dict:
         "us_quotes": {}, "macro_quotes": {},
     }
 
-    # 1. US market + macro quotes from Finnhub (single import, two calls)
+    # 1. Global macro data: Yahoo Finance primary → Finnhub fallback
+    yahoo_filled = 0
     try:
-        from src.data_ingestion.finnhub_client import fetch_us_market_quotes, fetch_macro_quotes
+        from src.data_ingestion.yahoo_macro_fetcher import read_macro_cache, fetch_global_macro
 
-        us_quotes = fetch_us_market_quotes()
-        data["us_quotes"] = us_quotes
-        spy = us_quotes.get("S&P 500 (SPY)")
-        qqq = us_quotes.get("Nasdaq 100 (QQQ)")
-        if spy:
-            data["spy_change"] = spy.change_pct
-        if qqq:
-            data["qqq_change"] = qqq.change_pct
+        # Try cached Yahoo data first (< 20 min old)
+        yahoo = read_macro_cache(max_age_seconds=1200)
+        if yahoo is None:
+            yahoo = fetch_global_macro()
 
-        macro_quotes = fetch_macro_quotes()
-        data["macro_quotes"] = macro_quotes
-        crude = macro_quotes.get("Brent Crude (USD/bbl)")
-        eur_usd = macro_quotes.get("EUR/USD")
-        usd_inr = macro_quotes.get("USD/INR")
-        if crude:
-            data["crude_change"] = crude.change_pct
-        if eur_usd:
-            data["eur_usd_change"] = eur_usd.change_pct
-        if usd_inr:
-            data["usd_inr_change"] = usd_inr.change_pct
+        if yahoo:
+            if yahoo.get("spy_pct") is not None:
+                data["spy_change"] = yahoo["spy_pct"]
+                yahoo_filled += 1
+            if yahoo.get("qqq_pct") is not None:
+                data["qqq_change"] = yahoo["qqq_pct"]
+                yahoo_filled += 1
+            if yahoo.get("crude_brent_pct") is not None:
+                data["crude_change"] = yahoo["crude_brent_pct"]
+                yahoo_filled += 1
+            if yahoo.get("dxy_pct") is not None:
+                # DXY up = USD strong = EUR/USD down → invert for eur_usd_change
+                data["eur_usd_change"] = -yahoo["dxy_pct"]
+                yahoo_filled += 1
+            if yahoo.get("usdinr") is not None:
+                # For pct change, compute from cache if available
+                data["usd_inr_change"] = None  # Will be filled by Finnhub fallback if needed
+                yahoo_filled += 1
+            logger.info(f"[PreMkt] Yahoo Finance filled {yahoo_filled}/5 macro signals")
     except Exception as e:
-        logger.warning(f"[PreMkt] Finnhub fetch failed: {e}")
+        logger.warning(f"[PreMkt] Yahoo Finance fetch failed: {e}")
+
+    # Finnhub fills any remaining gaps
+    finnhub_filled = 0
+    gaps = []
+    if data["spy_change"] is None:
+        gaps.append("SPY")
+    if data["qqq_change"] is None:
+        gaps.append("QQQ")
+    if data["crude_change"] is None:
+        gaps.append("crude")
+    if data["eur_usd_change"] is None:
+        gaps.append("EUR/USD")
+    if data["usd_inr_change"] is None:
+        gaps.append("USD/INR")
+
+    if gaps:
+        try:
+            from src.data_ingestion.finnhub_client import fetch_us_market_quotes, fetch_macro_quotes
+
+            if "SPY" in gaps or "QQQ" in gaps:
+                us_quotes = fetch_us_market_quotes()
+                data["us_quotes"] = us_quotes
+                spy = us_quotes.get("S&P 500 (SPY)")
+                qqq = us_quotes.get("Nasdaq 100 (QQQ)")
+                if spy and data["spy_change"] is None:
+                    data["spy_change"] = spy.change_pct
+                    finnhub_filled += 1
+                if qqq and data["qqq_change"] is None:
+                    data["qqq_change"] = qqq.change_pct
+                    finnhub_filled += 1
+
+            if any(g in gaps for g in ["crude", "EUR/USD", "USD/INR"]):
+                macro_quotes = fetch_macro_quotes()
+                data["macro_quotes"] = macro_quotes
+                crude = macro_quotes.get("Brent Crude (USD/bbl)")
+                eur_usd = macro_quotes.get("EUR/USD")
+                usd_inr = macro_quotes.get("USD/INR")
+                if crude and data["crude_change"] is None:
+                    data["crude_change"] = crude.change_pct
+                    finnhub_filled += 1
+                if eur_usd and data["eur_usd_change"] is None:
+                    data["eur_usd_change"] = eur_usd.change_pct
+                    finnhub_filled += 1
+                if usd_inr and data["usd_inr_change"] is None:
+                    data["usd_inr_change"] = usd_inr.change_pct
+                    finnhub_filled += 1
+
+            logger.info(f"[PreMkt] Finnhub filled {finnhub_filled}/{len(gaps)} gaps: {gaps}")
+        except Exception as e:
+            logger.warning(f"[PreMkt] Finnhub fallback failed: {e}")
+    else:
+        logger.info("[PreMkt] All macro signals filled by Yahoo — Finnhub skipped")
 
     # 2. FII/DII from NSE
     try:

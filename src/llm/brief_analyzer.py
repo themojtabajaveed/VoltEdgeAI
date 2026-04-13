@@ -381,6 +381,7 @@ def analyze_regime(
     global_data: dict,
     intel_summary: str,
     news_themes: List[str],
+    news_summary: str = "",
 ) -> dict:
     """
     Generate regime assessment and 3 tactical directives.
@@ -413,6 +414,15 @@ def analyze_regime(
     IST = zoneinfo.ZoneInfo("Asia/Kolkata")
     today = datetime.now(IST).strftime("%Y-%m-%d")
 
+    news_block = ""
+    if news_summary:
+        news_block = f"""
+## News Summary (from overnight digest)
+{news_summary}
+
+IMPORTANT RULE: If the news summary describes major bearish events (crude spike >3%, geopolitical escalation, war, crash) that are NOT captured in the signal scores due to missing data, you MUST factor that into the regime verdict. When signals are incomplete (< 5 of 9 available), the news context should be the PRIMARY input for regime. Missing signals should make the regime MORE cautious, not more bullish.
+"""
+
     prompt = f"""You are VoltEdge's risk regime analyst. Today is {today}.
 
 Given the machine-computed data and news themes, provide a regime assessment and 3 tactical directives for the Indian equity trading engine.
@@ -425,7 +435,7 @@ Given the machine-computed data and news themes, provide a regime assessment and
 
 ## Key News Themes
 {themes_block}
-
+{news_block}
 Return ONLY valid JSON:
 {{
   "trend": "bullish or bearish or sideways",

@@ -306,6 +306,61 @@ def _classify_events(events: list) -> list:
 # STAGE 3: LLM ANALYSIS
 # ═══════════════════════════════════════════════════════════════════════
 
+_BEARISH_KEYWORDS = {
+    "crash", "war", "collapse", "bearish", "negative",
+    "crude spike", "escalation", "sell-off", "plunge", "crisis",
+    "blockade", "sanctions", "recession", "default",
+}
+
+_BULLISH_KEYWORDS = {
+    "rally", "surge", "breakout", "bullish", "positive",
+    "upbeat", "ceasefire", "stimulus", "rate cut",
+}
+
+
+def _check_regime_consistency(regime: dict, news_digest: dict) -> dict:
+    """Override regime if it clearly contradicts the news digest."""
+    if not regime or not news_digest:
+        return regime or {}
+
+    trend = regime.get("trend", "sideways").lower()
+    news_text = (
+        news_digest.get("global_summary", "")
+        + " "
+        + " ".join(t for t in news_digest.get("key_themes", []))
+    ).lower()
+
+    # Bearish news overriding bullish regime
+    bearish_hits = [kw for kw in _BEARISH_KEYWORDS if kw in news_text]
+    if trend == "bullish" and len(bearish_hits) >= 2:
+        logger.warning(
+            f"[Regime] CONSISTENCY CHECK: Overriding {trend} → cautious/sideways — "
+            f"news contains bearish signals: {bearish_hits[:3]}"
+        )
+        regime["trend"] = "sideways"
+        regime["strength"] = min(regime.get("strength", 0.5), 0.5)
+        regime["reasoning"] = (
+            f"[OVERRIDE] Originally {trend}, but news digest contains bearish "
+            f"signals ({', '.join(bearish_hits[:3])}). Downgraded to cautious."
+        )
+
+    # Bullish news overriding bearish regime
+    bullish_hits = [kw for kw in _BULLISH_KEYWORDS if kw in news_text]
+    if trend == "bearish" and len(bullish_hits) >= 2:
+        logger.warning(
+            f"[Regime] CONSISTENCY CHECK: Overriding {trend} → cautious/sideways — "
+            f"news contains bullish signals: {bullish_hits[:3]}"
+        )
+        regime["trend"] = "sideways"
+        regime["strength"] = min(regime.get("strength", 0.5), 0.5)
+        regime["reasoning"] = (
+            f"[OVERRIDE] Originally {trend}, but news digest contains bullish "
+            f"signals ({', '.join(bullish_hits[:3])}). Upgraded to cautious."
+        )
+
+    return regime
+
+
 def _run_analysis(
     classified_events: list,
     finnhub_news: list,
@@ -346,15 +401,10 @@ def _run_analysis(
             enriched_brave.append({"title": "Yesterday's System Learnings", "description": learning_context, "url": "", "age": ""})
         return analyze_hot_stocks(hot_events, movers, regime_score, enriched_brave)
 
-    def _call_regime():
-        themes = analysis.news_digest.get("key_themes", [])
-        # Can't depend on digest result in parallel, pass empty
-        return analyze_regime(global_data, intel_summary, [])
-
-    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="BriefS3") as pool:
+    # Step 1: Run digest + hot_stocks in parallel (regime depends on digest)
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="BriefS3") as pool:
         f_digest = pool.submit(_call_digest)
         f_stocks = pool.submit(_call_hot_stocks)
-        f_regime = pool.submit(_call_regime)
 
         try:
             analysis.news_digest = f_digest.result() or {}
@@ -366,18 +416,18 @@ def _run_analysis(
         except Exception as e:
             logger.warning(f"[Brief/S3] Hot stocks failed: {e}")
 
-        try:
-            analysis.regime = f_regime.result() or {}
-        except Exception as e:
-            logger.warning(f"[Brief/S3] Regime failed: {e}")
-
-    # If we got digest themes, re-run regime with themes (quick, single call)
+    # Step 2: Run regime SEQUENTIALLY with digest themes + news summary
     themes = analysis.news_digest.get("key_themes", [])
-    if themes and not analysis.regime.get("trend"):
-        try:
-            analysis.regime = analyze_regime(global_data, intel_summary, themes)
-        except Exception:
-            pass
+    news_summary = analysis.news_digest.get("global_summary", "")[:500]
+    try:
+        analysis.regime = analyze_regime(
+            global_data, intel_summary, themes, news_summary=news_summary
+        ) or {}
+    except Exception as e:
+        logger.warning(f"[Brief/S3] Regime failed: {e}")
+
+    # Step 3: Consistency check — override regime if it contradicts news
+    analysis.regime = _check_regime_consistency(analysis.regime, analysis.news_digest)
 
     return analysis
 
