@@ -29,7 +29,7 @@ from src.data_ingestion.intraday_context import get_intraday_bars_for_symbol
 from src.data_ingestion.market_live import make_default_live_client, BarBuilder
 from src.data_ingestion.instruments import load_instruments_csv, build_symbol_token_map
 from src.data_ingestion.market_sentiment import compute_index_sentiment
-from src.data_ingestion.macro_context import refresh_macro_context, get_cached_context
+from src.data_ingestion.macro_context import refresh_macro_context, get_cached_context, MacroRiskTier
 from src.data_ingestion.nse_scraper import get_deal_signal
 from src.data_ingestion.short_ban_list import refresh_ban_lists, get_ban_summary
 from src.data_ingestion.pcr_tracker import compute_pcr, get_pcr_score_modifier
@@ -1291,8 +1291,23 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                     tech_score.total = adjusted_score
                                     
                                     # V4: Direction-aware macro dampener (tiered)
+                                    # V4.1: Catalyst-driven signals get reduced CAUTION dampener
                                     if macro_ctx:
                                         dampener_pts, min_conviction = macro_ctx.get_direction_dampener(ds.direction)
+
+                                        # Catalyst-aware override for CAUTION tier LONG only
+                                        catalyst_driven = (
+                                            "newsdata_eod" in ds.sources
+                                            or "event_scanner" in ds.sources
+                                            or bool(ds.catalyst_headline)
+                                        )
+                                        tier = macro_ctx.get_risk_tier()
+                                        if catalyst_driven and tier == MacroRiskTier.CAUTION and ds.direction == "LONG":
+                                            dampener_pts = -5
+                                            min_conviction = 62
+                                            print(f"    [V2] {sym} — catalyst signal, reduced CAUTION dampener (-5pts instead of -10pts)")
+                                            logging.info(f"[V2] {sym} catalyst override: CAUTION dampener -5pts (min 62) sources={ds.sources}")
+
                                         raw_score = tech_score.total
                                         tech_score.total = raw_score + dampener_pts
                                         if dampener_pts != 0:

@@ -392,6 +392,67 @@ _last_values: Optional[Dict] = None  # For staleness detection
 REFRESH_INTERVAL_SECONDS = 5400  # 90 minutes (was 7200)
 
 
+def _derive_macro_bias_from_yahoo(yahoo: dict) -> Tuple[str, str]:
+    """
+    Derive macro_bias and details string from Yahoo cache data.
+    Replicates finnhub_client.get_macro_risk_signal() thresholds
+    using Yahoo cache keys instead of Finnhub MacroQuote objects.
+
+    Returns:
+        (overall_macro_bias, details_string)
+    """
+    risk_score = 0
+    parts: List[str] = []
+
+    # Crude oil: rising crude → bearish for Indian market (import cost)
+    crude_pct = yahoo.get("crude_wti_pct")
+    if crude_pct is not None:
+        crude_price = yahoo.get("crude_wti", 0)
+        if crude_pct > 2.0:
+            risk_score -= 2
+            parts.append(f"Crude WTI: ${crude_price:.2f} ▲{crude_pct:.2f}% (HIGH)")
+        elif crude_pct > 0.5:
+            risk_score -= 1
+            parts.append(f"Crude WTI: ${crude_price:.2f} ▲{crude_pct:.2f}%")
+        else:
+            risk_score += 1
+            arrow = "▲" if crude_pct > 0 else "▼" if crude_pct < 0 else "─"
+            parts.append(f"Crude WTI: ${crude_price:.2f} {arrow}{abs(crude_pct):.2f}%")
+
+    # Gold: rising gold = flight to safety = risk-off
+    gold_pct = yahoo.get("gold_pct")
+    if gold_pct is not None:
+        gold_price = yahoo.get("gold", 0)
+        if gold_pct > 1.0:
+            risk_score -= 1
+        elif gold_pct < -0.5:
+            risk_score += 1
+        arrow = "▲" if gold_pct > 0 else "▼" if gold_pct < 0 else "─"
+        parts.append(f"Gold: ${gold_price:.2f} {arrow}{abs(gold_pct):.2f}%")
+
+    # DXY: stronger dollar → EM outflow pressure
+    dxy_pct = yahoo.get("dxy_pct")
+    if dxy_pct is not None:
+        dxy_price = yahoo.get("dxy", 0)
+        if dxy_pct > 0.5:
+            risk_score -= 1
+        elif dxy_pct < -0.5:
+            risk_score += 1
+        arrow = "▲" if dxy_pct > 0 else "▼" if dxy_pct < 0 else "─"
+        parts.append(f"DXY: {dxy_price:.2f} {arrow}{abs(dxy_pct):.2f}%")
+
+    # Overall bias from risk_score
+    if risk_score >= 2:
+        bias = "risk_on"
+    elif risk_score <= -2:
+        bias = "risk_off"
+    else:
+        bias = "neutral"
+
+    details = " | ".join(parts) if parts else "Yahoo cache data"
+    return bias, details
+
+
 def refresh_macro_context(force: bool = False) -> MacroContext:
     """
     Refresh all macro data sources. Caches for 90 minutes.
@@ -407,53 +468,98 @@ def refresh_macro_context(force: bool = False) -> MacroContext:
 
     ctx = MacroContext(timestamp=now)
 
-    # 1. Finnhub macro quotes
+    # 1a. Try Yahoo cache first for commodity/forex quotes
+    yahoo_quotes_used = False
     try:
-        get_macro_risk_signal, fetch_global_sentiment = _import_finnhub()
-        macro = get_macro_risk_signal()
-        ctx.macro_bias = macro.get("overall_macro_bias", "neutral")
-        ctx.macro_details = macro.get("details", "")
-
-        # Parse individual commodity changes from details
-        from src.data_ingestion.finnhub_client import fetch_macro_quotes
-        quotes = fetch_macro_quotes()
-        for name, q in quotes.items():
-            if "Crude" in name:
-                ctx.crude_change_pct = q.change_pct
-            elif "Gold" in name:
-                ctx.gold_change_pct = q.change_pct
-            elif "USD_INR" in q.symbol or "USD/INR" in name:
-                ctx.usd_inr_change_pct = q.change_pct
-            elif "DXY" in name:
-                ctx.dxy_change_pct = q.change_pct
-                ctx.dxy_price = q.price
-
-                # DXY sanity validation (P0-3)
-                if q.price > 0 and (q.price < 70 or q.price > 130):
+        from src.data_ingestion.yahoo_macro_fetcher import read_macro_cache
+        yahoo = read_macro_cache(max_age_seconds=1200)
+        if yahoo is not None:
+            if yahoo.get("crude_wti_pct") is not None:
+                ctx.crude_change_pct = yahoo["crude_wti_pct"]
+            if yahoo.get("gold_pct") is not None:
+                ctx.gold_change_pct = yahoo["gold_pct"]
+            if yahoo.get("dxy_pct") is not None:
+                ctx.dxy_change_pct = yahoo["dxy_pct"]
+            if yahoo.get("dxy") is not None:
+                ctx.dxy_price = yahoo["dxy"]
+                # DXY sanity validation (same as Finnhub path)
+                if ctx.dxy_price > 0 and (ctx.dxy_price < 70 or ctx.dxy_price > 130):
                     logger.error(
-                        f"[Macro] DXY value out of valid range: {q.price:.2f} — discarding. "
-                        f"Expected 70-130 for USD index / 20-35 for UUP ETF proxy."
+                        f"[Macro] DXY value out of valid range: {ctx.dxy_price:.2f} — discarding. "
+                        f"Expected 70-130 for USD index."
                     )
-                    ctx.dxy_change_pct = 0.0  # Don't let bad data influence regime
+                    ctx.dxy_change_pct = 0.0
+            # Note: USD/INR change_pct not available from Yahoo (absolute only)
 
-        # Staleness detection
-        new_values = {name: q.price for name, q in quotes.items()}
-        if _last_values is not None and new_values == _last_values:
-            stale_minutes = (now - _last_refresh).total_seconds() / 60 if _last_refresh else 0
-            if stale_minutes >= 90:
-                logger.warning(
-                    f"[Macro] All macro values unchanged for {stale_minutes:.0f}+ min — "
-                    f"possible stale cache. Values: {new_values}"
-                )
-        _last_values = new_values
+            # Derive macro_bias from Yahoo data (replaces get_macro_risk_signal)
+            ctx.macro_bias, ctx.macro_details = _derive_macro_bias_from_yahoo(yahoo)
 
-        # Global news headlines
+            # Staleness tracking with synthetic keys
+            _last_values = {
+                "Crude": yahoo.get("crude_wti", 0),
+                "Gold": yahoo.get("gold", 0),
+                "DXY": yahoo.get("dxy", 0),
+            }
+            yahoo_quotes_used = True
+            logger.info(
+                f"[Macro] Yahoo cache hit — "
+                f"crude={yahoo.get('crude_wti_pct')}%, "
+                f"gold={yahoo.get('gold_pct')}%, "
+                f"DXY={yahoo.get('dxy')}. Skipping Finnhub quotes."
+            )
+    except Exception as e:
+        logger.warning(f"[Macro] Yahoo cache read failed: {e}")
+
+    # 1b. Finnhub fallback for quotes (only if Yahoo cache miss)
+    if not yahoo_quotes_used:
+        try:
+            logger.info("[Macro] Yahoo cache stale/missing — falling through to Finnhub.")
+            get_macro_risk_signal, _ = _import_finnhub()
+            macro = get_macro_risk_signal()
+            ctx.macro_bias = macro.get("overall_macro_bias", "neutral")
+            ctx.macro_details = macro.get("details", "")
+
+            from src.data_ingestion.finnhub_client import fetch_macro_quotes
+            quotes = fetch_macro_quotes()
+            for name, q in quotes.items():
+                if "Crude" in name:
+                    ctx.crude_change_pct = q.change_pct
+                elif "Gold" in name:
+                    ctx.gold_change_pct = q.change_pct
+                elif "USD_INR" in q.symbol or "USD/INR" in name:
+                    ctx.usd_inr_change_pct = q.change_pct
+                elif "DXY" in name:
+                    ctx.dxy_change_pct = q.change_pct
+                    ctx.dxy_price = q.price
+                    if q.price > 0 and (q.price < 70 or q.price > 130):
+                        logger.error(
+                            f"[Macro] DXY value out of valid range: {q.price:.2f} — discarding. "
+                            f"Expected 70-130 for USD index / 20-35 for UUP ETF proxy."
+                        )
+                        ctx.dxy_change_pct = 0.0
+
+            # Staleness detection
+            new_values = {name: q.price for name, q in quotes.items()}
+            if _last_values is not None and new_values == _last_values:
+                stale_minutes = (now - _last_refresh).total_seconds() / 60 if _last_refresh else 0
+                if stale_minutes >= 90:
+                    logger.warning(
+                        f"[Macro] All macro values unchanged for {stale_minutes:.0f}+ min — "
+                        f"possible stale cache. Values: {new_values}"
+                    )
+            _last_values = new_values
+
+        except Exception as e:
+            logger.warning(f"Macro quotes fetch failed (Finnhub): {e}")
+
+    # 1c. Global news headlines (always try — separate endpoint)
+    try:
+        _, fetch_global_sentiment = _import_finnhub()
         news = fetch_global_sentiment()
         if isinstance(news, list):
             ctx.global_headlines = [n.get("headline", "") for n in news[:5] if n.get("headline")]
-
     except Exception as e:
-        logger.warning(f"Macro quotes fetch failed: {e}")
+        logger.warning(f"Global sentiment fetch failed: {e}")
 
     # 2. NSE FII/DII
     try:
