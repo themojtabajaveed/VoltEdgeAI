@@ -490,12 +490,38 @@ def _assemble_report(
     sections.append(_build_directives_section(analysis.regime))
 
     # ── Section 6: Risk Regime ───────────────────────────────────────
-    sections.append(_build_regime_section(analysis.regime))
+    sections.append(_build_regime_section(
+        analysis.regime,
+        hot_stocks=analysis.hot_stocks.get("hot_stocks", []),
+    ))
 
     # ── JSON block for trading engine ────────────────────────────────
     sections.append(_build_json_block(analysis))
 
     return "\n".join(sections)
+
+
+def _fetch_usdinr_fallback() -> tuple[str, str]:
+    """
+    Fetch the USD/INR spot rate via yfinance as a fallback when the primary
+    data pipeline returns None for macro_quotes["USD/INR"].
+
+    Returns (rate_str, note_str) where note_str is empty on a clean fetch
+    and contains " *(estimated)*" when the static fallback is used.
+    """
+    for ticker in ("INR=X", "USDINR=X"):
+        try:
+            import yfinance as yf
+            price = yf.Ticker(ticker).fast_info.get("last_price")
+            if price and float(price) > 0:
+                logger.info(f"[Brief/USD-INR] Fallback fetch succeeded via {ticker}: {price:.2f}")
+                return f"{float(price):.2f}", ""
+        except Exception as e:
+            logger.warning(f"[Brief/USD-INR] yfinance fallback ({ticker}) failed: {e}")
+
+    # Last resort: static estimate clearly labelled
+    logger.warning("[Brief/USD-INR] All fallback sources failed — using static estimate 84.0")
+    return "~84.0", " *(estimated)*"
 
 
 def _build_markets_section(global_data: dict, news_digest: dict, movers: Optional[dict] = None) -> str:
@@ -542,6 +568,11 @@ def _build_markets_section(global_data: dict, news_digest: dict, movers: Optiona
     if usd_inr:
         impact = "Rupee weakening" if usd_inr.change_pct > 0.1 else "Rupee stable"
         lines.append(f"| USD/INR | ₹{usd_inr.price:.2f} | {usd_inr.change_pct:+.2f}% | {impact} |")
+    else:
+        # Primary source unavailable — try yfinance fallback so we never show NA
+        _rate, _note = _fetch_usdinr_fallback()
+        _impact = "Rupee data via fallback" + _note
+        lines.append(f"| USD/INR | ₹{_rate} | — | {_impact} |")
 
     # FII/DII
     fii = global_data.get("fii_net_cr")
@@ -673,24 +704,90 @@ def _build_directives_section(regime: dict) -> str:
     return "\n".join(lines)
 
 
-def _build_regime_section(regime: dict) -> str:
-    """Section 6: Risk regime."""
+def _build_regime_section(regime: dict, hot_stocks: Optional[list] = None) -> str:
+    """
+    Section 6: Risk Regime — renders structured regime data as human-readable
+    markdown. Defensively handles raw JSON strings that the LLM sometimes
+    returns inside individual fields (or as the entire regime value).
+    """
     lines = ["## 6. Risk Regime\n"]
 
-    trend = regime.get("trend", "sideways").upper()
+    # ── Defensive: regime itself might be a raw JSON string ──────────────
+    if isinstance(regime, str):
+        try:
+            regime = json.loads(regime)
+        except json.JSONDecodeError:
+            logger.warning("[Brief/S6] regime is a non-JSON string — showing raw with warning")
+            lines.append("⚠️ Format error — raw output below\n")
+            lines.append(f"```\n{regime}\n```")
+            return "\n".join(lines)
+
+    if not regime:
+        lines.append("*Regime analysis unavailable.*\n")
+        return "\n".join(lines)
+
+    # ── Regime headline ───────────────────────────────────────────────────
+    trend = str(regime.get("trend", "sideways")).upper()
     strength = regime.get("strength", 0.5)
-    reasoning = regime.get("reasoning", "No analysis available")
+    try:
+        strength = float(strength)
+    except (TypeError, ValueError):
+        strength = 0.5
+    lines.append(f"**Regime:** {trend} (Strength: {strength:.1f}/1.0)\n")
 
-    lines.append(f"**Regime: {trend} (strength {strength:.1f})** — {reasoning}")
+    # ── Reasoning — parse out if LLM buried raw JSON inside this field ───
+    reasoning = regime.get("reasoning", "")
+    if reasoning and isinstance(reasoning, str):
+        try:
+            parsed_r = json.loads(reasoning)
+            # Extract a text field from the nested JSON blob
+            reasoning = (
+                parsed_r.get("reasoning")
+                or parsed_r.get("summary")
+                or parsed_r.get("analysis")
+                or str(parsed_r)
+            )
+            logger.warning("[Brief/S6] reasoning field contained raw JSON — extracted text successfully")
+        except (json.JSONDecodeError, TypeError):
+            pass  # Normal string — use as-is
+    if reasoning:
+        lines.append(f"*{reasoning}*\n")
 
-    sectors_long = regime.get("top_sectors_long", [])
-    sectors_short = regime.get("top_sectors_short", [])
+    # ── Sectors — also handle if stored as JSON strings ──────────────────
+    def _coerce_list(val) -> list:
+        if isinstance(val, list):
+            return val
+        if isinstance(val, str):
+            try:
+                parsed = json.loads(val)
+                if isinstance(parsed, list):
+                    return parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
+            return [val] if val.strip() else []
+        return []
+
+    sectors_long = _coerce_list(regime.get("top_sectors_long", []))
+    sectors_short = _coerce_list(regime.get("top_sectors_short", []))
+
     if sectors_long:
-        lines.append(f"\n**Sectors to favor:** {', '.join(sectors_long)}")
+        lines.append(f"**Sectors to go LONG:** {', '.join(sectors_long)}")
     if sectors_short:
-        lines.append(f"**Sectors to avoid:** {', '.join(sectors_short)}")
+        lines.append(f"**Sectors to go SHORT / Avoid:** {', '.join(sectors_short)}\n")
 
-    lines.append("")
+    # ── Predictions for tomorrow table ───────────────────────────────────
+    if hot_stocks:
+        lines.append("**Predictions for tomorrow:**")
+        lines.append("| Symbol | Direction | Key Level | Reason |")
+        lines.append("|--------|-----------|-----------|--------|")
+        for stock in hot_stocks[:5]:
+            symbol = stock.get("symbol", "?")
+            direction = "BULLISH" if stock.get("direction") == "LONG" else "BEARISH"
+            key_level = stock.get("entry_zone", "N/A")
+            reason = (stock.get("catalyst") or "N/A")[:90]
+            lines.append(f"| {symbol} | {direction} | {key_level} | {reason} |")
+        lines.append("")
+
     return "\n".join(lines)
 
 
