@@ -495,9 +495,6 @@ def _assemble_report(
         hot_stocks=analysis.hot_stocks.get("hot_stocks", []),
     ))
 
-    # ── JSON block for trading engine ────────────────────────────────
-    sections.append(_build_json_block(analysis))
-
     return "\n".join(sections)
 
 
@@ -512,10 +509,23 @@ def _fetch_usdinr_fallback() -> tuple[str, str]:
     for ticker in ("INR=X", "USDINR=X"):
         try:
             import yfinance as yf
-            price = yf.Ticker(ticker).fast_info.get("last_price")
+            fi = yf.Ticker(ticker).fast_info
+            # Use bracket access — FastInfo does not reliably support .get()
+            # in all yfinance versions; KeyError is caught below.
+            price = fi["last_price"]
             if price and float(price) > 0:
                 logger.info(f"[Brief/USD-INR] Fallback fetch succeeded via {ticker}: {price:.2f}")
                 return f"{float(price):.2f}", ""
+        except (KeyError, TypeError):
+            # Try attribute-style access as second attempt for the same ticker
+            try:
+                price = getattr(fi, "last_price", None)
+                if price and float(price) > 0:
+                    logger.info(f"[Brief/USD-INR] Fallback (attr) succeeded via {ticker}: {price:.2f}")
+                    return f"{float(price):.2f}", ""
+            except Exception:
+                pass
+            logger.warning(f"[Brief/USD-INR] yfinance fallback ({ticker}): last_price unavailable")
         except Exception as e:
             logger.warning(f"[Brief/USD-INR] yfinance fallback ({ticker}) failed: {e}")
 
