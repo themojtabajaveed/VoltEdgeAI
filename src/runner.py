@@ -48,6 +48,7 @@ from src.trading.market_phase import fetch_market_snapshot, MarketPhase
 from src.db.db_writer import get_db_writer
 from src.data_ingestion.candle_cache_writer import write_candle_cache
 import sys
+from src.utils.market_calendar import is_market_open_today, get_today_holiday_name
 
 # Constants
 try:
@@ -188,7 +189,22 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     logging.info(f"Email config: {email_status}")
 
     print("\nPress Ctrl+C to stop.\n")
-    
+
+    # ── Holiday Guard: evaluate once at startup ──────────────────────────────
+    _market_open_today = is_market_open_today()
+    _holiday_name = get_today_holiday_name()
+    if not _market_open_today:
+        if _holiday_name:
+            logging.info(
+                f"[Holiday Guard] Market CLOSED today — {_holiday_name}. Market jobs suppressed."
+            )
+            print(f"  🚫 [Holiday Guard] Market closed — {_holiday_name}. Market jobs suppressed.")
+        else:
+            logging.info(
+                "[Holiday Guard] Market CLOSED today (weekend). Market jobs suppressed."
+            )
+            print("  🚫 [Holiday Guard] Market closed (weekend). Market jobs suppressed.")
+
     exec_logger = get_executions_logger()
     exec_logger.info(f"VoltEdge LIVE_MODE = {risk_cfg.live_mode}")
     
@@ -362,10 +378,23 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                     print("❌ DAILY AUTO-LOGIN FAILED.")
 
                 logging.info(f"Resetting DailyRiskState + HYDRA + Grok orchestrator for new session: {current_date}")
-            
+
+                # ── Holiday Guard: refresh for the new calendar day ──────────
+                _market_open_today = is_market_open_today()
+                _holiday_name = get_today_holiday_name()
+                if not _market_open_today:
+                    if _holiday_name:
+                        logging.info(
+                            f"[Holiday Guard] Market CLOSED today — {_holiday_name}. Market jobs suppressed."
+                        )
+                    else:
+                        logging.info(
+                            "[Holiday Guard] Market CLOSED today (weekend). Market jobs suppressed."
+                        )
+
             if is_weekday:
                 # -2. Ban List Refresh (08:00 IST) — before pre-market
-                if current_time >= BAN_LIST_TIME and last_ban_refresh_date != current_date:
+                if _market_open_today and current_time >= BAN_LIST_TIME and last_ban_refresh_date != current_date:
                     try:
                         refresh_ban_lists()
                         print(f"  🚫 {get_ban_summary()}")
@@ -374,7 +403,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                     last_ban_refresh_date = current_date
 
                 # ── DAWN: Pre-market catalyst scan at 08:30 (runs ONCE) ──
-                if current_time >= dt_time(8, 30) and last_dawn_pre_scan_date != current_date:
+                if _market_open_today and current_time >= dt_time(8, 30) and last_dawn_pre_scan_date != current_date:
                     try:
                         print(f"\n[{datetime.now(IST).strftime('%H:%M:%S')}] 🌅 DAWN: Pre-market catalyst scan...")
                         dawn_candidates = dawn.pre_market_scan()
@@ -512,7 +541,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                     last_premarket_date = current_date
 
                 # 0a. HYDRA pre-market event scan at 09:00
-                if current_time >= HYDRA_SCAN_TIME and last_hydra_scan_date != current_date:
+                if _market_open_today and current_time >= HYDRA_SCAN_TIME and last_hydra_scan_date != current_date:
                     try:
                         print(f"\n[{datetime.now(IST).strftime('%H:%M:%S')}] 🔥 HYDRA: Pre-market event scan...")
                         hydra_entries = hydra.scan()
@@ -545,7 +574,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                     last_hydra_scan_date = current_date
 
                 # 0b. Run momentum scanner + stock discovery at 09:30
-                if current_time >= SCANNER_TIME and last_scanner_date != current_date:
+                if _market_open_today and current_time >= SCANNER_TIME and last_scanner_date != current_date:
                     try:
                         movers = fetch_top_movers()
                         scanner_long_symbols  = [c.symbol for c in movers["gainers"]]
@@ -649,7 +678,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                     last_scanner_date = current_date
 
                 # 0c. VIPER re-scans at 10:00, 10:30, 11:00, 12:00
-                if (viper_rescan_index < len(VIPER_RESCAN_TIMES)
+                if (_market_open_today
+                        and viper_rescan_index < len(VIPER_RESCAN_TIMES)
                         and current_time >= VIPER_RESCAN_TIMES[viper_rescan_index]
                         and MARKET_START <= current_time <= MARKET_END):
                     try:
@@ -670,7 +700,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                     viper_rescan_index += 1
 
                 # 0d. 12:00 IST — Mid-session negative news pulse (SHORT-4)
-                if (current_time >= dt_time(12, 0) and current_time <= dt_time(12, 5)
+                if (_market_open_today
+                        and current_time >= dt_time(12, 0) and current_time <= dt_time(12, 5)
                         and last_neg_pulse_date != current_date):
                     try:
                         news_client = NewsClient()
@@ -688,7 +719,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                     last_neg_pulse_date = current_date
 
                 # 0e. 12:22 IST — Mid-Session Pulse Report
-                if _should_fire_scheduled_job(dt_time(12, 22), runner_start_time, current_time):
+                if _market_open_today and _should_fire_scheduled_job(dt_time(12, 22), runner_start_time, current_time):
                     if last_mid_session_date != current_date:
                         try:
                             from src.reports.mid_session_pulse import generate_mid_session_pulse
@@ -708,7 +739,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         last_mid_session_date = current_date
 
                 # ── TimesFM cache: refresh 5-min candles every 15 minutes ──────
-                if MARKET_START <= current_time <= MARKET_END:
+                if _market_open_today and MARKET_START <= current_time <= MARKET_END:
                     if (last_candle_cache_write is None or
                             (now - last_candle_cache_write).total_seconds() >= 900):
                         try:
@@ -718,7 +749,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             logging.warning(f"[CacheWriter] Periodic candle cache write failed: {_cwe}")
 
                 # 1. Intraday tasks between 9:15 and 15:30
-                if MARKET_START <= current_time <= MARKET_END:
+                if _market_open_today and MARKET_START <= current_time <= MARKET_END:
 
                     # ── DAWN: Record virtual entries at market open ──
                     if dawn._signals and dt_time(9, 15) <= current_time <= dt_time(9, 20):
@@ -1608,7 +1639,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         last_intraday_run = now
                 
                 # 2. End of Day tasks after 15:30
-                elif current_time > MARKET_END:
+                elif _market_open_today and current_time > MARKET_END:
                     if last_eod_run_date != current_date:
                         run_script("log_daily_performance.py")
                         # ── VIPER: Save COIL dry-run report + daily reset ──
@@ -1658,7 +1689,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         last_eod_run_date = current_date
                         
                 # 3. 16:00 — Unified Post-Market Report (v2)
-                if _should_fire_scheduled_job(dt_time(16, 0), runner_start_time, current_time):
+                if _market_open_today and _should_fire_scheduled_job(dt_time(16, 0), runner_start_time, current_time):
                     if last_report_date != current_date:
                         try:
                             from src.reports.post_market_report import generate_post_market_report
@@ -1733,7 +1764,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         last_autopsy_date = current_date
 
                 # 4. 16:30 — Prediction Feedback Loop (inline, after post-market)
-                if _should_fire_scheduled_job(dt_time(16, 30), runner_start_time, current_time):
+                if _market_open_today and _should_fire_scheduled_job(dt_time(16, 30), runner_start_time, current_time):
                     if last_feedback_date != current_date:
                         try:
                             from src.reports.feedback_loop import run_feedback_loop
@@ -1744,22 +1775,44 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             print(f"  ❌ Feedback loop failed: {fb_e}")
                         last_feedback_date = current_date
 
-                # 5. 09:00 IST (03:30 UTC) — Morning Global Intelligence Brief (inline)
+                # 5. 09:00 IST — Morning brief (trading day) OR holiday digest
                 if _should_fire_scheduled_job(dt_time(9, 0), runner_start_time, current_time):
                     if last_premarket_date != current_date:
-                        try:
-                            from src.reports.pre_market_brief import generate_pre_market_brief
-                            generate_pre_market_brief()
-                            pre_market_ran = True
-                            print(f"  📰 Pre-market brief generated successfully")
-                        except Exception as brief_e:
-                            logging.error(f"Pre-market brief failed: {brief_e}")
-                            print(f"  ❌ Pre-market brief failed: {brief_e}")
-                            pre_market_ran = False
+                        if _market_open_today:
+                            try:
+                                from src.reports.pre_market_brief import generate_pre_market_brief
+                                generate_pre_market_brief()
+                                pre_market_ran = True
+                                print(f"  📰 Pre-market brief generated successfully")
+                            except Exception as brief_e:
+                                logging.error(f"Pre-market brief failed: {brief_e}")
+                                print(f"  ❌ Pre-market brief failed: {brief_e}")
+                                pre_market_ran = False
+                        else:
+                            # ── Holiday Guard: send digest instead of morning brief ──
+                            holiday_label = _holiday_name or "Weekend"
+                            logging.info(
+                                f"[Holiday Guard] Sending holiday digest instead of morning brief — {holiday_label}"
+                            )
+                            try:
+                                from src.reports.email_sender import send_report_email
+                                send_report_email(
+                                    subject=f"VoltEdge | Market Holiday — {holiday_label} | {current_date}",
+                                    body_md=(
+                                        f"Market is closed today ({holiday_label}). "
+                                        f"No trading activity. "
+                                        f"Global markets and macro monitoring continues."
+                                    ),
+                                )
+                                print(f"  📧 [Holiday Guard] Holiday digest sent — {holiday_label}")
+                            except Exception as holiday_email_e:
+                                logging.error(
+                                    f"[Holiday Guard] Holiday digest email failed: {holiday_email_e}"
+                                )
                         last_premarket_date = current_date
 
-                # 5b. 09:05 IST (03:35 UTC) — Retry if pre-market brief failed
-                if _should_fire_scheduled_job(dt_time(9, 5), runner_start_time, current_time):
+                # 5b. 09:05 IST — Retry if pre-market brief failed (trading day only)
+                if _market_open_today and _should_fire_scheduled_job(dt_time(9, 5), runner_start_time, current_time):
                     if not pre_market_ran and last_premarket_date == current_date:
                         try:
                             from src.reports.pre_market_brief import generate_pre_market_brief
@@ -1776,7 +1829,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             print(f"  ❌ Pre-market brief RETRY failed: {retry_e}")
 
                 # ── DAWN: Merge brief + own scan, generate signals + email at 08:52 ──
-                if _should_fire_scheduled_job(dt_time(8, 52), runner_start_time, current_time):
+                if _market_open_today and _should_fire_scheduled_job(dt_time(8, 52), runner_start_time, current_time):
                     if last_dawn_scan_date != current_date:
                         try:
                             dawn_signals = dawn.merge_brief_and_generate(str(current_date))
