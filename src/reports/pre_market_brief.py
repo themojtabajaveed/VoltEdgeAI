@@ -95,8 +95,8 @@ def _generate_emergency_fallback(error: Exception) -> None:
         with open(report_path, "w") as f:
             f.write(report_md)
         _send_email(f"[EMERGENCY] VoltEdge Morning Brief — {today}", report_md, report_path)
-    except Exception:
-        pass
+    except Exception as fallback_e:
+        logger.error(f"[Brief] Emergency fallback failed: {type(fallback_e).__name__}: {fallback_e}")
 
 
 def _send_email(subject: str, report_md: str, report_path: str) -> bool:

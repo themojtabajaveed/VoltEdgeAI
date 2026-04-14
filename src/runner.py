@@ -1744,8 +1744,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             print(f"  ❌ Feedback loop failed: {fb_e}")
                         last_feedback_date = current_date
 
-                # 5. 08:45 IST — Morning Global Intelligence Brief (inline)
-                if _should_fire_scheduled_job(dt_time(8, 45), runner_start_time, current_time):
+                # 5. 09:00 IST (03:30 UTC) — Morning Global Intelligence Brief (inline)
+                if _should_fire_scheduled_job(dt_time(9, 0), runner_start_time, current_time):
                     if last_premarket_date != current_date:
                         try:
                             from src.reports.pre_market_brief import generate_pre_market_brief
@@ -1758,8 +1758,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             pre_market_ran = False
                         last_premarket_date = current_date
 
-                # 5b. 08:50 IST — Retry if pre-market brief failed
-                if _should_fire_scheduled_job(dt_time(8, 50), runner_start_time, current_time):
+                # 5b. 09:05 IST (03:35 UTC) — Retry if pre-market brief failed
+                if _should_fire_scheduled_job(dt_time(9, 5), runner_start_time, current_time):
                     if not pre_market_ran and last_premarket_date == current_date:
                         try:
                             from src.reports.pre_market_brief import generate_pre_market_brief

@@ -55,6 +55,7 @@ class SlotManager:
 
     def __init__(self, max_trades: int = MAX_OPEN_POSITIONS):
         self.max_trades = max_trades
+        self.used: int = 0              # total slots allocated today (inc. released)
         self._slots: list[TradeSlot] = []
         self._locked_symbols: Dict[str, TradeSlot] = {}  # symbol -> slot
         self._current_date: Optional[date] = None
@@ -62,6 +63,7 @@ class SlotManager:
 
     def reset_daily(self):
         """Reset all slots at start of new trading day."""
+        self.used = 0
         self._slots = []
         self._locked_symbols = {}
         self._confluence_symbols = set()
@@ -158,6 +160,7 @@ class SlotManager:
         )
         self._slots.append(slot)
         self._locked_symbols[symbol] = slot
+        self.used += 1
 
         tag = " CONFLUENCE" if is_conf else ""
         logger.info(
