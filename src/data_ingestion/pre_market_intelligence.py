@@ -227,6 +227,46 @@ def _score_usd_strength(eur_usd_change: Optional[float]) -> SignalContribution:
     )
 
 
+def _fetch_usdinr_change_fallback() -> Optional[float]:
+    """
+    Fetch USD/INR % change via yfinance when Finnhub returns nothing.
+    Uses last_price vs previous_close from INR=X (then USDINR=X).
+    Returns the % change float, or 0.0 if price available but no prev close,
+    or None only when all sources fail.
+    """
+    for ticker in ("INR=X", "USDINR=X"):
+        try:
+            import yfinance as yf
+            fi = yf.Ticker(ticker).fast_info
+            # Bracket access is the documented API; fall back to getattr for older versions
+            try:
+                last = fi["last_price"]
+            except (KeyError, TypeError):
+                last = getattr(fi, "last_price", None)
+            try:
+                prev = fi["previous_close"]
+            except (KeyError, TypeError):
+                prev = getattr(fi, "previous_close", None)
+            if last and float(last) > 0:
+                if prev and float(prev) > 0:
+                    change = (float(last) - float(prev)) / float(prev) * 100.0
+                    logger.info(
+                        f"[PreMkt/USD-INR] yfinance fallback ({ticker}): "
+                        f"{last:.2f} prev={prev:.2f} chg={change:+.2f}%"
+                    )
+                    return change
+                # Price available but no previous close — return 0.0, not N/A
+                logger.info(
+                    f"[PreMkt/USD-INR] yfinance fallback ({ticker}): "
+                    f"{last:.2f} (no prev close — returning 0.0%)"
+                )
+                return 0.0
+        except Exception as e:
+            logger.warning(f"[PreMkt/USD-INR] yfinance fallback ({ticker}) failed: {e}")
+    logger.warning("[PreMkt/USD-INR] All fallback sources exhausted — USD/INR will show N/A")
+    return None
+
+
 def _score_usd_inr(usd_inr_change: Optional[float]) -> SignalContribution:
     """Score USD/INR direction. Rupee weakening = FII outflow pressure."""
     if usd_inr_change is None:
@@ -558,6 +598,10 @@ def fetch_all_global_data(kite_client=None) -> dict:
     else:
         logger.info("[PreMkt] All macro signals filled by Yahoo — Finnhub skipped")
 
+    # yfinance fallback: USD/INR still missing after Yahoo + Finnhub
+    if data["usd_inr_change"] is None:
+        data["usd_inr_change"] = _fetch_usdinr_change_fallback()
+
     # 2. FII/DII from NSE
     try:
         from src.data_ingestion.nse_scraper import get_institutional_signal
@@ -711,6 +755,10 @@ def fetch_and_compute(
             usd_inr_change = usd_inr.change_pct
     except Exception as e:
         logger.warning(f"[PreMkt] Macro quotes fetch failed: {e}")
+
+    # yfinance fallback: USD/INR still missing after Finnhub
+    if usd_inr_change is None:
+        usd_inr_change = _fetch_usdinr_change_fallback()
 
     # 2. FII/DII from existing macro_context or fresh fetch
     fii_net = None
