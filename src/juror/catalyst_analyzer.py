@@ -1,3 +1,4 @@
+# MODULE: juror | PURPOSE: LLM signal scoring + juror ranking + conviction threshold | DEPENDS: viper.py, db/models.py
 """
 catalyst_analyzer.py
 --------------------

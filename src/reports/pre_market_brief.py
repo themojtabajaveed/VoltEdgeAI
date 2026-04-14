@@ -1,3 +1,4 @@
+# MODULE: pre_market_brief.py | PURPOSE: 9 AM IST morning brief email | DEPENDS: runner.py, llm/, juror/, db/models.py
 """
 pre_market_brief.py — 6:00 AM Global Intelligence Brief
 ---------------------------------------------------------

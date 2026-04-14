@@ -1,3 +1,4 @@
+# MODULE: post_market_report.py | PURPOSE: Mid-session (12:30 PM) + EOD post-market reports | DEPENDS: runner.py, llm/, feedback_loop.py
 """
 post_market_report.py (v2) — 16:00 Unified Post-Market Debrief
 ---------------------------------------------------------------

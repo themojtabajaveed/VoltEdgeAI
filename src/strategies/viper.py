@@ -1,3 +1,4 @@
+# MODULE: viper.py | PURPOSE: VIPER momentum + DAWN breakout + conviction scoring | RISK: HIGH — affects trade signals
 """
 viper.py — VIPER Strategy (Head 2: Top Mover Momentum)
 -------------------------------------------------------

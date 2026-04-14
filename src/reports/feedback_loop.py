@@ -1,3 +1,4 @@
+# MODULE: feedback_loop.py | PURPOSE: Post-trade learning + conviction feedback + pattern scoring | DEPENDS: db/models.py, llm/
 """
 feedback_loop.py — 6:01 PM Prediction Scorer
 ----------------------------------------------
@@ -76,6 +77,8 @@ def _fetch_actual_changes(today: date, predicted_symbols: list = None) -> dict:
         if missing:
             try:
                 from kiteconnect import KiteConnect
+                from kiteconnect import exceptions as _ke
+                _tok_exc = _ke.TokenException
                 ka = os.getenv("ZERODHA_API_KEY")
                 at = os.getenv("ZERODHA_ACCESS_TOKEN")
                 if ka and at:
@@ -91,8 +94,23 @@ def _fetch_actual_changes(today: date, predicted_symbols: list = None) -> dict:
                             prev_c = d.get("ohlc", {}).get("close", 0)
                             if prev_c > 0 and ltp > 0:
                                 result[sym] = round((ltp - prev_c) / prev_c * 100, 2)
-                    logger.info(f"[Feedback] Kite fallback fetched {len(result) - len([r for r in result if r in missing])} additional prices for {len(missing)} missing symbols")
+                                try:
+                                    from cache.data_cache import CacheManager
+                                    CacheManager().write_ltp(sym, ltp)
+                                except Exception:
+                                    pass
+                    logger.info(
+                        f"[Feedback] Kite fallback fetched additional prices for "
+                        f"{len(missing)} missing symbols"
+                    )
             except Exception as e:
+                try:
+                    from kiteconnect import exceptions as _ke2
+                    if isinstance(e, _ke2.TokenException):
+                        from cache.data_cache import handle_token_expiry
+                        handle_token_expiry("feedback_loop._fetch_actual_changes ohlc call")
+                except Exception:
+                    pass
                 logger.warning(f"Kite fallback for feedback scoring failed: {e}")
 
     return result

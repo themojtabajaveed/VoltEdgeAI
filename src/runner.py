@@ -1,3 +1,4 @@
+# MODULE: runner.py | PURPOSE: Main scheduler + job dispatcher | RISK: HIGH — timing math, IST/UTC, job sequencing
 import os
 import time
 import subprocess
