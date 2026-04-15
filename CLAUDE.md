@@ -69,6 +69,8 @@ src/
 - Commit message format: [module] short description of change
 - Never commit: .env, __pycache__, *.pyc, data/*.json, logs/
 - Always run the service and check journalctl after any change before committing
+- ALWAYS work on main branch directly. Never create a new branch.
+- Before first commit, verify: git branch --show-current must return "main"
 
 ## Communication Style
 - Be brief and surgical in explanations
