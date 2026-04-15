@@ -119,6 +119,8 @@ class ActiveSignal:
     # Each entry: (timestamp_str, conviction, phase_name)
     status: str = "WATCHING"    # WATCHING, TRIGGERED, EXPIRED
     last_conviction: float = 0.0
+    peak_conviction: float = 0.0   # Highest conviction ever recorded for this signal
+    expiry_reason: str = ""        # Set at each expiry site for Section 5 display
     metadata: dict = field(default_factory=dict)  # strategy-specific extras
     is_dry_run: bool = False    # True for COIL/observation-only — NEVER executes live
     window_status: str = "ACTIVE"  # ACTIVE, EXPIRED, MISSED
@@ -520,6 +522,8 @@ class ConvictionEngine:
 
             delta = new_conviction - prev_conviction
             signal.last_conviction = new_conviction
+            if new_conviction > signal.peak_conviction:
+                signal.peak_conviction = new_conviction
             signal.last_evaluated_at = now
             signal.conviction_history.append(
                 (now.strftime("%H:%M"), round(new_conviction, 1), phase.value)
@@ -574,6 +578,7 @@ class ConvictionEngine:
             # Time-based expiry
             if signal.created_at and now > cutoff_time:
                 signal.status = "EXPIRED"
+                signal.expiry_reason = "Aged out (never triggered)"
                 logger.info(
                     f"[ConvEng] Expired {signal.symbol} {signal.direction} "
                     f"— past {SIGNAL_EXPIRY_TIME[0]}:{SIGNAL_EXPIRY_TIME[1]:02d} cutoff "
@@ -586,6 +591,7 @@ class ConvictionEngine:
                 age_hours = (now - signal.created_at).total_seconds() / 3600
                 if age_hours > SIGNAL_MAX_AGE_HOURS:
                     signal.status = "EXPIRED"
+                    signal.expiry_reason = "Aged out (never triggered)"
                     logger.info(
                         f"[ConvEng] Expired {signal.symbol} {signal.direction} "
                         f"— {age_hours:.1f}h old (max {SIGNAL_MAX_AGE_HOURS}h)"
@@ -596,6 +602,7 @@ class ConvictionEngine:
             if signal.layer_c_score < 50 and signal.last_conviction < 50:
                 if signal.conviction_history and len(signal.conviction_history) >= 3:
                     signal.status = "EXPIRED"
+                    signal.expiry_reason = "Weak catalyst (conviction stuck)"
                     logger.info(
                         f"[ConvEng] Expired {signal.symbol} {signal.direction} "
                         f"— weak catalyst C={signal.layer_c_score:.0f}, "

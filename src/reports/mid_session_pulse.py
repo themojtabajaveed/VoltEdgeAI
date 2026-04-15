@@ -439,7 +439,15 @@ def _assemble_report(
             triggered = [s for s in all_signals if s.status == "TRIGGERED"]
             expired = [s for s in all_signals if s.status == "EXPIRED"]
             if triggered or expired:
-                lines.append(f"Triggered today: {len(triggered)} | Expired: {len(expired)}\n")
+                lines.append(f"Triggered today: {len(triggered)} | Expired: {len(expired)}")
+                for s in expired:
+                    reason = s.expiry_reason or "Expired (reason unknown)"
+                    peak = s.peak_conviction
+                    if peak > 0:
+                        lines.append(f"• {s.symbol} — {reason}, peak conviction={peak:.0f}")
+                    else:
+                        lines.append(f"• {s.symbol} — {reason}")
+                lines.append("")
         else:
             lines.append("Watchboard is empty — no signals being tracked.\n")
     else:
