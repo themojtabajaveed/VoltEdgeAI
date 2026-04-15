@@ -116,7 +116,7 @@ Changing email/report delivery behavior · Modifying persistent JSON artifacts
 - One logical change per commit
 - Format: `[module]: short description`
 - Verify before marking commit-ready
-
+- Always commit and push directly to main. Never create a new branch unless explicitly asked.
 ## Scope Control
 - Edit existing files first, create new only if necessary
 - Only touch files relevant to the request
