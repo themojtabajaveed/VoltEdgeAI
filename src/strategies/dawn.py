@@ -308,6 +308,94 @@ def select_dawn_candidates(min_conviction: int = 50) -> list[dict]:
     return result
 
 
+def format_dawn_email(candidates: list[dict], date_str: str) -> tuple[str, str]:
+    """
+    Format DAWN candidates into email subject + plain-text body.
+    Returns (subject, body_md).
+    """
+    if not candidates:
+        subject = f"VoltEdge DAWN | {date_str} | No candidates above threshold"
+        body = (
+            f"DAWN Pre-Market Scanner — {date_str}\n\n"
+            f"No stocks cleared the minimum conviction threshold (50/100) today.\n"
+            f"HYDRA watchlist was scanned. Market opens at 09:15 IST.\n"
+        )
+        return subject, body
+
+    top = candidates[0]
+    subject = (
+        f"VoltEdge DAWN | {date_str} | "
+        f"{len(candidates)} candidate(s) | "
+        f"Top: {top['symbol']} {top['direction']} conviction={top['dawn_conviction']}"
+    )
+
+    lines = [
+        f"DAWN Pre-Market Scanner — {date_str}",
+        f"Scan complete at 08:45 IST | Market opens 09:15 IST",
+        f"Candidates above threshold: {len(candidates)} (max 5)",
+        f"Strategy: Buy/Short at 09:15 open | Trailing SL | No time stop",
+        "=" * 60,
+        "",
+    ]
+
+    for i, c in enumerate(candidates, 1):
+        direction = c.get("direction", "UNKNOWN")
+        symbol = c.get("symbol", "?")
+        score = c.get("dawn_conviction", 0)
+        breakdown = c.get("dawn_breakdown", {})
+        gap = c.get("gap_pct", 0.0)
+        catalyst = c.get("catalyst_strength", "?")
+        sector_mom = c.get("sector_momentum", "?")
+        summary = c.get("event_summary", "No catalyst summary available.")
+
+        gap_note = f"{gap:+.2f}% vs prev close" if gap != 0.0 else "gap unknown (pre-market)"
+        action = "BUY at 09:15 open" if direction in ("LONG", "BUY") else "SHORT at 09:15 open"
+        sl_side = "below" if direction in ("LONG", "BUY") else "above"
+
+        lines += [
+            f"#{i} {symbol} — {direction} | Conviction: {score}/100",
+            f"   Catalyst Strength : {catalyst}",
+            f"   Pre-Market Gap    : {gap_note}",
+            f"   Sector Momentum   : {sector_mom}",
+            f"   Score Breakdown   : {breakdown}",
+            f"   Catalyst Summary  : {summary}",
+            f"   Action            : {action}",
+            f"   Stop Loss         : 1.5% {sl_side} entry",
+            f"   Target            : trailing SL — no fixed target, no time stop",
+            "",
+        ]
+
+    lines += [
+        "=" * 60,
+        "VoltEdge | Dry Run Only | Not financial advice",
+    ]
+
+    body = "\n".join(lines)
+    return subject, body
+
+
+def send_dawn_email(candidates: list[dict]) -> bool:
+    """Send DAWN pre-market email. Returns True if sent successfully."""
+    from src.reports.email_sender import send_report_email
+    from datetime import timezone, timedelta
+
+    IST = timezone(timedelta(hours=5, minutes=30))
+    date_str = datetime.now(IST).strftime("%Y-%m-%d")
+
+    subject, body_md = format_dawn_email(candidates, date_str)
+
+    try:
+        sent = send_report_email(subject=subject, body_md=body_md)
+        if sent:
+            logger.info(f"[DAWN] Email sent — {len(candidates)} candidate(s)")
+        else:
+            logger.warning(f"[DAWN] Email send returned False — {len(candidates)} candidate(s)")
+        return sent
+    except Exception as e:
+        logger.error(f"[DAWN] Email send failed: {type(e).__name__}: {e}")
+        return False
+
+
 # ── Main Strategy Class ─────────────────────────────────────────────────
 
 class DawnStrategy:
@@ -487,6 +575,7 @@ Return ONLY the JSON array, no other text."""
             existing_syms.add(sym)
         if hydra_picks:
             logger.info(f"[DAWN] Source C (HYDRA): {len(hydra_picks)} candidates merged")
+        send_dawn_email(hydra_picks)
 
         # Score and qualify
         scored_signals: List[DawnSignal] = []
