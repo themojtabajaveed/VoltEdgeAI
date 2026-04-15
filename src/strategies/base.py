@@ -70,6 +70,13 @@ class WatchlistEntry:
     added_at: Optional[datetime] = None
     last_checked: Optional[datetime] = None
     metadata: dict = field(default_factory=dict)  # Strategy-specific extra data
+    # DAWN scoring fields — enriched by HYDRA at scan() time
+    catalyst_strength: str = "LOW"      # "HIGH" / "MEDIUM" / "LOW"
+    gap_pct: float = 0.0                # estimated pre-market gap % (0.0 = unknown)
+    volume_signal: str = "NORMAL"       # "SURGE" / "ELEVATED" / "NORMAL"
+    sector_momentum: str = "NEUTRAL"    # "BULLISH" / "BEARISH" / "NEUTRAL"
+    technical_setup: str = "NEUTRAL"    # "BREAKOUT" / "SUPPORT" / "NEUTRAL"
+    fii_flow: str = "NEUTRAL"           # "BUYING" / "SELLING" / "NEUTRAL"
 
     def __post_init__(self):
         if self.added_at is None:

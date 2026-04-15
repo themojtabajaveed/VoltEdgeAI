@@ -4,7 +4,7 @@ hydra.py — 🔥 HYDRA: Event-Driven Catalyst Strategy
 Head 1 of the VoltEdge Dragon Architecture.
 
 Flow:
-  09:00 IST — Pre-market scan: fetch events since 15:30 yesterday,
+  08:15 IST — Pre-market scan: fetch events since 15:30 yesterday,
               classify via Groq, rank top 5.
   09:15 IST — Market opens. Monitor watchlist stocks every 2 minutes.
   When TA confirms + base conviction ≥ threshold → candidate for Grok orchestrator.
@@ -264,14 +264,37 @@ class HydraStrategy(StrategyHead):
 
         self._last_scan_time = datetime.now()
 
+        # Read macro regime once (for sector_momentum) — uses existing artifact, no new API call
+        _sector_momentum = "NEUTRAL"
+        try:
+            with open("data/daily_regime.json") as _rf:
+                _regime = json.load(_rf)
+            _trend = _regime.get("trend", "sideways")
+            if _trend == "bullish":
+                _sector_momentum = "BULLISH"
+            elif _trend == "bearish":
+                _sector_momentum = "BEARISH"
+        except Exception:
+            pass  # defaults to NEUTRAL
+
         # Convert MarketEvents to WatchlistEntries
         entries = []
         for event in events[:self.max_watchlist]:
+            urgency = event.urgency
+            if urgency >= 8:
+                _catalyst_strength = "HIGH"
+            elif urgency >= 5:
+                _catalyst_strength = "MEDIUM"
+            else:
+                _catalyst_strength = "LOW"
             entries.append(WatchlistEntry(
                 symbol=event.symbol,
                 direction=event.direction,
                 event_summary=event.summary or event.headline,
-                urgency=event.urgency,
+                urgency=urgency,
+                catalyst_strength=_catalyst_strength,
+                sector_momentum=_sector_momentum,
+                # gap_pct, volume_signal, technical_setup, fii_flow: no data at scan time → defaults
             ))
 
         if entries:
