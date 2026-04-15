@@ -14,6 +14,7 @@ import os
 import csv
 import json
 import logging
+import pathlib
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, date
@@ -123,6 +124,188 @@ class DawnDailyMetrics:
     max_favorable_avg: float = 0.0
     max_adverse_avg: float = 0.0
     source_breakdown: dict = field(default_factory=dict)
+
+
+# ── HYDRA Integration ────────────────────────────────────────────────────
+
+def load_hydra_watchlist() -> list[dict]:
+    """Load HYDRA watchlist saved at 08:15. Returns empty list if missing."""
+    path = pathlib.Path("data/hydra_watchlist.json")
+    if not path.exists():
+        logger.warning("[DAWN] hydra_watchlist.json not found — running without HYDRA input")
+        return []
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        candidates = data.get("candidates", [])
+        logger.info(f"[DAWN] Loaded {len(candidates)} HYDRA candidates")
+        return candidates
+    except Exception as e:
+        logger.error(f"[DAWN] Failed to load hydra_watchlist: {e}")
+        return []
+
+
+def score_dawn_conviction(candidate: dict) -> tuple[int, dict]:
+    """
+    Score a HYDRA candidate for DAWN gap-up/gap-down potential at 9:15 open.
+    Returns (total_score, breakdown_dict). Score capped at 100.
+
+    Scoring layers:
+      L1 — News catalyst strength (from HYDRA):     0-30 pts
+      L2 — Pre-market price action (gap vs close):  0-25 pts
+      L3 — Volume signal (from HYDRA):              0-20 pts
+      L4 — Sector momentum alignment:               0-10 pts
+      L5 — Technical setup (near breakout level):   0-10 pts
+      L6 — FII/DII alignment:                        0-5 pts
+    """
+    breakdown: dict = {}
+    total = 0
+
+    # Normalise direction: HYDRA uses BUY/SHORT; scoring rubric uses LONG/SHORT
+    direction = candidate.get("direction", "")
+    if direction == "BUY":
+        direction = "LONG"
+
+    # L1 — Catalyst strength
+    catalyst_strength = candidate.get("catalyst_strength", None)
+    if catalyst_strength is None:
+        breakdown["L1_catalyst_strength"] = "missing"
+        l1 = 0
+    elif catalyst_strength == "HIGH":
+        l1 = 30
+        breakdown["L1_catalyst_strength"] = "HIGH → 30"
+    elif catalyst_strength == "MEDIUM":
+        l1 = 18
+        breakdown["L1_catalyst_strength"] = "MEDIUM → 18"
+    elif catalyst_strength == "LOW":
+        l1 = 8
+        breakdown["L1_catalyst_strength"] = "LOW → 8"
+    else:
+        l1 = 0
+        breakdown["L1_catalyst_strength"] = f"unknown({catalyst_strength}) → 0"
+    total += l1
+
+    # L2 — Pre-market gap
+    gap_pct_raw = candidate.get("gap_pct", None)
+    if gap_pct_raw is None:
+        breakdown["L2_gap_pct"] = "missing"
+        l2 = 0
+    else:
+        gap_pct = abs(float(gap_pct_raw))
+        if gap_pct >= 3.0:
+            l2 = 25
+        elif gap_pct >= 2.0:
+            l2 = 18
+        elif gap_pct >= 1.0:
+            l2 = 10
+        elif gap_pct >= 0.5:
+            l2 = 5
+        else:
+            l2 = 0
+        breakdown["L2_gap_pct"] = f"{gap_pct:.2f}% → {l2}"
+    total += l2
+
+    # L3 — Volume signal
+    volume_signal = candidate.get("volume_signal", None)
+    if volume_signal is None:
+        breakdown["L3_volume_signal"] = "missing"
+        l3 = 0
+    elif volume_signal == "SURGE":
+        l3 = 20
+        breakdown["L3_volume_signal"] = "SURGE → 20"
+    elif volume_signal == "ELEVATED":
+        l3 = 12
+        breakdown["L3_volume_signal"] = "ELEVATED → 12"
+    elif volume_signal == "NORMAL":
+        l3 = 4
+        breakdown["L3_volume_signal"] = "NORMAL → 4"
+    else:
+        l3 = 0
+        breakdown["L3_volume_signal"] = f"unknown({volume_signal}) → 0"
+    total += l3
+
+    # L4 — Sector momentum alignment
+    sector_momentum = candidate.get("sector_momentum", None)
+    if sector_momentum is None:
+        breakdown["L4_sector_momentum"] = "missing"
+        l4 = 0
+    elif sector_momentum == "NEUTRAL":
+        l4 = 5
+        breakdown["L4_sector_momentum"] = "NEUTRAL → 5"
+    elif (sector_momentum == "BULLISH" and direction == "LONG") or \
+         (sector_momentum == "BEARISH" and direction == "SHORT"):
+        l4 = 10
+        breakdown["L4_sector_momentum"] = f"{sector_momentum}+{direction} aligned → 10"
+    else:
+        l4 = 0
+        breakdown["L4_sector_momentum"] = f"{sector_momentum}+{direction} misaligned → 0"
+    total += l4
+
+    # L5 — Technical setup
+    technical_setup = candidate.get("technical_setup", None)
+    if technical_setup is None:
+        breakdown["L5_technical_setup"] = "missing"
+        l5 = 0
+    elif technical_setup == "BREAKOUT":
+        l5 = 10
+        breakdown["L5_technical_setup"] = "BREAKOUT → 10"
+    elif technical_setup == "SUPPORT":
+        l5 = 6
+        breakdown["L5_technical_setup"] = "SUPPORT → 6"
+    elif technical_setup == "NEUTRAL":
+        l5 = 3
+        breakdown["L5_technical_setup"] = "NEUTRAL → 3"
+    else:
+        l5 = 0
+        breakdown["L5_technical_setup"] = f"unknown({technical_setup}) → 0"
+    total += l5
+
+    # L6 — FII/DII alignment
+    fii_flow = candidate.get("fii_flow", None)
+    if fii_flow is None:
+        breakdown["L6_fii_flow"] = "missing"
+        l6 = 0
+    elif (fii_flow == "BUYING" and direction == "LONG") or \
+         (fii_flow == "SELLING" and direction == "SHORT"):
+        l6 = 5
+        breakdown["L6_fii_flow"] = f"{fii_flow}+{direction} aligned → 5"
+    else:
+        l6 = 0
+        breakdown["L6_fii_flow"] = f"{fii_flow}+{direction} → 0"
+    total += l6
+
+    score = min(total, 100)
+    breakdown["total"] = score
+    logger.debug(f"[DAWN] score_dawn_conviction {candidate.get('symbol')} → {score}: {breakdown}")
+    return score, breakdown
+
+
+def select_dawn_candidates(min_conviction: int = 50) -> list[dict]:
+    """
+    Load HYDRA watchlist, score each candidate for gap-open potential,
+    filter by min_conviction. Returns sorted list (highest first), max 5.
+    """
+    candidates = load_hydra_watchlist()
+    if not candidates:
+        return []
+
+    scored = []
+    for c in candidates:
+        score, breakdown = score_dawn_conviction(c)
+        if score >= min_conviction:
+            scored.append({
+                **c,
+                "dawn_conviction": score,
+                "dawn_breakdown": breakdown,
+            })
+
+    scored.sort(key=lambda x: x["dawn_conviction"], reverse=True)
+    result = scored[:5]
+    summary = [f"{c['symbol']}={c['dawn_conviction']}" for c in result]
+    logger.info(
+        f"[DAWN] {len(result)} HYDRA candidates above conviction {min_conviction}: {summary}"
+    )
+    return result
 
 
 # ── Main Strategy Class ─────────────────────────────────────────────────
@@ -283,6 +466,27 @@ Return ONLY the JSON array, no other text."""
             else:
                 all_candidates.append(bc)
                 existing_syms.add(bc.symbol)
+
+        # Source C: HYDRA pre-market watchlist (data/hydra_watchlist.json, written at 08:15)
+        hydra_picks = select_dawn_candidates(min_conviction=50)
+        for hc in hydra_picks:
+            sym = hc.get("symbol", "")
+            if not sym or sym in existing_syms:
+                continue
+            urgency = float(hc.get("urgency", 6.0))
+            all_candidates.append(DawnCandidate(
+                symbol=sym,
+                direction=hc.get("direction", "BUY"),
+                catalyst=hc.get("event_summary", "HYDRA event catalyst"),
+                catalyst_type="UNKNOWN",   # "UNKNOWN" is in LONG/SHORT valid_types → passes _qualifies()
+                source="HYDRA",
+                urgency=urgency,
+                catalyst_strength="HIGH" if urgency >= 8 else "MEDIUM" if urgency >= 6 else "LOW",
+                freshness_hours=4.0,
+            ))
+            existing_syms.add(sym)
+        if hydra_picks:
+            logger.info(f"[DAWN] Source C (HYDRA): {len(hydra_picks)} candidates merged")
 
         # Score and qualify
         scored_signals: List[DawnSignal] = []
