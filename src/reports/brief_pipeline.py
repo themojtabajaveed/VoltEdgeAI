@@ -488,7 +488,13 @@ def _assemble_report(
         sections.append("\n---\n")
 
     # ── Section 1: Overnight Markets (machine data) ─────────────────
-    sections.append(_build_markets_section(brief_data.global_data, analysis.news_digest, brief_data.movers))
+    sections.append(_build_markets_section(
+        brief_data.global_data,
+        analysis.news_digest,
+        brief_data.movers,
+        classified_events=classified_events,
+        brave_news=brief_data.brave_news,
+    ))
 
     # ── Section 2: What Happened Since Close ─────────────────────────
     sections.append(_build_news_digest_section(analysis.news_digest))
@@ -742,7 +748,50 @@ def _fetch_usdinr_fallback() -> tuple[str, str]:
     return "~84.0", " *(estimated)*"
 
 
-def _build_markets_section(global_data: dict, news_digest: dict, movers: Optional[dict] = None) -> str:
+def _find_mover_reason(
+    symbol: str,
+    classified_events: Optional[list],
+    brave_news: Optional[list],
+) -> str:
+    """
+    Look up why a symbol moved using news ALREADY fetched in this pipeline run.
+    No new API calls. Search order:
+      1. classified_events (structured: symbol + headline)
+      2. brave_news titles/descriptions (unstructured — ticker match)
+    Returns the first matching headline (≤80 chars), or a generic fallback.
+    """
+    if not symbol:
+        return "Reason unknown — possible technical/sector move"
+    sym = symbol.strip().upper()
+
+    # 1. Structured events — symbol field is authoritative
+    for e in classified_events or []:
+        ev_sym = (e.get("symbol") or "").strip().upper()
+        if ev_sym and ev_sym == sym:
+            hl = (e.get("headline") or "").strip()
+            if hl:
+                return hl[:80]
+
+    # 2. Brave news — substring match on title or description
+    for b in brave_news or []:
+        title = (b.get("title") or "").strip()
+        desc = (b.get("description") or "").strip()
+        blob = f"{title} {desc}".upper()
+        if sym and sym in blob:
+            snippet = title if title else desc
+            if snippet:
+                return snippet[:80]
+
+    return "Reason unknown — possible technical/sector move"
+
+
+def _build_markets_section(
+    global_data: dict,
+    news_digest: dict,
+    movers: Optional[dict] = None,
+    classified_events: Optional[list] = None,
+    brave_news: Optional[list] = None,
+) -> str:
     """Section 1: Overnight markets table — filled from machine data."""
     lines = ["## 1. Overnight Markets\n"]
 
@@ -811,17 +860,23 @@ def _build_markets_section(global_data: dict, news_digest: dict, movers: Optiona
         pcr_signal = "Extreme fear (contrarian bullish)" if pcr > 1.2 else "Extreme greed (contrarian bearish)" if pcr < 0.7 else "Balanced"
         lines.append(f"| Nifty PCR | {pcr:.3f} | — | {pcr_signal} |")
 
-    # Yesterday's movers
+    # Yesterday's movers — enrich with reason from already-fetched news
     if movers:
         lines.append("\n### Yesterday's NSE Movers\n")
         gainers = movers.get("gainers", [])
         losers = movers.get("losers", [])
         if gainers:
-            g_str = ", ".join(f"**{g['symbol']}** ({g['pct_change']:+.1f}%)" for g in gainers[:5])
-            lines.append(f"**Top Gainers:** {g_str}")
+            lines.append("**Top Gainers:**")
+            for g in gainers[:5]:
+                sym = g.get("symbol", "?")
+                reason = _find_mover_reason(sym, classified_events, brave_news)
+                lines.append(f"- **{sym}** ({g['pct_change']:+.1f}%): {reason}")
         if losers:
-            l_str = ", ".join(f"**{l['symbol']}** ({l['pct_change']:+.1f}%)" for l in losers[:5])
-            lines.append(f"**Top Losers:** {l_str}")
+            lines.append("\n**Top Losers:**")
+            for l in losers[:5]:
+                sym = l.get("symbol", "?")
+                reason = _find_mover_reason(sym, classified_events, brave_news)
+                lines.append(f"- **{sym}** ({l['pct_change']:+.1f}%): {reason}")
 
     lines.append("\n---\n")
     return "\n".join(lines)
@@ -996,9 +1051,9 @@ def _build_regime_section(regime: dict, hot_stocks: Optional[list] = None) -> st
     if sectors_short:
         lines.append(f"**Sectors to go SHORT / Avoid:** {', '.join(sectors_short)}\n")
 
-    # ── Predictions for tomorrow table ───────────────────────────────────
+    # ── Today's trade predictions table ──────────────────────────────────
     if hot_stocks:
-        lines.append("**Predictions for tomorrow:**")
+        lines.append("**Today's Trade Predictions**")
         lines.append("| Symbol | Direction | Key Level | Reason |")
         lines.append("|--------|-----------|-----------|--------|")
         for stock in hot_stocks[:5]:

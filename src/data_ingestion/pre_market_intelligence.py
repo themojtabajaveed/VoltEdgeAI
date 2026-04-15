@@ -11,11 +11,11 @@ Signal tiers (by predictive power):
   D: FII/DII cash flows (yesterday — lowest weight)  weight ±11
 
 Score: 0-100, baseline 50 (neutral).
-  70-100 → RISK_ON    (global signals bullish)
-  55-69  → CLEAR      (neutral to mildly positive)
-  40-54  → CAUTION    (mixed or mildly negative)
-  25-39  → RISK_OFF   (clearly bearish)
-  0-24   → EXTREME    (crisis-level)
+  85-100 → STRONGLY BULLISH (strong bullish confluence)
+  70-84  → BULLISH          (bullish signals, elevated conviction)
+  56-69  → POSITIVE         (positive signals, normal conviction)
+  41-55  → MIXED            (selective entries only)
+   0-40  → CAUTION          (bearish or unclear signals)
 
 Fallback: if all signals fail, returns None → caller uses FII-ratio logic.
 """
@@ -51,15 +51,15 @@ class PreMarketIntelligence:
         if self.incomplete:
             return "INCOMPLETE"
         s = self.composite_score
-        if s >= 70:
-            return "RISK_ON"
-        elif s >= 55:
-            return "CLEAR"
-        elif s >= 40:
-            return "CAUTION"
-        elif s >= 25:
-            return "RISK_OFF"
-        return "EXTREME"
+        if s >= 85:
+            return "STRONGLY BULLISH"
+        elif s >= 70:
+            return "BULLISH"
+        elif s >= 56:
+            return "POSITIVE"
+        elif s >= 41:
+            return "MIXED"
+        return "CAUTION"
 
     def format_log_line(self) -> str:
         """Single audit line for journalctl — grep-friendly."""
@@ -112,16 +112,16 @@ class PreMarketIntelligence:
                 "INCOMPLETE DATA — regime uncertain, do not lower conviction "
                 "thresholds, treat as CAUTIOUS"
             )
+        elif self.composite_score >= 85:
+            verdict = "Strong bullish confluence. High conviction appropriate."
         elif self.composite_score >= 70:
-            verdict = "Global signals bullish. Favor LONG setups."
-        elif self.composite_score >= 55:
-            verdict = "Neutral-to-positive signals. Normal conviction thresholds."
-        elif self.composite_score >= 40:
-            verdict = "Mixed signals. Elevated conviction bar for new entries."
-        elif self.composite_score >= 25:
-            verdict = "Bearish signals dominate. Favor SHORT setups, dampen LONG."
+            verdict = "Bullish signals. Elevated conviction appropriate."
+        elif self.composite_score >= 56:
+            verdict = "Positive signals. Normal conviction thresholds."
+        elif self.composite_score >= 41:
+            verdict = "Mixed signals. Selective entries only."
         else:
-            verdict = "Crisis-level bearish. Minimal exposure recommended."
+            verdict = "Bearish or unclear signals. Reduced conviction."
 
         lines.append(f"**Verdict: {verdict}**")
         lines.append(f"\n{unavail_str}")
