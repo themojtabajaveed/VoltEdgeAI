@@ -248,6 +248,7 @@ def analyze_hot_stocks(
     regime_score: int,
     brave_news: List[dict],
     macro_plays: Optional[List[dict]] = None,
+    verified_prices: Optional[Dict[str, tuple]] = None,
 ) -> dict:
     """
     Identify top 5 catalyst-driven stocks and generate trade plans.
@@ -317,6 +318,23 @@ def analyze_hot_stocks(
     IST = zoneinfo.ZoneInfo("Asia/Kolkata")
     today = datetime.now(IST).strftime("%Y-%m-%d")
 
+    # Verified-price grounding — prevents LLM from hallucinating stale/split-adjusted
+    # prices (e.g. WIPRO 490 vs actual ~207). Caller passes {symbol: (price, source)}.
+    verified_prices_block = ""
+    if verified_prices:
+        lines_vp = [
+            f"  - {sym}: ₹{p:.2f} (source: {src})"
+            for sym, (p, src) in sorted(verified_prices.items())
+        ]
+        verified_prices_block = (
+            "\n## Verified Current Market Prices (GROUND TRUTH — USE THESE EXACT VALUES)\n"
+            + "\n".join(lines_vp)
+            + "\n\nCRITICAL: All entry zones, stop losses, and targets MUST be within ±15% "
+              "of the verified price above. Do NOT use any other price reference, training-data "
+              "memory, or pre-split prices. If a symbol is not in the verified list, anchor off "
+              "the candidate's prev_close / last_price fields instead.\n"
+        )
+
     prompt = f"""You are VoltEdge's pre-market trade planner. Today is {today}.
 Market regime: {regime_label} (score {regime_score}/100).
 
@@ -330,12 +348,13 @@ Only select stocks with HIGH or MEDIUM catalyst strength:
 - LOW (exclude): technical pattern, routine filing, vague mention
 
 MACRO-PLAY candidates have machine-confirmed catalysts from live market data. They are ALWAYS valid catalysts with HIGH strength. Still provide entry/SL/target based on typical price levels.
-
+{verified_prices_block}
 ## Candidates
 {candidates_block}
 
-For each selected stock, provide a trade plan. Use the previous close / recent price as anchor.
-Entry should be realistic (not yesterday's close if stock will gap).
+For each selected stock, provide a trade plan. Use the verified price above as the anchor
+(or prev_close / last_price if unverified). Entry should be realistic (not yesterday's close
+if the stock will gap).
 
 Return ONLY valid JSON:
 {{

@@ -401,6 +401,11 @@ def _run_analysis(
     analysis = BriefAnalysis()
     hot_events = [e for e in classified_events if float(e.get("urgency", 0)) >= 6]
 
+    # Pre-LLM: resolve verified market prices for candidate symbols so the LLM
+    # prompt can be grounded. The post-LLM override is the non-negotiable safety
+    # net — this pre-grounding only reduces how often that override has to fire.
+    verified_prices = _collect_verified_prices(hot_events, movers)
+
     # Build learning context block for Groq injection
     learning_context = ""
     if yesterday_learnings:
@@ -420,7 +425,8 @@ def _run_analysis(
         if learning_context:
             enriched_brave.append({"title": "Yesterday's System Learnings", "description": learning_context, "url": "", "age": ""})
         return analyze_hot_stocks(hot_events, movers, regime_score, enriched_brave,
-                                  macro_plays=macro_plays)
+                                  macro_plays=macro_plays,
+                                  verified_prices=verified_prices)
 
     # Step 1: Run digest + hot_stocks in parallel (regime depends on digest)
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="BriefS3") as pool:
@@ -436,6 +442,13 @@ def _run_analysis(
             analysis.hot_stocks = f_stocks.result() or {}
         except Exception as e:
             logger.warning(f"[Brief/S3] Hot stocks failed: {e}")
+
+    # Post-LLM safety net: override any hallucinated prices regardless of
+    # whether the LLM respected the pre-grounding instruction.
+    try:
+        _ground_hot_stocks_prices(analysis.hot_stocks)
+    except Exception as e:
+        logger.error(f"[Brief/S3] Price grounding failed: {e}")
 
     # Step 2: Run regime SEQUENTIALLY with digest themes + news summary
     themes = analysis.news_digest.get("key_themes", [])
@@ -496,6 +509,201 @@ def _assemble_report(
     ))
 
     return "\n".join(sections)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PRICE GROUNDING — 3-source verified price lookup
+# ═══════════════════════════════════════════════════════════════════════
+
+def _fetch_verified_price(symbol: str) -> tuple[Optional[float], str]:
+    """
+    Fetch and cross-verify the last traded price for an NSE symbol.
+
+    Sources tried in order:
+      1. yfinance NSE  (SYMBOL.NS fast_info)
+      2. yfinance BSE  (SYMBOL.BO fast_info) — used for cross-check
+      3. yfinance regularMarketPrice (SYMBOL.NS .info fallback)
+
+    Returns:
+        (price, source_label) on success
+        (None, "unavailable")  if all three sources fail
+
+    The source label always records which path was used and flags any
+    NSE↔BSE mismatch > 5%. Callers MUST log the returned source label.
+    """
+    if not symbol or not isinstance(symbol, str):
+        return None, "unavailable"
+
+    sym = symbol.strip().upper()
+    s1: Optional[float] = None  # yfinance NSE
+    s2: Optional[float] = None  # yfinance BSE
+    s3: Optional[float] = None  # yfinance regularMarketPrice
+
+    try:
+        import yfinance as yf
+    except ImportError as e:
+        logger.error(f"[PriceVerify] yfinance not available: {e}")
+        return None, "unavailable"
+
+    # Source 1 — yfinance NSE
+    try:
+        fi = yf.Ticker(f"{sym}.NS").fast_info
+        try:
+            p = fi["last_price"]
+        except (KeyError, TypeError):
+            p = getattr(fi, "last_price", None)
+        if p is not None and float(p) > 0:
+            s1 = float(p)
+    except Exception as e:
+        logger.warning(f"[PriceVerify] {sym} NSE fast_info failed: {e}")
+
+    # Source 2 — yfinance BSE
+    try:
+        fi = yf.Ticker(f"{sym}.BO").fast_info
+        try:
+            p = fi["last_price"]
+        except (KeyError, TypeError):
+            p = getattr(fi, "last_price", None)
+        if p is not None and float(p) > 0:
+            s2 = float(p)
+    except Exception as e:
+        logger.warning(f"[PriceVerify] {sym} BSE fast_info failed: {e}")
+
+    # Source 3 — regularMarketPrice fallback (.info is slower, only if s1 missing)
+    if s1 is None:
+        try:
+            info = yf.Ticker(f"{sym}.NS").info or {}
+            p = info.get("regularMarketPrice")
+            if p is not None and float(p) > 0:
+                s3 = float(p)
+        except Exception as e:
+            logger.warning(f"[PriceVerify] {sym} regularMarketPrice failed: {e}")
+
+    # Validation logic
+    if s1 is not None and s2 is not None:
+        if abs(s1 - s2) / s1 <= 0.05:
+            logger.info(f"[PriceVerify] {sym} ₹{s1:.2f} (yfinance NSE+BSE verified, Δ={abs(s1-s2)/s1*100:.1f}%)")
+            return s1, "yfinance NSE+BSE verified"
+        logger.warning(f"[PriceVerify] {sym} NSE={s1:.2f} BSE={s2:.2f} mismatch >5% — using NSE")
+        return s1, "yfinance NSE (BSE mismatch flagged)"
+
+    if s1 is not None:
+        logger.info(f"[PriceVerify] {sym} ₹{s1:.2f} (yfinance NSE only)")
+        return s1, "yfinance NSE only"
+
+    if s3 is not None:
+        logger.info(f"[PriceVerify] {sym} ₹{s3:.2f} (yfinance regularMarketPrice)")
+        return s3, "yfinance regularMarketPrice"
+
+    logger.error(f"[PriceVerify] {sym} price unavailable from all 3 sources")
+    return None, "unavailable"
+
+
+def _parse_entry_midpoint(entry_zone_str: str) -> Optional[float]:
+    """
+    Parse midpoint of an entry-zone string like '1450-1470' or '1450'.
+    Returns None if the string contains no numbers.
+    """
+    if not entry_zone_str or not isinstance(entry_zone_str, str):
+        return None
+    nums = re.findall(r"\d+\.?\d*", entry_zone_str)
+    if not nums:
+        return None
+    try:
+        if len(nums) >= 2:
+            return (float(nums[0]) + float(nums[1])) / 2
+        return float(nums[0])
+    except ValueError:
+        return None
+
+
+def _ground_hot_stocks_prices(hot_stocks_data: dict) -> None:
+    """
+    Post-LLM safety net: mutate `hot_stocks_data` in place.
+
+    For each stock:
+      - Fetch verified price via _fetch_verified_price
+      - Parse entry_zone midpoint
+      - If |entry_mid - price| / price > 0.20 → OVERRIDE entry/SL/target
+        with verified-price bands (direction-aware) and stamp an override note.
+      - Else → stamp a "verified ✓" note.
+
+    This fires regardless of whether the LLM respected the prompt grounding.
+    """
+    stocks = hot_stocks_data.get("hot_stocks", []) or []
+    for stock in stocks:
+        symbol = (stock.get("symbol") or "").strip()
+        if not symbol or symbol == "?":
+            stock["entry_zone_note"] = ""
+            continue
+
+        price, source = _fetch_verified_price(symbol)
+
+        if price is None:
+            stock["entry_zone_note"] = "⚠️ Price unverified — no market data available from NSE/BSE/yfinance"
+            logger.error(f"[Brief] {symbol} price unavailable — leaving LLM values but flagging report")
+            continue
+
+        entry_mid = _parse_entry_midpoint(stock.get("entry_zone", ""))
+
+        if entry_mid is None:
+            stock["entry_zone_note"] = f"Price verified ✓ ₹{price:.2f} ({source}) — entry zone unparseable"
+            continue
+
+        deviation = abs(entry_mid - price) / price
+        if deviation > 0.20:
+            logger.error(
+                f"[Brief] PRICE SANITY FAIL {symbol}: LLM entry_mid={entry_mid:.2f} vs "
+                f"verified=₹{price:.2f} ({deviation*100:.1f}% off) — replacing with verified range"
+            )
+            direction = (stock.get("direction") or "LONG").upper()
+            if direction == "SHORT":
+                stock["entry_zone"] = f"{price*0.98:.2f}-{price*1.02:.2f}"
+                stock["stop_loss"] = f"{price*1.015:.2f}"
+                stock["target"] = f"{price*0.96:.2f}"
+            else:
+                stock["entry_zone"] = f"{price*0.98:.2f}-{price*1.02:.2f}"
+                stock["stop_loss"] = f"{price*0.985:.2f}"
+                stock["target"] = f"{price*1.04:.2f}"
+            stock["risk_reward"] = "1:2.5"
+            stock["entry_zone_note"] = (
+                f"⚠️ LLM price overridden — LLM said ₹{entry_mid:.2f}, verified ₹{price:.2f} "
+                f"({deviation*100:.1f}% off). Bands set from verified price ({source})."
+            )
+        else:
+            stock["entry_zone_note"] = f"Price verified ✓ ₹{price:.2f} ({source})"
+
+
+def _collect_verified_prices(
+    hot_events: list,
+    movers: Optional[dict],
+) -> Dict[str, tuple[float, str]]:
+    """
+    Pre-LLM: resolve verified prices for all candidate symbols so the LLM
+    prompt can be grounded in real market data. Returns {symbol: (price, source)}.
+    """
+    symbols: list[str] = []
+    for e in hot_events[:15]:
+        s = (e.get("symbol") or "").strip().upper()
+        if s and s not in symbols:
+            symbols.append(s)
+    if movers:
+        for g in (movers.get("gainers") or [])[:5]:
+            s = (g.get("symbol") or "").strip().upper()
+            if s and s not in symbols:
+                symbols.append(s)
+        for l in (movers.get("losers") or [])[:5]:
+            s = (l.get("symbol") or "").strip().upper()
+            if s and s not in symbols:
+                symbols.append(s)
+
+    verified: Dict[str, tuple[float, str]] = {}
+    for sym in symbols[:20]:  # cap to avoid slow yfinance storms
+        price, source = _fetch_verified_price(sym)
+        if price is not None:
+            verified[sym] = (price, source)
+    logger.info(f"[Brief] Pre-LLM verified prices: {len(verified)}/{len(symbols[:20])} symbols resolved")
+    return verified
 
 
 def _fetch_usdinr_fallback() -> tuple[str, str]:
@@ -687,6 +895,9 @@ def _build_hot_stocks_section(hot_stocks_data: dict) -> str:
             lines.append(f"### {i}. {symbol} — {catalyst}\n")
             lines.append(f"- **Direction:** {direction}")
             lines.append(f"- **Entry Zone:** {stock.get('entry_zone', 'N/A')}")
+            note = stock.get("entry_zone_note", "")
+            if note:
+                lines.append(f"  - _{note}_")
             lines.append(f"- **Stop Loss:** {stock.get('stop_loss', 'N/A')}")
             lines.append(f"- **Target:** {stock.get('target', 'N/A')} (R:R {stock.get('risk_reward', 'N/A')})")
             lines.append(f"- **If gaps past entry:** {stock.get('if_gaps_past', 'Wait for pullback')}")
