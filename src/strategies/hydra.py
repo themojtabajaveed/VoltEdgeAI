@@ -20,6 +20,7 @@ HYDRA doesn't chase spikes. It waits for VWAP retest after event.
 """
 import os
 import json
+import pathlib
 import time
 import logging
 from datetime import datetime, date
@@ -276,6 +277,18 @@ class HydraStrategy(StrategyHead):
         if entries:
             self.update_watchlist(entries)
             logger.info(f"[HYDRA] Watchlist: {[(e.symbol, e.urgency) for e in entries]}")
+
+        _out = pathlib.Path("data/hydra_watchlist.json")
+        _out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(_out, "w") as f:
+                json.dump({
+                    "generated_at": datetime.utcnow().isoformat(),
+                    "candidates": [asdict(c) for c in entries],
+                }, f, indent=2, default=str)
+            logger.info(f"[HYDRA] Watchlist saved: {len(entries)} candidates → {_out}")
+        except Exception as e:
+            logger.warning(f"[HYDRA] Failed to save watchlist: {e}")
 
         return entries
 

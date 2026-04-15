@@ -73,7 +73,7 @@ MARKET_END    = dt_time(15, 30)  # 15:30 IST
 SCANNER_TIME  = dt_time(9, 30)   # 09:30 — scanner runs once after open
 BAN_LIST_TIME = dt_time(8, 0)    # 08:00 — refresh F&O ban + T2T lists
 PREMARKET_TIME= dt_time(8, 30)   # 08:30 — pre-market macro check
-HYDRA_SCAN_TIME = dt_time(9, 0)  # 09:00 — HYDRA pre-market event scan
+HYDRA_SCAN_TIME = dt_time(8, 15)  # 08:15 — HYDRA pre-market event scan
 INTRADAY_INTERVAL_MIN = 15
 # VIPER re-scan times (after initial 09:30 scan)
 VIPER_RESCAN_TIMES = [dt_time(10, 0), dt_time(10, 30), dt_time(11, 0), dt_time(12, 0)]
