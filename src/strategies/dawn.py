@@ -145,139 +145,178 @@ def load_hydra_watchlist() -> list[dict]:
         return []
 
 
+def _fetch_history_signals(symbol: str) -> dict:
+    """
+    Single yfinance history call for L3/L5/L6/L7/L8 scoring.
+    Returns dict with safe defaults on any failure. Never raises.
+    """
+    defaults = {
+        "rel_volume": 1.0,
+        "vs_30d_high_pct": 0.0,
+        "vs_20d_sma_pct": 0.0,
+        "gap_followthrough_rate": 0.5,
+        "momentum_7d_pct": 0.0,
+        "momentum_30d_pct": 0.0,
+        "avg_daily_volume": 0,
+    }
+    try:
+        import yfinance as yf
+        hist = yf.Ticker(f"{symbol}.NS").history(period="2mo")
+        if hist.empty or len(hist) < 10:
+            return defaults
+
+        close = hist["Close"]
+        volume = hist["Volume"]
+        high = hist["High"]
+        open_ = hist["Open"]
+
+        # L3 — relative volume (yesterday vs 20d avg)
+        avg_vol_20d = volume.iloc[-21:-1].mean()
+        last_vol = volume.iloc[-1]
+        rel_volume = (last_vol / avg_vol_20d) if avg_vol_20d > 0 else 1.0
+
+        # L5 — technical setup
+        high_30d = high.iloc[-30:].max()
+        sma_20d = close.iloc[-20:].mean()
+        last_close = close.iloc[-1]
+        vs_30d_high_pct = ((last_close - high_30d) / high_30d) * 100
+        vs_20d_sma_pct = ((last_close - sma_20d) / sma_20d) * 100
+
+        # L6 — gap follow-through rate (last 30 days)
+        follow_throughs = 0
+        gap_days = 0
+        prev_closes = close.iloc[-31:-1].values
+        opens = open_.iloc[-30:].values
+        closes = close.iloc[-30:].values
+        for i in range(min(30, len(opens))):
+            if i >= len(prev_closes):
+                break
+            gap = opens[i] - prev_closes[i]
+            if abs(gap) > 0.3:
+                gap_days += 1
+                if gap > 0 and closes[i] > opens[i]:
+                    follow_throughs += 1
+                elif gap < 0 and closes[i] < opens[i]:
+                    follow_throughs += 1
+        gap_followthrough_rate = (follow_throughs / gap_days) if gap_days >= 3 else 0.5
+
+        # L7 — momentum
+        momentum_7d = ((close.iloc[-1] - close.iloc[-8]) / close.iloc[-8]) * 100
+        momentum_30d = ((close.iloc[-1] - close.iloc[-31]) / close.iloc[-31]) * 100
+
+        # L8 — liquidity
+        avg_daily_volume = int(volume.iloc[-20:].mean())
+
+        return {
+            "rel_volume": round(rel_volume, 2),
+            "vs_30d_high_pct": round(vs_30d_high_pct, 2),
+            "vs_20d_sma_pct": round(vs_20d_sma_pct, 2),
+            "gap_followthrough_rate": round(gap_followthrough_rate, 2),
+            "momentum_7d_pct": round(momentum_7d, 2),
+            "momentum_30d_pct": round(momentum_30d, 2),
+            "avg_daily_volume": avg_daily_volume,
+        }
+    except Exception as e:
+        logger.debug(f"[DAWN] History signals failed for {symbol}: {e}")
+        return defaults
+
+
 def score_dawn_conviction(candidate: dict) -> tuple[int, dict]:
     """
     Score a HYDRA candidate for DAWN gap-up/gap-down potential at 9:15 open.
     Returns (total_score, breakdown_dict). Score capped at 100.
 
-    Scoring layers:
-      L1 — News catalyst strength (from HYDRA):     0-30 pts
-      L2 — Pre-market price action (gap vs close):  0-25 pts
-      L3 — Volume signal (from HYDRA):              0-20 pts
-      L4 — Sector momentum alignment:               0-10 pts
-      L5 — Technical setup (near breakout level):   0-10 pts
-      L6 — FII/DII alignment:                        0-5 pts
+    Scoring layers (8 total):
+      L1 — Catalyst strength   : 0-25 pts
+      L2 — Pre-market gap      : 0-20 pts
+      L3 — Relative volume     : 0-15 pts  (yfinance history)
+      L4 — Sector momentum     : 0-8  pts
+      L5 — Technical setup     : 0-12 pts  (yfinance history)
+      L6 — Gap follow-through  : 0-8  pts  (yfinance history)
+      L7 — Momentum 7d/30d     : 0-7  pts  (yfinance history)
+      L8 — Liquidity           : 0-5  pts  (yfinance history)
     """
+    symbol = candidate.get("symbol", "")
+    direction = candidate.get("direction", "LONG")
+    if direction == "BUY":
+        direction = "LONG"
     breakdown: dict = {}
     total = 0
 
-    # Normalise direction: HYDRA uses BUY/SHORT; scoring rubric uses LONG/SHORT
-    direction = candidate.get("direction", "")
-    if direction == "BUY":
-        direction = "LONG"
-
-    # L1 — Catalyst strength
-    catalyst_strength = candidate.get("catalyst_strength", None)
-    if catalyst_strength is None:
-        breakdown["L1_catalyst_strength"] = "missing"
-        l1 = 0
-    elif catalyst_strength == "HIGH":
-        l1 = 30
-        breakdown["L1_catalyst_strength"] = "HIGH → 30"
-    elif catalyst_strength == "MEDIUM":
-        l1 = 18
-        breakdown["L1_catalyst_strength"] = "MEDIUM → 18"
-    elif catalyst_strength == "LOW":
-        l1 = 8
-        breakdown["L1_catalyst_strength"] = "LOW → 8"
-    else:
-        l1 = 0
-        breakdown["L1_catalyst_strength"] = f"unknown({catalyst_strength}) → 0"
+    # L1 — catalyst strength (0-25)
+    cs = candidate.get("catalyst_strength", "LOW")
+    l1 = 25 if cs == "HIGH" else 18 if cs == "MEDIUM" else 8
+    breakdown["L1_catalyst"] = l1
     total += l1
 
-    # L2 — Pre-market gap
-    gap_pct_raw = candidate.get("gap_pct", None)
-    if gap_pct_raw is None:
-        breakdown["L2_gap_pct"] = "missing"
-        l2 = 0
-    else:
-        gap_pct = abs(float(gap_pct_raw))
-        if gap_pct >= 3.0:
-            l2 = 25
-        elif gap_pct >= 2.0:
-            l2 = 18
-        elif gap_pct >= 1.0:
-            l2 = 10
-        elif gap_pct >= 0.5:
-            l2 = 5
-        else:
-            l2 = 0
-        breakdown["L2_gap_pct"] = f"{gap_pct:.2f}% → {l2}"
+    # L2 — gap_pct (0-20)
+    gap = abs(candidate.get("gap_pct", 0.0))
+    l2 = 20 if gap >= 3.0 else 15 if gap >= 2.0 else 8 if gap >= 1.0 else 4 if gap >= 0.5 else 0
+    breakdown["L2_gap"] = l2
     total += l2
 
-    # L3 — Volume signal
-    volume_signal = candidate.get("volume_signal", None)
-    if volume_signal is None:
-        breakdown["L3_volume_signal"] = "missing"
-        l3 = 0
-    elif volume_signal == "SURGE":
-        l3 = 20
-        breakdown["L3_volume_signal"] = "SURGE → 20"
-    elif volume_signal == "ELEVATED":
-        l3 = 12
-        breakdown["L3_volume_signal"] = "ELEVATED → 12"
-    elif volume_signal == "NORMAL":
-        l3 = 4
-        breakdown["L3_volume_signal"] = "NORMAL → 4"
-    else:
-        l3 = 0
-        breakdown["L3_volume_signal"] = f"unknown({volume_signal}) → 0"
+    # Fetch history signals once for L3/L5/L6/L7/L8
+    hist = _fetch_history_signals(symbol) if symbol else {}
+
+    # L3 — relative volume (0-15)
+    rv = hist.get("rel_volume", 1.0)
+    l3 = 15 if rv >= 3.0 else 10 if rv >= 2.0 else 6 if rv >= 1.5 else 0
+    breakdown["L3_volume"] = l3
     total += l3
 
-    # L4 — Sector momentum alignment
-    sector_momentum = candidate.get("sector_momentum", None)
-    if sector_momentum is None:
-        breakdown["L4_sector_momentum"] = "missing"
-        l4 = 0
-    elif sector_momentum == "NEUTRAL":
-        l4 = 5
-        breakdown["L4_sector_momentum"] = "NEUTRAL → 5"
-    elif (sector_momentum == "BULLISH" and direction == "LONG") or \
-         (sector_momentum == "BEARISH" and direction == "SHORT"):
-        l4 = 10
-        breakdown["L4_sector_momentum"] = f"{sector_momentum}+{direction} aligned → 10"
+    # L4 — sector momentum (0-8)
+    sm = candidate.get("sector_momentum", "NEUTRAL")
+    if (sm == "BULLISH" and direction == "LONG") or (sm == "BEARISH" and direction == "SHORT"):
+        l4 = 8
+    elif sm == "NEUTRAL":
+        l4 = 4
     else:
         l4 = 0
-        breakdown["L4_sector_momentum"] = f"{sector_momentum}+{direction} misaligned → 0"
+    breakdown["L4_sector"] = l4
     total += l4
 
-    # L5 — Technical setup
-    technical_setup = candidate.get("technical_setup", None)
-    if technical_setup is None:
-        breakdown["L5_technical_setup"] = "missing"
-        l5 = 0
-    elif technical_setup == "BREAKOUT":
-        l5 = 10
-        breakdown["L5_technical_setup"] = "BREAKOUT → 10"
-    elif technical_setup == "SUPPORT":
-        l5 = 6
-        breakdown["L5_technical_setup"] = "SUPPORT → 6"
-    elif technical_setup == "NEUTRAL":
+    # L5 — technical setup (0-12)
+    vs_high = hist.get("vs_30d_high_pct", 0.0)
+    vs_sma = hist.get("vs_20d_sma_pct", 0.0)
+    if vs_high >= 0:
+        l5 = 12
+    elif vs_sma >= 0:
+        l5 = 7
+    elif vs_sma >= -3:
         l5 = 3
-        breakdown["L5_technical_setup"] = "NEUTRAL → 3"
     else:
         l5 = 0
-        breakdown["L5_technical_setup"] = f"unknown({technical_setup}) → 0"
+    breakdown["L5_technical"] = l5
     total += l5
 
-    # L6 — FII/DII alignment
-    fii_flow = candidate.get("fii_flow", None)
-    if fii_flow is None:
-        breakdown["L6_fii_flow"] = "missing"
-        l6 = 0
-    elif (fii_flow == "BUYING" and direction == "LONG") or \
-         (fii_flow == "SELLING" and direction == "SHORT"):
-        l6 = 5
-        breakdown["L6_fii_flow"] = f"{fii_flow}+{direction} aligned → 5"
-    else:
-        l6 = 0
-        breakdown["L6_fii_flow"] = f"{fii_flow}+{direction} → 0"
+    # L6 — gap follow-through rate (0-8)
+    ftr = hist.get("gap_followthrough_rate", 0.5)
+    l6 = 8 if ftr >= 0.70 else 4 if ftr >= 0.50 else 0
+    breakdown["L6_followthrough"] = l6
     total += l6
 
-    score = min(total, 100)
-    breakdown["total"] = score
-    logger.debug(f"[DAWN] score_dawn_conviction {candidate.get('symbol')} → {score}: {breakdown}")
-    return score, breakdown
+    # L7 — momentum (0-7)
+    m7 = hist.get("momentum_7d_pct", 0.0)
+    m30 = hist.get("momentum_30d_pct", 0.0)
+    dir_mult = 1 if direction == "LONG" else -1
+    l7 = 0
+    if m7 * dir_mult > 3.0:
+        l7 += 4
+    if m30 * dir_mult > 8.0:
+        l7 += 3
+    breakdown["L7_momentum"] = l7
+    total += l7
+
+    # L8 — liquidity (0-5)
+    avg_vol = hist.get("avg_daily_volume", 0)
+    l8 = 5 if avg_vol >= 1_000_000 else 3 if avg_vol >= 500_000 else 1 if avg_vol >= 200_000 else 0
+    breakdown["L8_liquidity"] = l8
+    total += l8
+
+    final = min(total, 100)
+    breakdown["total"] = final
+    logger.debug(f"[DAWN] {symbol} conviction={final} | {breakdown}")
+    return final, breakdown
 
 
 def select_dawn_candidates(min_conviction: int = 50) -> list[dict]:
