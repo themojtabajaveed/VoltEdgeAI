@@ -8,6 +8,7 @@ OPEN: src/data_ingestion/pre_market_intelligence.py → Section 0 signal table (
 OPEN: src/runner.py → search "pre_market" block only
 IF LLM broken: src/llm/ + src/juror/
 IF DB broken: src/db/models.py → DailySignal, ConvictionScore only
+IF exchange filings broken: src/data_ingestion/exchange_filings.py
 SKIP: strategies/, market_chronicle.py, feedback_loop.py
 
 ## Mid-Session Report (12:30 PM IST)
