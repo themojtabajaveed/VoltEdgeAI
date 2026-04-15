@@ -75,6 +75,8 @@ src/
 - If in a worktree (path contains .claude/worktrees), run: cd ~/VoltEdgeAI && git checkout main before committing
 - Never push to a feature branch. Always push directly to main.
 - Never force-push under any circumstances.
+- NEVER create a new branch. NEVER use git checkout -b. NEVER use worktrees. Always commit directly on main.
+
 ## Communication Style
 - Be brief and surgical in explanations
 - Always show BEFORE and AFTER for any code change
