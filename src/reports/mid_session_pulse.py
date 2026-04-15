@@ -105,8 +105,12 @@ def generate_mid_session_pulse(
     try:
         from src.llm.brief_analyzer import analyze_mid_session, analyze_second_half
 
-        # Build signals summary for outlook
-        signals_summary = _build_signals_summary(conviction_engine)
+        # Build signals summary for outlook (enriched with grounded context)
+        signals_summary = _build_signals_summary(
+            conviction_engine,
+            market_snapshot=market_snapshot,
+            today_str=str(today),
+        )
         risk_flags = _compute_risk_flags(market_snapshot, conviction_engine, risk_state, risk_cfg)
 
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="MidLLM") as pool:
@@ -633,9 +637,44 @@ def _build_market_data(market_snapshot, conviction_engine, movers) -> dict:
     return data
 
 
-def _build_signals_summary(conviction_engine) -> dict:
+def _build_regime_trigger_text(phase: str) -> str:
+    """Return a phase-specific regime change condition."""
+    triggers = {
+        "LARGE-CAP LED": (
+            "Breadth improvement (A/D > 0.6) would confirm rally — "
+            "watch mid/small cap participation in second half"
+        ),
+        "TRENDING": (
+            "Watch for volume confirmation in second half — "
+            "high-volume continuation bars above current pivot validate trend"
+        ),
+        "SELECTIVE": (
+            "Sector rotation risk — monitor laggard sectors for mean-reversion "
+            "squeeze; leadership may shift in post-lunch session"
+        ),
+        "CHOPPY": (
+            "Need index directional break above/below the current intraday range "
+            "before committing to any direction"
+        ),
+        "STEADY": (
+            "Look for sector leaders to extend; avoid chasing extended moves "
+            "without a clean pullback entry"
+        ),
+        "SIDEWAYS-BROAD": (
+            "Broad participation without direction — wait for Nifty to break "
+            "today's high/low range before entering momentum positions"
+        ),
+    }
+    return triggers.get(phase, "Monitor market for directional clarity before adding exposure.")
+
+
+def _build_signals_summary(
+    conviction_engine,
+    market_snapshot=None,
+    today_str: Optional[str] = None,
+) -> dict:
     """Build signals summary for outlook LLM call."""
-    summary = {"total": 0, "by_strategy": {}, "above_threshold": 0}
+    summary: dict = {"total": 0, "by_strategy": {}, "above_threshold": 0}
     if not conviction_engine:
         return summary
 
@@ -644,11 +683,78 @@ def _build_signals_summary(conviction_engine) -> dict:
         return summary
 
     summary["total"] = len(active)
-    for sig in active:
+    threshold = conviction_engine._threshold
+
+    near_threshold_lines = []
+    key_level_lines = []
+    for sig in sorted(active, key=lambda s: s.last_conviction, reverse=True):
         strat = sig.strategy
         summary["by_strategy"][strat] = summary["by_strategy"].get(strat, 0) + 1
-        if sig.last_conviction >= conviction_engine._threshold:
+        if sig.last_conviction >= threshold:
             summary["above_threshold"] += 1
+
+        # Near-threshold signals (conviction 50 to threshold)
+        if 50 <= sig.last_conviction < threshold:
+            gap = threshold - sig.last_conviction
+            near_threshold_lines.append(
+                f"  • {sig.symbol} ({sig.direction}) conv={sig.last_conviction:.0f} "
+                f"— {gap:.0f}pts below trigger"
+            )
+
+        # Key levels from signal metadata
+        entry_zone = (
+            sig.metadata.get("entry_zone")
+            or sig.metadata.get("key_level")
+            or sig.metadata.get("viper_entry")
+        )
+        if entry_zone:
+            key_level_lines.append(
+                f"  • {sig.symbol} ({sig.direction}): entry zone {entry_zone}, "
+                f"conv={sig.last_conviction:.0f}"
+            )
+
+    # DAWN active positions
+    dawn_lines = []
+    if today_str:
+        import csv
+        from pathlib import Path
+        csv_path = Path(f"logs/dawn_dryrun/{today_str}.csv")
+        if csv_path.exists():
+            try:
+                with open(csv_path) as f:
+                    for row in csv.DictReader(f):
+                        if row.get("status") == "ACTIVE":
+                            sym = row.get("symbol", "?")
+                            entry = row.get("entry_price", "n/a")
+                            sl = row.get("sl_price", "n/a")
+                            pnl = row.get("pnl_pct", "0")
+                            try:
+                                pnl_str = f"{float(pnl):+.2f}%"
+                            except Exception:
+                                pnl_str = pnl
+                            dawn_lines.append(
+                                f"  • {sym} entry=₹{entry} trailing_SL=₹{sl} pnl={pnl_str}"
+                            )
+            except Exception:
+                pass
+
+    phase = market_snapshot.phase.value if (market_snapshot and hasattr(market_snapshot, "phase")) else ""
+    if not phase and market_snapshot:
+        phase = _compute_market_phase(
+            getattr(market_snapshot, "nifty_pct", 0),
+            getattr(market_snapshot, "ad_ratio", 0.5),
+        )
+
+    summary["signals_near_threshold_text"] = (
+        "\n".join(near_threshold_lines) if near_threshold_lines else "None approaching threshold"
+    )
+    summary["key_levels_text"] = (
+        "\n".join(key_level_lines) if key_level_lines else "No entry zones recorded in signal metadata"
+    )
+    summary["dawn_positions_text"] = (
+        "\n".join(dawn_lines) if dawn_lines else "No active DAWN positions"
+    )
+    summary["regime_trigger_text"] = _build_regime_trigger_text(phase)
 
     return summary
 

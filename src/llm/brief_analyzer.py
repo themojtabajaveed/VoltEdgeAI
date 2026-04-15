@@ -751,6 +751,10 @@ def analyze_second_half(
     total_signals = signals_summary.get("total", 0)
     by_strat = signals_summary.get("by_strategy", {})
     above_thresh = signals_summary.get("above_threshold", 0)
+    signals_near_threshold_text = signals_summary.get("signals_near_threshold_text", "None approaching threshold")
+    key_levels_text = signals_summary.get("key_levels_text", "No entry zones recorded")
+    dawn_positions_text = signals_summary.get("dawn_positions_text", "No active DAWN positions")
+    regime_trigger_text = signals_summary.get("regime_trigger_text", "Monitor market for directional clarity.")
 
     prompt = f"""You are VoltEdge's mid-session risk analyst. Time: {now.strftime('%H:%M')} IST.
 
@@ -760,15 +764,28 @@ def analyze_second_half(
 
 ## System State
 - Active signals: {total_signals} (by strategy: {by_strat})
-- Signals above conviction threshold (70): {above_thresh}
+- Signals above conviction threshold: {above_thresh}
 
 ## Risk Flags
 {flags_block}
 
+## SYSTEM DATA — USE THIS, DO NOT IGNORE
+Signals approaching trigger threshold (conviction 50-65):
+{signals_near_threshold_text}
+
+DAWN dry-run positions currently active:
+{dawn_positions_text}
+
+Key price levels to watch:
+{key_levels_text}
+
+Regime change trigger for current phase ({phase}):
+{regime_trigger_text}
+
 Write:
-1. A 3-4 sentence afternoon outlook (likely trajectory, key levels to watch, what could change the picture)
+1. A 3-4 sentence afternoon outlook — reference specific symbols and conviction scores from above; reference specific price levels from above; do NOT use generic commentary; do NOT say "monitor Nifty" without a specific level
 2. List of current risk flags (keep from input + add any you identify)
-3. A 1-sentence watchlist highlight (most interesting setup for the afternoon)
+3. A 1-sentence watchlist highlight naming the most interesting signal from the near-threshold list above
 
 Return ONLY valid JSON:
 {{
