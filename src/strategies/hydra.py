@@ -40,6 +40,38 @@ from src.data_ingestion.event_scanner import EventScanner, MarketEvent
 logger = logging.getLogger(__name__)
 
 
+def _fetch_gap_pct(symbol: str) -> float:
+    """
+    Fetch estimated gap % vs previous close using yfinance.
+    Returns 0.0 on any failure — never raises.
+    Pre-market price via fast_info["last_price"] or regularMarketPrice.
+    """
+    try:
+        import yfinance as yf
+        nse_symbol = f"{symbol}.NS"
+        ticker = yf.Ticker(nse_symbol)
+        fi = ticker.fast_info
+
+        # Get current/pre-market price
+        current = fi["last_price"]
+        if not current:
+            current = getattr(fi, "last_price", None)
+
+        # Get previous close
+        prev_close = fi["previous_close"]
+        if not prev_close:
+            prev_close = getattr(fi, "previous_close", None)
+
+        if current and prev_close and prev_close > 0:
+            gap = ((current - prev_close) / prev_close) * 100
+            logger.debug(f"[HYDRA] {symbol} gap_pct={gap:.2f}% "
+                         f"(current={current}, prev={prev_close})")
+            return round(gap, 2)
+    except Exception as e:
+        logger.debug(f"[HYDRA] gap_pct fetch failed for {symbol}: {e}")
+    return 0.0
+
+
 class HydraRules:
     """
     HYDRA-specific TA interpretation.
@@ -294,7 +326,8 @@ class HydraStrategy(StrategyHead):
                 urgency=urgency,
                 catalyst_strength=_catalyst_strength,
                 sector_momentum=_sector_momentum,
-                # gap_pct, volume_signal, technical_setup, fii_flow: no data at scan time → defaults
+                gap_pct=_fetch_gap_pct(event.symbol),
+                # volume_signal, technical_setup, fii_flow: no data at scan time → defaults
             ))
 
         if entries:
