@@ -40,6 +40,7 @@ class BriefData:
     section_0_md: str = ""
     yesterday_learnings: list = field(default_factory=list)  # From system_learnings.json
     macro_plays: list = field(default_factory=list)  # From macro_sector_mapper
+    exchange_filings: list = field(default_factory=list)  # NSE/BSE corporate filings (last 24h)
 
 
 @dataclass
@@ -79,6 +80,11 @@ def generate_morning_brief() -> Optional[str]:
     # ── Stage 2: Event Classification ────────────────────────────────
     print(f"[VoltEdge] Stage 2: Classifying {len(brief_data.events)} events...")
     classified_events = _classify_events(brief_data.events)
+
+    # Merge high-urgency exchange filings into classified_events so they
+    # reach analyze_hot_stocks() and _build_events_section().
+    # Filings already have machine-computed urgency — no LLM classification needed.
+    classified_events = _merge_filing_events(classified_events, brief_data.exchange_filings)
 
     # Brief pause to let Groq TPM window reset after batch classification
     import time
@@ -213,8 +219,17 @@ def _collect_data() -> BriefData:
             logger.warning(f"[Brief/S1] Macro impact scan failed: {e}")
             return []
 
+    def _fetch_exchange_filings():
+        """Fetch NSE/BSE corporate filings from the last 24 hours."""
+        try:
+            from src.data_ingestion.exchange_filings import fetch_exchange_filings
+            return fetch_exchange_filings(hours_back=24)
+        except Exception as e:
+            logger.warning(f"[Brief/S1] Exchange filings fetch failed: {e}")
+            return []
+
     # Run all fetches in parallel
-    with ThreadPoolExecutor(max_workers=7, thread_name_prefix="BriefS1") as pool:
+    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="BriefS1") as pool:
         futures = {
             pool.submit(_fetch_global): "global",
             pool.submit(_fetch_events): "events",
@@ -223,6 +238,7 @@ def _collect_data() -> BriefData:
             pool.submit(_fetch_movers): "movers",
             pool.submit(_fetch_yesterday_learnings): "learnings",
             pool.submit(_fetch_macro_impacts): "macro_impacts",
+            pool.submit(_fetch_exchange_filings): "exchange_filings",
         }
         for future in as_completed(futures):
             name = futures[future]
@@ -244,6 +260,8 @@ def _collect_data() -> BriefData:
                     data.yesterday_learnings = result or []
                 elif name == "macro_impacts":
                     data.macro_plays = result or []
+                elif name == "exchange_filings":
+                    data.exchange_filings = result or []
             except Exception as e:
                 logger.warning(f"[Brief/S1] {name} future failed: {e}")
 
@@ -252,7 +270,8 @@ def _collect_data() -> BriefData:
         f"events={len(data.events)}, finnhub={len(data.finnhub_news)}, "
         f"brave={len(data.brave_news)}, movers={data.movers is not None}, "
         f"yesterday_learnings={len(data.yesterday_learnings)}, "
-        f"macro_plays={len(data.macro_plays)}"
+        f"macro_plays={len(data.macro_plays)}, "
+        f"exchange_filings={len(data.exchange_filings)}"
     )
     return data
 
@@ -319,6 +338,56 @@ def _classify_events(events: list) -> list:
             d["direction"] = "NEUTRAL"
             d["event_type"] = "UNCLASSIFIED"
         return event_dicts
+
+
+def _merge_filing_events(classified_events: list, exchange_filings: list) -> list:
+    """
+    Merge high-urgency NSE exchange filings (urgency >= 7) into classified_events.
+
+    Filings are already urgency-scored by exchange_filings.py — no LLM needed.
+    Deduplication: if a symbol already exists in classified_events with equal or
+    higher urgency, skip the filing. Otherwise insert the filing event.
+    Returns the merged list sorted by urgency descending.
+    """
+    if not exchange_filings:
+        return classified_events
+
+    high = [f for f in exchange_filings if f.urgency >= 7]
+    if not high:
+        return classified_events
+
+    # Build lookup of existing symbols → max urgency in classified_events
+    existing: dict[str, float] = {}
+    for e in classified_events:
+        sym = (e.get("symbol") or "").strip().upper()
+        if sym:
+            existing[sym] = max(existing.get(sym, 0.0), float(e.get("urgency", 0)))
+
+    merged = list(classified_events)
+    added = 0
+    for f in high:
+        sym = f.symbol.strip().upper()
+        if existing.get(sym, 0.0) >= f.urgency:
+            continue  # existing event is at least as urgent — skip
+        merged.append({
+            "symbol": f.symbol,
+            "headline": f.headline,
+            "category": f.category,
+            "body": "",
+            "source": f"NSE_FILING ({f.filed_at})",
+            "timestamp": f.filed_at,
+            "urgency": f.urgency,
+            "direction": "BUY" if f.urgency >= 8 else "NEUTRAL",
+            "event_type": f.category or "EXCHANGE_FILING",
+        })
+        existing[sym] = f.urgency
+        added += 1
+
+    if added:
+        merged.sort(key=lambda e: float(e.get("urgency", 0)), reverse=True)
+        logger.info(f"[Brief/S2] Merged {added} high-urgency exchange filings into classified_events")
+
+    return merged
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -497,7 +566,10 @@ def _assemble_report(
     ))
 
     # ── Section 2: What Happened Since Close ─────────────────────────
-    sections.append(_build_news_digest_section(analysis.news_digest))
+    sections.append(_build_news_digest_section(
+        analysis.news_digest,
+        exchange_filings=brief_data.exchange_filings,
+    ))
 
     # ── Section 3: Corporate Events & Catalysts ──────────────────────
     sections.append(_build_events_section(classified_events))
@@ -882,10 +954,36 @@ def _build_markets_section(
     return "\n".join(lines)
 
 
-def _build_news_digest_section(news_digest: dict) -> str:
+def _build_news_digest_section(
+    news_digest: dict,
+    exchange_filings: Optional[list] = None,
+) -> str:
     """Section 2: What happened since close."""
     lines = ["## 2. What Happened Since Close (17.5h Window)\n"]
 
+    # ── Exchange Filings subsection (NSE official, machine data) ─────────
+    # Shown first — highest-signal source (e.g. RAILTEL ₹608cr order win)
+    show_filings = [f for f in (exchange_filings or []) if f.urgency >= 5]
+    show_filings = sorted(show_filings, key=lambda f: -f.urgency)[:10]
+    if show_filings:
+        lines.append("### Exchange Filings (NSE Official)\n")
+        lines.append("| Symbol | Category | Urgency | Filed At | Headline |")
+        lines.append("|--------|----------|---------|----------|---------|")
+        for f in show_filings:
+            # Format filed_at: truncate ISO timestamp to "YYYY-MM-DD HH:MM"
+            try:
+                from datetime import datetime
+                filed_fmt = datetime.fromisoformat(f.filed_at).strftime("%Y-%m-%d %H:%M")
+            except (ValueError, AttributeError):
+                filed_fmt = str(f.filed_at)[:16]
+            hl = f.headline[:70] + ("…" if len(f.headline) > 70 else "")
+            lines.append(
+                f"| {f.symbol} | {f.category or '—'} | {f.urgency:.0f}/10 "
+                f"| {filed_fmt} | {hl} |"
+            )
+        lines.append("")
+
+    # ── LLM news digest (global summary + India impacts) ─────────────────
     summary = news_digest.get("global_summary", "")
     if summary:
         lines.append(summary)
