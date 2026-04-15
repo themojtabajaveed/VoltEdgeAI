@@ -76,15 +76,21 @@ def generate_mid_session_pulse(
                 except Exception as e:
                     logger.warning(f"[MidSession] {key} fetch failed: {e}")
 
-        # Fetch mover reasons via Brave (after movers are available)
+        # Fetch mover reasons via Brave (after movers are available), then
+        # apply strict symbol-match filter to prevent market-wide headline bleed.
         if movers:
             try:
                 from src.llm.brief_analyzer import fetch_mover_reasons
-                mover_reasons = fetch_mover_reasons(
+                raw_reasons = fetch_mover_reasons(
                     movers.get("gainers", []),
                     movers.get("losers", []),
                     max_per_side=3,
                 )
+                all_symbols = (
+                    [g.get("symbol", "") for g in movers.get("gainers", [])] +
+                    [l.get("symbol", "") for l in movers.get("losers", [])]
+                )
+                mover_reasons = _filter_mover_reasons(raw_reasons, all_symbols)
             except Exception as e:
                 logger.warning(f"[MidSession] Mover reasons failed: {e}")
 
@@ -182,7 +188,7 @@ def _assemble_report(
     # ── Section 0: Header ────────────────────────────────────────────────
     lines.append(f"# VoltEdge Mid-Session Pulse — {today} {now.strftime('%H:%M')} IST\n")
     if market_snapshot and conviction_engine:
-        phase = conviction_engine.phase.value.upper()
+        phase = _compute_market_phase(market_snapshot.nifty_pct, market_snapshot.ad_ratio)
         lines.append(
             f"**Market Phase: {phase}** | "
             f"Nifty: {market_snapshot.nifty_pct:+.2f}% | "
@@ -447,7 +453,7 @@ def _assemble_report(
         lines.append(f"{outlook}\n")
     else:
         if market_snapshot and conviction_engine:
-            phase = conviction_engine.phase.value.upper()
+            phase = _compute_market_phase(market_snapshot.nifty_pct, market_snapshot.ad_ratio)
             watching = len(conviction_engine.get_active_signals()) if conviction_engine.get_active_signals() else 0
             lines.append(
                 f"Phase: {phase}. Nifty {market_snapshot.nifty_pct:+.2f}% at midday. "
@@ -483,6 +489,106 @@ def _fetch_movers() -> dict:
         return {}
 
 
+def _filter_mover_reasons(
+    raw_reasons: Dict[str, str],
+    all_symbols: List[str],
+) -> Dict[str, str]:
+    """
+    Post-filter Brave-fetched mover reasons to eliminate market-wide headline bleed.
+
+    Rules applied per symbol:
+      1. Exact ticker match required — reason must contain the symbol as a
+         whole word (case-insensitive). Partial-word matches (e.g. "OIL" in
+         "BOIL") are rejected.
+      2. Negative filter — reject if headline contains any market-wide signal
+         phrase WITHOUT also containing the exact ticker symbol:
+           "Nifty", "Sensex", "market up", "investors gain", "lakh crore",
+           "stock market", "equity market", "share market", "benchmark"
+      3. Truncate clean matches to 100 chars.
+      4. Prepend confidence label:
+           [News] — exact ticker found in headline
+           [News (name match)] — already annotated by upstream caller
+           [No catalyst identified] — no clean match
+    """
+    import re
+
+    # Market-wide phrases that signal a generic headline (not stock-specific)
+    _MARKET_WIDE = re.compile(
+        r"\b(nifty|sensex|market up|investors gain|lakh crore|"
+        r"stock market|equity market|share market|benchmark)\b",
+        re.IGNORECASE,
+    )
+
+    filtered: Dict[str, str] = {}
+    for sym in all_symbols:
+        if not sym:
+            continue
+        raw = (raw_reasons.get(sym) or "").strip()
+        if not raw or raw == "—":
+            filtered[sym] = "[No catalyst identified]"
+            continue
+
+        sym_upper = sym.strip().upper()
+        # Whole-word pattern for the ticker (handles 3-10 char symbols)
+        sym_pattern = re.compile(r"\b" + re.escape(sym_upper) + r"\b", re.IGNORECASE)
+        ticker_present = bool(sym_pattern.search(raw))
+
+        # Check for market-wide contamination
+        market_wide_hit = bool(_MARKET_WIDE.search(raw))
+
+        if market_wide_hit and not ticker_present:
+            # Market-wide headline with NO mention of this ticker → reject
+            logger.warning(
+                f"[MidSession] Rejected market-wide headline for {sym}: {raw[:60]!r}"
+            )
+            filtered[sym] = "[No catalyst identified]"
+            continue
+
+        if not ticker_present:
+            # Headline doesn't mention the ticker at all → not a clean match
+            logger.warning(
+                f"[MidSession] No ticker match for {sym} in headline: {raw[:60]!r}"
+            )
+            filtered[sym] = "[No catalyst identified]"
+            continue
+
+        # Clean match — truncate and label
+        snippet = raw[:100].rstrip()
+        if len(raw) > 100:
+            snippet += "…"
+        filtered[sym] = f"[News] {snippet}"
+
+    return filtered
+
+
+def _compute_market_phase(nifty_pct: float, ad_ratio: float) -> str:
+    """
+    Derive market phase from index move magnitude + breadth (A/D ratio).
+
+    Matrix:
+      index ≥1.5% + broad  → TRENDING        (strong move, wide participation)
+      index ≥1.5% + narrow → LARGE-CAP LED   (strong index, thin breadth)
+      index ≥0.5% + broad  → STEADY          (moderate move, decent breadth)
+      index ≥0.5% + narrow → SELECTIVE       (moderate move, few stocks moving)
+      index <0.5% + broad  → SIDEWAYS-BROAD  (flat index but breadth present)
+      flat + narrow        → CHOPPY           (genuinely undirected market)
+
+    Fixes the regression where Nifty +1.59% / A/D 0.50 returned CHOPPY.
+    """
+    index_move = abs(nifty_pct)
+    if index_move >= 1.5 and ad_ratio >= 0.55:
+        return "TRENDING"
+    elif index_move >= 1.5 and ad_ratio < 0.55:
+        return "LARGE-CAP LED"
+    elif index_move >= 0.5 and ad_ratio >= 0.55:
+        return "STEADY"
+    elif index_move >= 0.5 and ad_ratio < 0.55:
+        return "SELECTIVE"
+    elif index_move < 0.5 and ad_ratio >= 0.55:
+        return "SIDEWAYS-BROAD"
+    return "CHOPPY"
+
+
 def _build_market_data(market_snapshot, conviction_engine, movers) -> dict:
     """Build market_data dict for LLM calls."""
     data = {
@@ -499,7 +605,9 @@ def _build_market_data(market_snapshot, conviction_engine, movers) -> dict:
         data["vix"] = market_snapshot.vix
         data["ad_ratio"] = market_snapshot.ad_ratio
         data["sector_changes"] = market_snapshot.sector_changes or {}
-    if conviction_engine:
+    if conviction_engine and market_snapshot:
+        data["phase"] = _compute_market_phase(market_snapshot.nifty_pct, market_snapshot.ad_ratio)
+    elif conviction_engine:
         data["phase"] = conviction_engine.phase.value.upper()
     if movers:
         data["top_gainers"] = movers.get("gainers", [])
