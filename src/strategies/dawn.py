@@ -396,6 +396,210 @@ def send_dawn_email(candidates: list[dict]) -> bool:
         return False
 
 
+# ── Dry-Run Execution ─────────────────────────────────────────────────────
+
+_DRYRUN_CAPITAL = 5000.0  # hypothetical capital per trade (₹)
+
+
+def _yf_last_price(symbol: str) -> float:
+    """Fetch last traded / pre-market price for an NSE symbol via yfinance. 0.0 on failure."""
+    try:
+        import yfinance as yf
+        fi = yf.Ticker(f"{symbol}.NS").fast_info
+        price = fi["last_price"]
+        return float(price) if price else 0.0
+    except Exception as e:
+        logger.debug(f"[DAWN] _yf_last_price({symbol}) failed: {e}")
+        return 0.0
+
+
+def execute_dawn_dryrun(candidates: list[dict], entry_prices: dict[str, float]) -> None:
+    """
+    Record DAWN dry-run entries at 09:15 open price.
+
+    candidates   — output of select_dawn_candidates()
+    entry_prices — {symbol: open_price}; missing symbols fetched via yfinance.
+
+    For each candidate:
+      • entry_price from entry_prices or yfinance fallback
+      • initial_sl  = entry_price * 0.985 (LONG) / * 1.015 (SHORT)
+      • status = ACTIVE
+    Appends rows to logs/dawn_dryrun/YYYY-MM-DD.csv (header written once).
+    """
+    if not candidates:
+        logger.info("[DAWN] execute_dawn_dryrun: no candidates — nothing to record")
+        return
+
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    os.makedirs(CSV_DIR, exist_ok=True)
+    csv_path = os.path.join(CSV_DIR, f"{today_str}.csv")
+    file_is_new = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
+
+    try:
+        with open(csv_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+            if file_is_new:
+                writer.writeheader()
+
+            for c in candidates:
+                symbol = c.get("symbol", "")
+                if not symbol:
+                    continue
+
+                direction = c.get("direction", "BUY")
+
+                # Resolve entry price
+                entry_price = float(entry_prices.get(symbol, 0.0))
+                if not entry_price:
+                    entry_price = _yf_last_price(symbol)
+                if not entry_price:
+                    logger.warning(f"[DAWN] {symbol}: no entry price — skipping dryrun entry")
+                    continue
+
+                # Initial SL and quantity
+                if direction in ("LONG", "BUY"):
+                    sl_price = round(entry_price * 0.985, 2)
+                else:
+                    sl_price = round(entry_price * 1.015, 2)
+                quantity = max(1, int(_DRYRUN_CAPITAL / entry_price))
+
+                writer.writerow({
+                    "date": today_str,
+                    "symbol": symbol,
+                    "direction": direction,
+                    "catalyst": c.get("event_summary", ""),
+                    "catalyst_strength": c.get("catalyst_strength", ""),
+                    "dawn_score": c.get("dawn_conviction", 0),
+                    "entry_price": f"{entry_price:.2f}",
+                    "current_price": f"{entry_price:.2f}",
+                    "sl_price": f"{sl_price:.2f}",
+                    "sl_type": "INITIAL_1.5",
+                    "pnl_pct": "+0.00",
+                    "pnl_rupees": "+0.00",
+                    "status": "ACTIVE",
+                    "exit_price": "",
+                    "exit_time": "",
+                    "exit_reason": "",
+                    "max_favorable": "+0.00",
+                    "max_adverse": "+0.00",
+                    "liquidity_warning": "False",
+                    "notes": f"HYDRA_DRYRUN qty={quantity}",
+                })
+                logger.info(
+                    f"[DAWN] Dryrun entry: {symbol} {direction} @ {entry_price:.2f} "
+                    f"SL={sl_price:.2f} qty={quantity}"
+                )
+    except Exception as e:
+        logger.error(f"[DAWN] execute_dawn_dryrun failed: {e}")
+
+
+def update_dawn_dryrun() -> None:
+    """
+    Update ACTIVE rows in today's DAWN dryrun CSV.
+    Called every 15 minutes during market hours (09:15–15:30).
+
+    For each ACTIVE row:
+      • Fetch current price via yfinance
+      • Update current_price, pnl_pct, pnl_rupees, max_favorable, max_adverse
+      • Trail SL: LONG → max(sl, current * 0.985) | SHORT → min(sl, current * 1.015)
+      • Exit if SL hit: status=CLOSED, exit_reason=SL_HIT
+    No time stop — rows remain ACTIVE until SL is hit.
+    """
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    csv_path = os.path.join(CSV_DIR, f"{today_str}.csv")
+
+    if not os.path.exists(csv_path):
+        return
+
+    try:
+        with open(csv_path, "r", newline="") as f:
+            rows = list(csv.DictReader(f))
+    except Exception as e:
+        logger.error(f"[DAWN] update_dawn_dryrun read failed: {e}")
+        return
+
+    any_updated = False
+
+    for row in rows:
+        if row.get("status") != "ACTIVE":
+            continue
+
+        symbol = row.get("symbol", "")
+        if not symbol:
+            continue
+
+        current_price = _yf_last_price(symbol)
+        if not current_price:
+            logger.debug(f"[DAWN] {symbol}: no price — skipping update")
+            continue
+
+        direction = row.get("direction", "BUY")
+
+        try:
+            entry_price = float(row.get("entry_price") or 0)
+            sl_price = float(row.get("sl_price") or 0)
+            max_fav = float(row.get("max_favorable") or 0)
+            max_adv = float(row.get("max_adverse") or 0)
+        except ValueError:
+            logger.debug(f"[DAWN] {symbol}: unparseable CSV fields — skipping")
+            continue
+
+        if not entry_price or not sl_price:
+            continue
+
+        # P&L
+        if direction in ("LONG", "BUY"):
+            pnl_pct = (current_price - entry_price) / entry_price * 100
+        else:
+            pnl_pct = (entry_price - current_price) / entry_price * 100
+        quantity = max(1, int(_DRYRUN_CAPITAL / entry_price))
+        pnl_rupees = pnl_pct / 100 * entry_price * quantity
+
+        max_fav = max(max_fav, pnl_pct)
+        max_adv = min(max_adv, pnl_pct)
+
+        # SL check → exit
+        sl_hit = (
+            (direction in ("LONG", "BUY") and current_price <= sl_price) or
+            (direction == "SHORT" and current_price >= sl_price)
+        )
+        if sl_hit:
+            row["status"] = "CLOSED"
+            row["exit_price"] = f"{current_price:.2f}"
+            row["exit_time"] = datetime.now(IST).strftime("%H:%M:%S")
+            row["exit_reason"] = "SL_HIT"
+            logger.info(f"[DAWN] {symbol} SL_HIT @ {current_price:.2f} (SL was {sl_price:.2f})")
+        else:
+            # Trail SL (ratchet only — never moves against position)
+            if direction in ("LONG", "BUY"):
+                new_sl = max(sl_price, round(current_price * 0.985, 2))
+            else:
+                new_sl = min(sl_price, round(current_price * 1.015, 2))
+            if new_sl != sl_price:
+                row["sl_price"] = f"{new_sl:.2f}"
+                logger.debug(f"[DAWN] {symbol} SL trailed {sl_price:.2f} → {new_sl:.2f}")
+
+        row["current_price"] = f"{current_price:.2f}"
+        row["pnl_pct"] = f"{pnl_pct:+.2f}"
+        row["pnl_rupees"] = f"{pnl_rupees:+.2f}"
+        row["max_favorable"] = f"{max_fav:+.2f}"
+        row["max_adverse"] = f"{max_adv:+.2f}"
+        any_updated = True
+
+    if not any_updated:
+        return
+
+    try:
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+        active_count = sum(1 for r in rows if r.get("status") == "ACTIVE")
+        logger.info(f"[DAWN] Dryrun CSV updated — {active_count} still ACTIVE")
+    except Exception as e:
+        logger.error(f"[DAWN] update_dawn_dryrun write failed: {e}")
+
+
 # ── Main Strategy Class ─────────────────────────────────────────────────
 
 class DawnStrategy:

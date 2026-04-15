@@ -39,7 +39,7 @@ from src.tools.auto_login import auto_refresh_access_token
 from src.data_ingestion.news_context import NewsClient
 from src.strategies.hydra import HydraStrategy
 from src.strategies.viper import ViperStrategy
-from src.strategies.dawn import DawnStrategy
+from src.strategies.dawn import DawnStrategy, execute_dawn_dryrun, update_dawn_dryrun, select_dawn_candidates
 from src.strategies.slot_manager import SlotManager, CONFLUENCE_BONUS
 from src.strategies.technical_body import TechnicalBody, reset_streaming_state, get_or_create_streaming_state, _streaming_states
 from src.trading.exit_monitor import ExitMonitorThread
@@ -300,6 +300,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     last_dawn_scan_date = None
     last_dawn_pre_scan_date = None  # Prevents pre_market_scan from re-firing every 60s
     last_dawn_manage_time = None
+    last_dawn_dryrun_entry_date = None   # HYDRA dryrun entries recorded once at 09:15
+    last_dawn_dryrun_update_time = None  # HYDRA dryrun update cadence (15-min)
 
     # ── Mid-session bearish discovery (SHORT-4) ──
     last_neg_pulse_date = None
@@ -339,6 +341,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                 last_dawn_scan_date = None
                 last_dawn_pre_scan_date = None
                 last_dawn_manage_time = None
+                last_dawn_dryrun_entry_date = None
+                last_dawn_dryrun_update_time = None
                 slot_manager.reset_daily()
                 last_hydra_scan_date = None
                 grok_call_count = 0
@@ -760,6 +764,26 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                 print(f"  🌅 DAWN: {active} virtual entries recorded at open")
                             except Exception as dawn_entry_e:
                                 logging.error(f"DAWN entry recording failed: {dawn_entry_e}")
+
+                    # ── DAWN: HYDRA dryrun entries at 09:15 (once per day) ──
+                    if dt_time(9, 15) <= current_time <= dt_time(9, 20) and last_dawn_dryrun_entry_date != current_date:
+                        try:
+                            hydra_dawn_picks = select_dawn_candidates(min_conviction=50)
+                            execute_dawn_dryrun(hydra_dawn_picks, {})
+                            if hydra_dawn_picks:
+                                print(f"  🌅 DAWN DRYRUN: {len(hydra_dawn_picks)} HYDRA entries recorded")
+                        except Exception as dryrun_e:
+                            logging.error(f"DAWN dryrun entry failed: {dryrun_e}")
+                        last_dawn_dryrun_entry_date = current_date
+
+                    # ── DAWN: HYDRA dryrun update every 15 min ──
+                    if (last_dawn_dryrun_update_time is None or
+                            (now - last_dawn_dryrun_update_time).total_seconds() >= 900):
+                        try:
+                            update_dawn_dryrun()
+                            last_dawn_dryrun_update_time = now
+                        except Exception as dryrun_upd_e:
+                            logging.error(f"DAWN dryrun update failed: {dryrun_upd_e}")
 
                     # ── DAWN: Manage virtual positions every 5 min ──
                     if dawn._signals and any(s.status == "ACTIVE" for s in dawn._signals):
