@@ -408,7 +408,8 @@ def _assemble_report(
                 det_price = sig.metadata.get("detection_price")
                 current_price = None
                 move_pct_str = "—"
-                det_price_str = "—"
+                # Use "n/a" not blank so the reader knows fetch was attempted
+                det_price_str = "n/a"
 
                 if det_price:
                     det_price_str = f"{det_price:.2f}"
@@ -418,7 +419,7 @@ def _assemble_report(
                         move_pct = (current_price - det_price) / det_price * 100
                         move_pct_str = f"{move_pct:+.1f}%"
 
-                current_str = f"{current_price:.2f}" if current_price else "—"
+                current_str = f"{current_price:.2f}" if current_price else "n/a"
                 dry_tag = " [DRY]" if getattr(sig, "is_dry_run", False) else ""
                 win_status = getattr(sig, "window_status", "ACTIVE")
 
@@ -430,6 +431,7 @@ def _assemble_report(
 
             lines.append(f"\n**Total**: {len(active)} signals watching, "
                         f"threshold = {conviction_engine._threshold:.0f}")
+            lines.append("*n/a = price unavailable outside market hours or fetch failed*")
             lines.append("")
 
             # Triggered/expired counts
