@@ -21,3 +21,10 @@ File: SMTP utility file (search "smtplib") + src/reports/pre_market_brief.py
 Fix needed: Verify SMTP config, check for silent exception swallowing
 Status: FIXED 2026-04-14
 Fix applied: Replaced bare `except Exception: pass` in `_generate_emergency_fallback()` with `except Exception as fallback_e: logger.error(...)` — src/reports/pre_market_brief.py line 98
+
+
+## COMPLETED FEATURES
+- 2026-04-15: DAWN full pipeline — HYDRA→DAWN→email→dryrun→trailing SL
+- 2026-04-15: DAWN 8-layer conviction scorer (100pt system)
+- 2026-04-14: Holiday Guard — 15 market jobs suppressed on NSE holidays
+- 2026-04-14: BUG-001/002/003 fixed
