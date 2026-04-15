@@ -71,7 +71,10 @@ src/
 - Always run the service and check journalctl after any change before committing
 - ALWAYS work on main branch directly. Never create a new branch.
 - Before first commit, verify: git branch --show-current must return "main"
-
+- Before any commit, verify you are on main: run `git branch --show-current`
+- If in a worktree (path contains .claude/worktrees), run: cd ~/VoltEdgeAI && git checkout main before committing
+- Never push to a feature branch. Always push directly to main.
+- Never force-push under any circumstances.
 ## Communication Style
 - Be brief and surgical in explanations
 - Always show BEFORE and AFTER for any code change
