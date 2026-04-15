@@ -343,6 +343,12 @@ def _assemble_report(
 
     lines.append("---\n")
 
+    # ── Section 3b: DAWN Pre-Market Positions ────────────────────────────
+    dawn_section = _build_dawn_positions_section(str(today))
+    if dawn_section:
+        lines.append(dawn_section)
+        lines.append("\n---\n")
+
     # ── Section 4: Morning Brief Accuracy Check ──────────────────────────
     lines.append("## 4. Morning Brief Accuracy Check\n")
 
@@ -673,6 +679,99 @@ def _compute_risk_flags(market_snapshot, conviction_engine, risk_state, risk_cfg
             pass
 
     return flags
+
+
+def _build_dawn_positions_section(date_str: str) -> str:
+    """
+    Read today's DAWN dry-run CSV and render active + closed positions.
+    Returns empty string if no DAWN file found.
+    """
+    import csv
+    from pathlib import Path
+
+    csv_path = Path(f"logs/dawn_dryrun/{date_str}.csv")
+    if not csv_path.exists():
+        return ""
+
+    try:
+        with open(csv_path) as f:
+            rows = list(csv.DictReader(f))
+    except Exception as e:
+        logger.warning(f"[MidSession] DAWN CSV read failed: {e}")
+        return ""
+
+    if not rows:
+        return ""
+
+    active = [r for r in rows if r.get("status") == "ACTIVE"]
+    closed = [r for r in rows if r.get("status") == "CLOSED"]
+
+    lines = ["## 3b. DAWN Pre-Market Positions", ""]
+
+    if not active and not closed:
+        lines.append("No DAWN positions today.")
+        return "\n".join(lines)
+
+    # Active positions table
+    if active:
+        lines.append(f"**Active: {len(active)} position(s)**")
+        lines.append("")
+        lines.append("| Symbol | Dir | Entry | Current | PnL% | Trailing SL | Conviction |")
+        lines.append("|--------|-----|-------|---------|------|-------------|------------|")
+        for r in active:
+            symbol = r.get("symbol", "?")
+            direction = r.get("direction", "?")
+            entry = r.get("entry_price", "n/a")
+            current = r.get("current_price", "n/a")
+            pnl = r.get("pnl_pct", "0.0")
+            sl = r.get("sl_price", "n/a")
+            conv = r.get("dawn_score", "?")
+            try:
+                pnl_f = float(pnl)
+                pnl_str = f"+{pnl_f:.2f}%" if pnl_f >= 0 else f"{pnl_f:.2f}%"
+            except Exception:
+                pnl_str = pnl
+            lines.append(
+                f"| {symbol} | {direction} | ₹{entry} | ₹{current} | {pnl_str} | ₹{sl} | {conv} |"
+            )
+        lines.append("")
+
+    # Closed positions summary
+    if closed:
+        lines.append(f"**Closed today: {len(closed)} position(s)**")
+        lines.append("")
+        lines.append("| Symbol | Dir | Entry | Exit | PnL% | Exit Reason |")
+        lines.append("|--------|-----|-------|------|------|-------------|")
+        for r in closed:
+            symbol = r.get("symbol", "?")
+            direction = r.get("direction", "?")
+            entry = r.get("entry_price", "n/a")
+            exit_p = r.get("exit_price", "n/a")
+            pnl = r.get("pnl_pct", "0.0")
+            reason = r.get("exit_reason", "?")
+            try:
+                pnl_f = float(pnl)
+                pnl_str = f"+{pnl_f:.2f}%" if pnl_f >= 0 else f"{pnl_f:.2f}%"
+            except Exception:
+                pnl_str = pnl
+            lines.append(
+                f"| {symbol} | {direction} | ₹{entry} | ₹{exit_p} | {pnl_str} | {reason} |"
+            )
+        lines.append("")
+
+    # Summary line
+    total_pnl = 0.0
+    for r in closed:
+        try:
+            total_pnl += float(r.get("pnl_pct", 0))
+        except Exception:
+            pass
+
+    if closed:
+        sign = "+" if total_pnl >= 0 else ""
+        lines.append(f"**DAWN closed P&L today: {sign}{total_pnl:.2f}%**")
+
+    return "\n".join(lines)
 
 
 def _load_today_predictions(today: date) -> list:
