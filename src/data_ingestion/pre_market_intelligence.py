@@ -45,6 +45,7 @@ class PreMarketIntelligence:
     signals_total: int = 8
     incomplete: bool = False
     missing_count: int = 0
+    fii_dii_date: Optional[str] = None  # "YYYY-MM-DD" IST date when FII/DII was fetched
 
     @property
     def tier_name(self) -> str:
@@ -93,10 +94,28 @@ class PreMarketIntelligence:
             "| Signal | Value | Δ% | Contribution | Direction |",
             "|--------|-------|-----|-------------|-----------|",
         ]
+        # FIX-3: compute FII/DII staleness tag once for reuse in signal rows
+        _fii_stale_tag = ""
+        if self.fii_dii_date:
+            try:
+                import datetime, zoneinfo
+                _IST = zoneinfo.ZoneInfo("Asia/Kolkata")
+                _today_ist = datetime.datetime.now(_IST).date()
+                _fetch_date = datetime.date.fromisoformat(self.fii_dii_date)
+                _days_old = (_today_ist - _fetch_date).days
+                if _days_old > 1:
+                    _fii_stale_tag = f" ⚠️ stale ({_days_old}d old)"
+            except Exception:
+                pass
+        else:
+            _fii_stale_tag = " ⚠️ date unknown"
+
         for sig in self.signals:
             if sig.available:
                 pts_str = f"{sig.points:+d}"
-                lines.append(f"| {sig.name} | {sig.value_str} | — | {pts_str} | {sig.label} |")
+                # Append staleness tag to FII/DII rows
+                _stale = _fii_stale_tag if sig.name in ("FII Cash", "DII Offset") else ""
+                lines.append(f"| {sig.name} | {sig.value_str}{_stale} | — | {pts_str} | {sig.label} |")
             else:
                 lines.append(f"| {sig.name} | N/A | — | 0 | ⚪ Unavailable |")
 
@@ -124,6 +143,21 @@ class PreMarketIntelligence:
             verdict = "Bearish or unclear signals. Reduced conviction."
 
         lines.append(f"**Verdict: {verdict}**")
+
+        # FIX-2: Open Bias projection derived from composite score
+        s = self.composite_score
+        if s >= 85:
+            _bias = "Gap-up probability: VERY HIGH"
+        elif s >= 70:
+            _bias = "Gap-up probability: HIGH"
+        elif s >= 56:
+            _bias = "Gap-up probability: MODERATE"
+        elif s >= 41:
+            _bias = "Gap-up probability: LOW"
+        else:
+            _bias = "Gap-down probability: ELEVATED"
+        lines.append(f"**Open Bias: {_bias} (composite {s}/100)**")
+
         lines.append(f"\n{unavail_str}")
 
         # PCR note removed — PCR excluded from morning brief (market hours only)
@@ -392,6 +426,7 @@ def compute_pre_market_intelligence(
     dii_net_cr: Optional[float] = None,
     vix_level: Optional[float] = None,
     pcr: Optional[float] = None,
+    fii_dii_date: Optional[str] = None,
 ) -> Optional[PreMarketIntelligence]:
     """
     Compute the composite pre-market score from all available signals.
@@ -447,6 +482,7 @@ def compute_pre_market_intelligence(
         signals_total=total_signals,
         incomplete=incomplete,
         missing_count=missing_count,
+        fii_dii_date=fii_dii_date,
     )
 
     logger.info(result.format_log_line())
@@ -605,9 +641,12 @@ def fetch_all_global_data(kite_client=None) -> dict:
     # 2. FII/DII from NSE
     try:
         from src.data_ingestion.nse_scraper import get_institutional_signal
+        import datetime as _dt, zoneinfo as _zi
         inst = get_institutional_signal()
         data["fii_net_cr"] = inst.get("fii_net_cr") or None
         data["dii_net_cr"] = inst.get("dii_net_cr") or None
+        # Record fetch date (IST) for staleness check at display time
+        data["fii_dii_date"] = _dt.datetime.now(_zi.ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
     except Exception as e:
         logger.warning(f"[PreMkt] FII/DII fetch failed: {e}")
 
@@ -720,6 +759,7 @@ def fetch_and_compute(
             dii_net_cr=preloaded_data.get("dii_net_cr"),
             vix_level=preloaded_data.get("vix_level"),
             pcr=preloaded_data.get("pcr"),
+            fii_dii_date=preloaded_data.get("fii_dii_date"),
         )
 
     spy_change = None
@@ -763,15 +803,19 @@ def fetch_and_compute(
     # 2. FII/DII from existing macro_context or fresh fetch
     fii_net = None
     dii_net = None
+    fii_dii_date = None
     if macro_context:
         fii_net = macro_context.fii_net_cr if macro_context.fii_net_cr != 0 else None
         dii_net = macro_context.dii_net_cr if macro_context.dii_net_cr != 0 else None
+        # macro_context has no date field — mark as unknown
     else:
         try:
             from src.data_ingestion.nse_scraper import get_institutional_signal
+            import datetime as _dt2, zoneinfo as _zi2
             inst = get_institutional_signal()
             fii_net = inst.get("fii_net_cr") or None
             dii_net = inst.get("dii_net_cr") or None
+            fii_dii_date = _dt2.datetime.now(_zi2.ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
         except Exception as e:
             logger.warning(f"[PreMkt] FII/DII fetch failed: {e}")
 
@@ -829,4 +873,5 @@ def fetch_and_compute(
         dii_net_cr=dii_net,
         vix_level=vix_level,
         pcr=pcr,
+        fii_dii_date=fii_dii_date,
     )
