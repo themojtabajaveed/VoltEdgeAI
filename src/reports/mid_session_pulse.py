@@ -347,30 +347,32 @@ def _assemble_report(
     lines.append("## 4. Morning Brief Accuracy Check\n")
 
     if predictions_status:
-        correct = sum(1 for p in predictions_status if p.get("status") == "CORRECT")
-        wrong = sum(1 for p in predictions_status if p.get("status") == "WRONG")
-        flat = sum(1 for p in predictions_status if p.get("status") == "FLAT")
-        no_data = sum(1 for p in predictions_status if p.get("status") == "NO_DATA")
-        total_scored = correct + wrong + flat
+        scored = [p for p in predictions_status if p.get("status") != "⚪ No data"]
+        total_scored = len(scored)
+        total_score = sum(p.get("score", 0.0) for p in scored)
+
+        dir_correct = sum(1 for p in scored if p.get("score", 0) > 0)
+        zone_valid = [p for p in scored if p.get("price_zone_grade", "N/A") not in ("N/A", "")]
+        zone_correct = sum(1 for p in zone_valid if p.get("price_zone_grade") == "✅ IN ZONE")
 
         if total_scored > 0:
-            accuracy = correct / total_scored * 100
-            lines.append(f"**Score: {correct}/{total_scored} correct ({accuracy:.0f}%)**\n")
+            pct = total_score / total_scored * 100
+            lines.append(
+                f"**Score: {total_score:.1f}/{total_scored} ({pct:.0f}%)**  "
+                f"Direction accuracy: {dir_correct}/{total_scored} correct"
+                + (f" | Price zone accuracy: {zone_correct}/{len(zone_valid)} in zone"
+                   if zone_valid else "")
+                + "\n"
+            )
 
-        lines.append("| Symbol | Predicted | Key Level | Current Price | Actual Chg% | Status |")
-        lines.append("|--------|-----------|-----------|---------------|-------------|--------|")
+        lines.append("| Symbol | Predicted | Key Level | Price Zone | Current Price | Actual Chg% | Status |")
+        lines.append("|--------|-----------|-----------|------------|---------------|-------------|--------|")
         for p in predictions_status:
-            status_emoji = {
-                "CORRECT": "✅ Correct",
-                "WRONG": "❌ Wrong",
-                "FLAT": "➖ Flat",
-                "NO_DATA": "⚪ No data",
-            }.get(p.get("status", ""), p.get("status", "?"))
             actual_pct = f"{p['actual_pct']:+.1f}%" if p.get("actual_pct") is not None else "N/A"
             lines.append(
                 f"| {p.get('symbol', '?')} | {p.get('predicted', '?')} | "
-                f"{p.get('key_level', '—')} | {p.get('current_price', 'N/A')} | "
-                f"{actual_pct} | {status_emoji} |"
+                f"{p.get('key_level', '—')} | {p.get('price_zone_grade', 'N/A')} | "
+                f"{p.get('current_price', 'N/A')} | {actual_pct} | {p.get('status', '?')} |"
             )
         lines.append("")
 
@@ -686,6 +688,68 @@ def _load_today_predictions(today: date) -> list:
         return []
 
 
+def _grade_prediction(
+    predicted_direction: str,
+    actual_chg_pct: Optional[float],
+    key_level_str: str,
+    current_price: Optional[float],
+) -> tuple[str, float, str]:
+    """
+    Grade a morning prediction on direction AND price zone.
+
+    Returns (status_label, score, price_zone_grade).
+      score: 1.0 = fully correct, 0.75 = direction only, 0.5 = direction ok / price wrong, 0.0 = wrong
+    """
+    if actual_chg_pct is None:
+        return "⚪ No data", 0.0, "N/A"
+
+    # Grade 1 — Direction
+    if predicted_direction == "BULLISH" and actual_chg_pct > 0.5:
+        direction_correct = True
+    elif predicted_direction == "BEARISH" and actual_chg_pct < -0.5:
+        direction_correct = True
+    elif predicted_direction == "NEUTRAL" and abs(actual_chg_pct) <= 0.5:
+        direction_correct = True
+    else:
+        direction_correct = False
+
+    # Grade 2 — Price zone (only when key_level provided and current_price available)
+    price_zone_grade = "N/A"
+    key = (key_level_str or "").strip()
+    if key and key != "—" and current_price:
+        try:
+            parts = key.replace(" ", "").split("-")
+            if len(parts) == 2:
+                zone_low = float(parts[0])
+                zone_high = float(parts[1])
+                zone_mid = (zone_low + zone_high) / 2
+            else:
+                zone_mid = float(parts[0])
+                zone_low = zone_mid * 0.98
+                zone_high = zone_mid * 1.02
+
+            if abs(zone_mid - current_price) / current_price > 0.20:
+                price_zone_grade = "❌ PRICE WRONG"   # zone was hallucinated
+            elif zone_low <= current_price <= zone_high:
+                price_zone_grade = "✅ IN ZONE"
+            elif current_price > zone_high:
+                price_zone_grade = "⬆️ ABOVE ZONE"
+            else:
+                price_zone_grade = "⬇️ BELOW ZONE"
+        except Exception:
+            price_zone_grade = "N/A"
+
+    # Final status + score
+    if not direction_correct:
+        return "❌ Wrong", 0.0, price_zone_grade
+    if price_zone_grade == "❌ PRICE WRONG":
+        return "⚠️ Direction OK / Price Wrong", 0.5, price_zone_grade
+    if price_zone_grade in ("✅ IN ZONE", "N/A"):
+        return "✅ Correct", 1.0, price_zone_grade
+    # Direction correct, zone exists but price is above/below
+    return "✅ Direction correct", 0.75, price_zone_grade
+
+
 def _check_predictions(predictions: list, live_client) -> List[dict]:
     """Check morning predictions against current prices."""
     results = []
@@ -697,25 +761,19 @@ def _check_predictions(predictions: list, live_client) -> List[dict]:
         current_pct = _get_current_pct(sym, live_client)
         current_price = _get_current_price_value(sym, live_client)
 
-        if current_pct is not None:
-            if predicted_dir == "BULLISH" and current_pct > 0.5:
-                status = "CORRECT"
-            elif predicted_dir == "BEARISH" and current_pct < -0.5:
-                status = "CORRECT"
-            elif abs(current_pct) <= 0.5:
-                status = "FLAT"
-            else:
-                status = "WRONG"
-        else:
-            status = "NO_DATA"
+        status, score, price_zone_grade = _grade_prediction(
+            predicted_dir, current_pct, key_level, current_price
+        )
 
         results.append({
             "symbol": sym,
             "predicted": predicted_dir,
             "key_level": key_level,
+            "price_zone_grade": price_zone_grade,
             "current_price": f"{current_price:.2f}" if current_price else "N/A",
             "actual_pct": current_pct,
             "status": status,
+            "score": score,
         })
 
     return results
