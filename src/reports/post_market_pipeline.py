@@ -809,10 +809,33 @@ def _build_section_1_day_summary(analysis: PostMarketAnalysis) -> str:
 
 # ── Section 2: Morning Brief Accuracy Check ─────────────────────────
 
+def _fetch_eod_close_yfinance(symbol: str) -> Optional[float]:
+    """
+    Fetch official EOD closing price from yfinance (NSE).
+    Returns None on any failure — caller falls back to Kite ohlc.
+    """
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker(f"{symbol}.NS")
+        hist = ticker.history(period="1d", auto_adjust=False)
+        if not hist.empty:
+            return float(hist["Close"].iloc[-1])
+    except Exception as e:
+        logger.debug(f"[PostMarket/S2] yfinance EOD fetch failed for {symbol}: {e}")
+    return None
+
+
 def _build_section_2_predictions(
     data: PostMarketData, today: date
 ) -> Tuple[str, List[dict]]:
-    """Section 2: Score predictions against actual closing prices."""
+    """
+    Section 2: Score morning predictions against EOD closing price.
+
+    Price source: yfinance (.NS) primary, Kite ohlc fallback.
+    Grading: 3-tier via _grade_prediction (direction + price zone).
+    """
+    from src.reports.mid_session_pulse import _grade_prediction
+
     predictions = data.predictions
     if not predictions:
         return (
@@ -821,90 +844,104 @@ def _build_section_2_predictions(
             [],
         )
 
-    # Score each prediction
     scored = []
-    correct = 0
-    wrong = 0
-    flat = 0
+    dir_correct = 0
+    zone_correct = 0
+    zone_total = 0
+    total_score = 0.0
+    total_graded = 0
 
     for p in predictions:
         sym = p.get("symbol", "")
-        direction = (p.get("predicted_direction") or p.get("direction", "")).lower()
-        key_level = p.get("key_level", 0)
-        try:
-            key_level = float(key_level) if key_level else 0
-        except (ValueError, TypeError):
-            key_level = 0
+        predicted_dir = (p.get("predicted_direction") or p.get("direction", "")).upper()
+        key_level_str = str(p.get("key_level", "") or "").strip()
 
-        price_data = data.closing_prices.get(sym, {})
-        close_price = price_data.get("close", 0)
-        prev_close = price_data.get("prev_close", 0)
+        # ── EOD close: yfinance primary, Kite ohlc fallback ──────────
+        eod_close = _fetch_eod_close_yfinance(sym)
+        if not eod_close:
+            kite_price = data.closing_prices.get(sym, {})
+            eod_close = kite_price.get("close") or None
 
-        if close_price and prev_close and prev_close > 0:
-            actual_pct = ((close_price - prev_close) / prev_close) * 100
-        elif close_price and key_level and key_level > 0:
-            actual_pct = ((close_price - key_level) / key_level) * 100
+        # ── Prev close for actual% calc ───────────────────────────────
+        # Use Kite prev_close; fall back to key_level mid-point
+        prev_close = data.closing_prices.get(sym, {}).get("prev_close", 0)
+        if eod_close and prev_close and prev_close > 0:
+            actual_pct = (eod_close - prev_close) / prev_close * 100
         else:
             actual_pct = None
 
-        # Score
+        # ── Grade with shared 3-tier function ────────────────────────
+        status, grade_score, price_zone_grade = _grade_prediction(
+            predicted_direction=predicted_dir,
+            actual_chg_pct=actual_pct,
+            key_level_str=key_level_str,
+            current_price=eod_close,
+        )
+
+        # ── Accumulate counters ───────────────────────────────────────
         if actual_pct is not None:
-            if direction == "bullish" and actual_pct > 0.5:
-                score = 1
-                correct += 1
-            elif direction == "bearish" and actual_pct < -0.5:
-                score = 1
-                correct += 1
-            elif abs(actual_pct) <= 0.5:
-                score = 0
-                flat += 1
-            else:
-                score = -1
-                wrong += 1
+            total_graded += 1
+            total_score += grade_score
+            if grade_score >= 0.75:
+                dir_correct += 1
+            if price_zone_grade not in ("N/A", "❌ PRICE WRONG"):
+                zone_total += 1
+                if price_zone_grade == "✅ IN ZONE":
+                    zone_correct += 1
+
+        # ── Map grade_score to legacy int score (for persistence) ─────
+        if actual_pct is None:
+            legacy_score = None
+        elif grade_score == 1.0:
+            legacy_score = 1
+        elif grade_score == 0.0:
+            legacy_score = -1
         else:
-            score = None
+            legacy_score = 0  # partial credit → FLAT bucket
 
         p_copy = dict(p)
         p_copy["actual_change_pct"] = round(actual_pct, 2) if actual_pct is not None else None
-        p_copy["score"] = score
+        p_copy["score"] = legacy_score
+        p_copy["grade_score"] = grade_score
+        p_copy["price_zone_grade"] = price_zone_grade
+        p_copy["status"] = status
+        p_copy["eod_close"] = round(eod_close, 2) if eod_close else None
         scored.append(p_copy)
 
-    # Build table
+    # ── Build table ───────────────────────────────────────────────────
     lines = [
         "## 2. Morning Brief Accuracy Check\n",
-        "| Symbol | Predicted | Key Level | Close | Actual% | Verdict |",
-        "|--------|-----------|-----------|-------|---------|---------|",
+        "| Symbol | Predicted | Key Level | Price Zone | EOD Close | Actual% | Status |",
+        "|--------|-----------|-----------|------------|-----------|---------|--------|",
     ]
     for p in scored:
+        sym = p.get("symbol", "?")
         direction = (p.get("predicted_direction") or p.get("direction", "?")).upper()
-        key_level = p.get("key_level", "?")
-        close = data.closing_prices.get(p.get("symbol", ""), {}).get("close", 0)
+        key_level = p.get("key_level", "—") or "—"
+        price_zone = p.get("price_zone_grade", "N/A")
+        eod = p.get("eod_close")
         actual = p.get("actual_change_pct")
-        score = p.get("score")
+        status = p.get("status", "Unscored")
 
-        close_str = f"{close:.2f}" if close else "N/A"
-        actual_str = f"{actual:+.2f}%" if actual is not None else "N/A"
-        if score == 1:
-            verdict = "CORRECT ✅"
-        elif score == -1:
-            verdict = "WRONG ❌"
-        elif score == 0:
-            verdict = "FLAT ➖"
-        else:
-            verdict = "Unscored"
+        eod_str = f"₹{eod:.2f}" if eod else "n/a"
+        actual_str = f"{actual:+.2f}%" if actual is not None else "n/a"
 
         lines.append(
-            f"| {p.get('symbol', '?')} | {direction} | {key_level} | {close_str} | {actual_str} | {verdict} |"
+            f"| {sym} | {direction} | {key_level} | {price_zone} | {eod_str} | {actual_str} | {status} |"
         )
 
-    # Today's accuracy
-    total_scored = correct + wrong + flat
-    today_str = f"Today: {correct}/{total_scored} correct" if total_scored else "Today: No scored predictions"
+    # ── Summary stats ─────────────────────────────────────────────────
+    if total_graded:
+        overall_pct = round(total_score / total_graded * 100, 1)
+        dir_str = f"Direction: {dir_correct}/{total_graded}"
+        zone_str = f"Price zone: {zone_correct}/{zone_total}" if zone_total else "Price zone: N/A"
+        today_str = f"{dir_str} | {zone_str} | Overall: {total_score:.1f}/{total_graded} ({overall_pct}%)"
+    else:
+        today_str = "No predictions graded today — EOD prices unavailable"
 
-    # Running 10 trading day accuracy (Addition 3: filter by trading days only)
     running_str = _compute_running_accuracy(today)
-
-    lines.append(f"\n**{today_str} | {running_str}**")
+    lines.append(f"\n**{today_str}**")
+    lines.append(f"*{running_str}*")
 
     return "\n".join(lines), scored
 
