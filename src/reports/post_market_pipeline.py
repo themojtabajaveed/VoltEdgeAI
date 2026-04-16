@@ -113,13 +113,22 @@ def run_post_market_pipeline(
 
     print(f"[VoltEdge] 📊 Post-Market Pipeline v2 starting for {today}")
 
-    # Extract phase from conviction engine
+    # Compute phase from live market snapshot (nifty pct + A/D breadth)
+    # Same logic as mid_session_pulse — avoids stale CHOPPY on strong-trending days.
     phase_str = "UNKNOWN"
-    if conviction_engine:
-        try:
-            phase_str = conviction_engine.phase.value if conviction_engine.phase else "UNKNOWN"
-        except Exception:
-            pass
+    try:
+        from src.reports.mid_session_pulse import _compute_market_phase
+        from src.trading.market_phase import fetch_market_snapshot
+        snap = fetch_market_snapshot(kite_client) if kite_client else None
+        if snap is not None:
+            phase_str = _compute_market_phase(snap.nifty_pct, snap.ad_ratio)
+    except Exception as e:
+        logger.warning(f"[PostMarket] Phase computation failed: {e}")
+        if conviction_engine:
+            try:
+                phase_str = conviction_engine.phase.value if conviction_engine.phase else "UNKNOWN"
+            except Exception:
+                pass
 
     # ── Stage 1: Data Collection ─────────────────────────────────────
     print(f"[VoltEdge] Stage 1: Collecting data...")
@@ -536,14 +545,63 @@ Return ONLY valid JSON:
 
     # ── Call 3: Tomorrow's Setup ─────────────────────────────────────
     def _call_tomorrow_setup():
+        # Structured context: gainers/losers with catalysts
+        gainers_ctx = []
+        losers_ctx = []
+        if data.nse_movers:
+            for g in data.nse_movers.get("gainers", [])[:5]:
+                gainers_ctx.append(f"{g.get('symbol', '?')} ({g.get('pct_change', 0):+.2f}%)")
+            for l_ in data.nse_movers.get("losers", [])[:5]:
+                losers_ctx.append(f"{l_.get('symbol', '?')} ({l_.get('pct_change', 0):+.2f}%)")
+
+        # Expired signals with peak conviction (would-have-been tomorrow setups)
+        expired_peaks = []
+        for s in data.conviction_signals:
+            if s.get("status") == "EXPIRED":
+                history = s.get("conviction_history", [])
+                peak = max((h[1] for h in history), default=s.get("last_conviction", 0))
+                expired_peaks.append(
+                    f"{s.get('symbol', '?')} {s.get('direction', '?')} peaked at {peak:.0f}"
+                )
+        expired_peaks = expired_peaks[:5]
+
+        # High-urgency filings received today (preview of tomorrow's potential)
+        filings_ctx = []
+        try:
+            from src.data_ingestion.exchange_filings import fetch_exchange_filings
+            filings = fetch_exchange_filings(hours_back=24) or []
+            high = [f for f in filings if getattr(f, "urgency", 0) >= 7][:5]
+            for f in high:
+                filings_ctx.append(
+                    f"{getattr(f, 'symbol', '?')} — {getattr(f, 'category', '?')} "
+                    f"(urgency {getattr(f, 'urgency', 0):.0f})"
+                )
+        except Exception as _fe:
+            logger.warning(f"[PostMarket/S2] Filings fetch for tomorrow setup failed: {_fe}")
+
+        # Dynamic conviction threshold
+        try:
+            from src.config.risk import load_risk_config
+            threshold = load_risk_config().dry_run_conviction_threshold
+        except Exception:
+            threshold = 55.0
+
         context = (
-            f"Today's phase: {data.phase_str}\n"
+            f"Today's final phase: {data.phase_str}\n"
             f"Pattern DB: {data.pattern_db_stats.get('wins', 0)}W "
             f"{data.pattern_db_stats.get('losses', 0)}L / "
             f"{data.pattern_db_stats.get('total', 0)} total\n"
             f"DAWN: {dawn_count} signals, {dawn_wins}W {dawn_losses}L\n"
-            f"Conviction signals: {signal_count}, {triggered} triggered\n"
+            f"Conviction signals: {signal_count}, {triggered} triggered (threshold={threshold:.0f})\n"
         )
+        if gainers_ctx:
+            context += f"Top gainers today: {', '.join(gainers_ctx)}\n"
+        if losers_ctx:
+            context += f"Top losers today: {', '.join(losers_ctx)}\n"
+        if expired_peaks:
+            context += f"Expired signals today (peak conviction): {'; '.join(expired_peaks)}\n"
+        if filings_ctx:
+            context += f"High-urgency filings today (potential tomorrow catalysts): {'; '.join(filings_ctx)}\n"
         if data.yesterday_learnings:
             context += f"Yesterday's learnings: {'; '.join(data.yesterday_learnings[:3])}\n"
 
@@ -551,28 +609,48 @@ Return ONLY valid JSON:
 
 {context}
 
+Instructions:
+- Reference specific stocks and price levels from the data above.
+- Name at least 2 specific stocks to watch tomorrow with reason.
+- Do NOT use generic phrases like 'remains volatile' or 'cautious approach'.
+- End regime_expectation with: Top 3 stocks to watch tomorrow: [specific names with reasons]
+
 Return ONLY valid JSON:
 {{
-  "regime_expectation": "1-2 sentences on expected market behavior tomorrow",
+  "regime_expectation": "2-3 sentences grounded in today's phase + top movers + expired signals + filings. MUST end with 'Top 3 stocks to watch tomorrow: [name1 — reason, name2 — reason, name3 — reason]'",
   "sectors_to_watch": ["sector1", "sector2"],
-  "events_tomorrow": "Known upcoming events or 'No major events scheduled'",
-  "system_readiness": "1-2 sentences on system tuning recommendations"
+  "events_tomorrow": "Known upcoming events, filings received today that resolve tomorrow, or 'No major events scheduled'",
+  "system_readiness": "1-2 sentences on system tuning recommendations tied to today's threshold={threshold:.0f} performance"
 }}"""
 
-        result = _call_groq(prompt, max_tokens=500)
+        result = _call_groq(prompt, max_tokens=700)
         if result and "regime_expectation" in result:
             return result
         result = _call_gemini(prompt)
         if result and "regime_expectation" in result:
             return result
-        # Mechanical fallback
+        # Mechanical fallback — still grounded in actual data
+        watch_list = []
+        for ep in expired_peaks[:3]:
+            watch_list.append(ep)
+        for fc in filings_ctx[:3]:
+            watch_list.append(fc)
+        watch_str = "; ".join(watch_list[:3]) if watch_list else "no specific names — signals sparse"
         return {
-            "regime_expectation": f"Continue monitoring. Market was in {data.phase_str} phase today.",
+            "regime_expectation": (
+                f"Market closed in {data.phase_str} phase. "
+                f"Expired signals and filings suggest watching: {watch_str}. "
+                f"Top 3 stocks to watch tomorrow: {watch_str}."
+            ),
             "sectors_to_watch": [],
-            "events_tomorrow": "Check NSE corporate announcements for scheduled events.",
+            "events_tomorrow": (
+                f"{len(filings_ctx)} high-urgency filings received today: "
+                f"{'; '.join(filings_ctx[:3])}" if filings_ctx
+                else "Check NSE corporate announcements for scheduled events."
+            ),
             "system_readiness": (
                 f"Pattern DB: {data.pattern_db_stats.get('total', 0)} records. "
-                f"Conviction threshold at 70. DAWN {'active' if dawn_count else 'standby'}."
+                f"Conviction threshold at {threshold:.0f}. DAWN {'active' if dawn_count else 'standby'}."
             ),
         }
 
@@ -647,7 +725,7 @@ def _build_all_sections(
     sections.append(_build_section_6_trades(data))
 
     # Section 7: Key Learnings
-    learnings = _generate_learnings(data, updated_predictions)
+    learnings = _generate_learnings(data, updated_predictions, today)
     sections.append(_build_section_7_learnings(learnings))
 
     # Section 8: Tomorrow's Setup
@@ -680,14 +758,35 @@ def _build_section_0_health(data: PostMarketData, today: date) -> str:
         if pdb else "No data"
     )
 
+    # FIX-1: Pre-market brief health — verify file exists and has content
+    brief_path = os.path.join("logs", "daily_reports", f"{today}_morning_brief.md")
+    if os.path.exists(brief_path) and os.path.getsize(brief_path) > 500:
+        brief_status = "✅ Generated"
+    else:
+        brief_status = "❌ Missing"
+
+    # FIX-3: VIPER scan health — read from today's conviction_signals log
+    signals_path = os.path.join("logs", "conviction_signals", f"{today}_signals.json")
+    if os.path.exists(signals_path):
+        try:
+            with open(signals_path, encoding="utf-8") as _sf:
+                _sig_data = json.load(_sf)
+            viper_sigs = [s for s in _sig_data if str(s.get("strategy", "")).upper() == "VIPER"]
+            scan_count = len(_sig_data)
+            viper_health_str = f"{scan_count} signals logged ({len(viper_sigs)} VIPER)"
+        except Exception as _se:
+            viper_health_str = f"signals file unreadable: {_se}"
+    else:
+        viper_health_str = "No signals file found"
+
     lines = [
         "## 0. System Health\n",
         "| Component | Status |",
         "|-----------|--------|",
         f"| Email | {email_status} |",
         f"| Kite Token | {'Valid' if data.kite_ok else 'EXPIRED / MISSING'} |",
-        f"| Pre-Market Brief | {'Ran successfully' if data.pre_market_ran else 'FAILED or skipped'} |",
-        f"| VIPER Scan Health | {data.viper_health or 'N/A'} |",
+        f"| Pre-Market Brief | {brief_status} |",
+        f"| VIPER Scan Health | {viper_health_str} |",
         f"| DAWN Status | {dawn_count} signals / {dawn_wins}W {dawn_losses}L |" if dawn_count else "| DAWN Status | No signals today |",
         f"| Grok Budget | {data.grok_call_count}/{GROK_DAILY_BUDGET} used |",
         f"| Pattern DB | {pdb_str} |",
@@ -1107,8 +1206,13 @@ def _build_section_6_trades(data: PostMarketData) -> str:
                 f"{t['pnl']:+.2f} | {t['strategy']} | {t.get('exit_reason', '?')} |"
             )
     else:
+        try:
+            from src.config.risk import load_risk_config as _lrc
+            _threshold = _lrc().dry_run_conviction_threshold
+        except Exception:
+            _threshold = 55.0
         lines.append(
-            "No live trades executed today. Conviction threshold (70) was not reached "
+            f"No live trades executed today. Conviction threshold ({_threshold:.0f}) was not reached "
             "or risk gates blocked entry."
         )
 
@@ -1141,9 +1245,20 @@ def _build_section_6_trades(data: PostMarketData) -> str:
 
 # ── Section 7: Key Learnings ─────────────────────────────────────────
 
-def _generate_learnings(data: PostMarketData, scored_predictions: List[dict]) -> List[str]:
+def _generate_learnings(data: PostMarketData, scored_predictions: List[dict], today: date) -> List[str]:
     """Generate 5 tagged learning bullet points from today's data."""
     learnings = []
+
+    # Dynamic conviction threshold from config (FIX-4a)
+    try:
+        from src.config.risk import load_risk_config
+        threshold = load_risk_config().dry_run_conviction_threshold
+    except Exception:
+        threshold = 55.0
+
+    # FIX-4b: Check if DAWN actually ran today by inspecting the CSV file
+    dawn_csv_path = os.path.join("logs", "dawn_dryrun", f"{today}.csv")
+    dawn_ran = os.path.exists(dawn_csv_path) and os.path.getsize(dawn_csv_path) > 100
 
     # [LEARN-DAWN]
     if data.dawn_rows:
@@ -1158,8 +1273,10 @@ def _generate_learnings(data: PostMarketData, scored_predictions: List[dict]) ->
         learnings.append(
             f"[LEARN-DAWN] {dawn_total} signals, {dawn_wins}W. Best: {best_str}, Worst: {worst_str}{liq_str}"
         )
+    elif dawn_ran:
+        learnings.append("[LEARN-DAWN] DAWN ran but produced no tradable signals today")
     else:
-        learnings.append("[LEARN-DAWN] DAWN did not generate signals today — check pre-market scanner")
+        learnings.append("[LEARN-DAWN] DAWN did not run today — pre-market scanner may be offline")
 
     # [LEARN-CONV]
     signals = data.conviction_signals
@@ -1174,15 +1291,15 @@ def _generate_learnings(data: PostMarketData, scored_predictions: List[dict]) ->
             if peak > max_peak:
                 max_peak = peak
                 max_sym = s.get("symbol", "?")
-        would_55 = sum(
+        would_meet = sum(
             1 for s in signals
             if max((h[1] for h in s.get("conviction_history", [])),
-                   default=s.get("last_conviction", 0)) >= 55
+                   default=s.get("last_conviction", 0)) >= threshold
         )
         learnings.append(
             f"[LEARN-CONV] {total} signals, {triggered} triggered. "
             f"Highest: {max_sym} at {max_peak:.0f}. "
-            f"Threshold=55 would activate {would_55}."
+            f"Threshold={threshold:.0f} would activate {would_meet}."
         )
     else:
         learnings.append("[LEARN-CONV] No conviction signals generated today")
