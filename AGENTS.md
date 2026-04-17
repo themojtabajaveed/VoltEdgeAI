@@ -23,6 +23,12 @@ OPEN: src/reports/feedback_loop.py
 IF LLM broken: src/llm/ + src/juror/
 SKIP: pre_market_brief.py, strategies/
 
+## DawnHydraRouter
+OPEN: src/strategies/router.py (full)
+DEPENDS ON: src/strategies/base.py (WatchlistEntry), src/data_ingestion/pre_market_data.py (PreMarketSignals)
+CALLED FROM: src/runner.py → between HYDRA scan (08:15) and DAWN email (08:52)
+SKIP: everything else
+
 ## DAWN Strategy (8:45 AM email + 9:15 market order)
 OPEN: src/strategies/viper.py → search "DAWN" block
 OPEN: src/reports/pre_market_brief.py → search "dawn" function

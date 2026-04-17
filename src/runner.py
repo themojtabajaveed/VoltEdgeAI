@@ -575,6 +575,36 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                     except Exception as e:
                         logging.error(f"HYDRA pre-market scan failed: {e}")
                         print(f"  ❌ HYDRA scan error: {e}")
+
+                    # ── DawnHydraRouter: decide DAWN vs HYDRA per candidate ──
+                    dawn_candidates: list = []
+                    hydra_shadows: list = []
+                    try:
+                        from src.strategies.router import route_candidate, create_hydra_shadow
+                        from src.data_ingestion.pre_market_data import (
+                            fetch_all_premarket_data, get_scan_universe,
+                        )
+                        if hydra.watchlist:
+                            _router_cache = fetch_all_premarket_data(get_scan_universe())
+                            for _entry in hydra.watchlist:
+                                _pm = _router_cache.get(_entry.symbol)
+                                _decision = route_candidate(_entry, _pm, pattern_db=None)
+                                if _decision.route == "DAWN":
+                                    dawn_candidates.append(_entry)
+                                    hydra_shadows.append(create_hydra_shadow(_entry))
+                                    print(
+                                        f"  🌅 Router: {_entry.symbol} → DAWN | {_decision.reasoning}"
+                                    )
+                                else:
+                                    print(
+                                        f"  🔥 Router: {_entry.symbol} → HYDRA | {_decision.reasoning}"
+                                    )
+                        else:
+                            logging.info("[Router] HYDRA watchlist empty — no routing needed")
+                    except Exception as _route_e:
+                        logging.error(f"DawnHydraRouter failed: {_route_e}")
+                        print(f"  ❌ Router error: {_route_e}")
+
                     last_hydra_scan_date = current_date
 
                 # 0b. Run momentum scanner + stock discovery at 09:30

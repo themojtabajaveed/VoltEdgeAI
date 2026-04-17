@@ -77,6 +77,11 @@ class WatchlistEntry:
     sector_momentum: str = "NEUTRAL"    # "BULLISH" / "BEARISH" / "NEUTRAL"
     technical_setup: str = "NEUTRAL"    # "BREAKOUT" / "SUPPORT" / "NEUTRAL"
     fii_flow: str = "NEUTRAL"           # "BUYING" / "SELLING" / "NEUTRAL"
+    # Filing metadata — used by DawnHydraRouter
+    filing_category: str = ""           # e.g. "ORDER_WIN", "PRESS_RELEASE"
+    filing_urgency: float = 0.0         # 0-10 from filing classifier
+    avg_volume_20d: int = 0             # 20d average daily volume, for liquidity gate
+    filed_at: Optional[str] = None      # ISO timestamp of the filing (if known)
 
     def __post_init__(self):
         if self.added_at is None:
