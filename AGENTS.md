@@ -5,6 +5,7 @@
 OPEN: src/reports/pre_market_brief.py
 OPEN: src/reports/brief_pipeline.py → Section 0–6 assembly + USD/INR row
 OPEN: src/data_ingestion/pre_market_intelligence.py → Section 0 signal table (fetch + score)
+OPEN: src/data_ingestion/pre_market_data.py → shared pre-market pipeline (Tier1 filings + Tier2 Nifty200); cache at data/premarket_cache_YYYY-MM-DD.json; exposes get_scan_universe() and fetch_all_premarket_data()
 OPEN: src/runner.py → search "pre_market" block only
 IF LLM broken: src/llm/ + src/juror/
 IF DB broken: src/db/models.py → DailySignal, ConvictionScore only
