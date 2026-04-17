@@ -163,7 +163,8 @@ Never: commit secrets · delete artifacts · alter historical logs · fake succe
 
 ## Active Bugs → See BUGS.md
 Check BUGS.md before starting any session. It is the source of truth for open issues.
-
+## System Architecture → See docs/SYSTEM_DESIGN_2026-04-17.md
+Read this before any work on DAWN, HYDRA, VIPER, or runner.py.
 ## Task → File Routing → See AGENTS.md
 Always check AGENTS.md before exploring the repo. Go directly to listed files. Skip everything else.
 
