@@ -82,6 +82,10 @@ class WatchlistEntry:
     filing_urgency: float = 0.0         # 0-10 from filing classifier
     avg_volume_20d: int = 0             # 20d average daily volume, for liquidity gate
     filed_at: Optional[str] = None      # ISO timestamp of the filing (if known)
+    # DawnHydraRouter decision metadata — set by router after classification
+    route: str = ""                     # "DAWN" or "HYDRA"
+    confidence: float = 0.0             # router confidence 0.0-1.0 (rules_passed/6)
+    routed_at: Optional[str] = None     # ISO timestamp when routing was decided (IST)
 
     def __post_init__(self):
         if self.added_at is None:

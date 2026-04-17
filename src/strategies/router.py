@@ -271,6 +271,14 @@ def route_candidate(
         rules_failed=failed,
         reasoning=reasoning,
     )
+    # Stamp decision onto the entry so downstream consumers can read it.
+    try:
+        entry.route = route
+        entry.confidence = confidence
+        entry.routed_at = datetime.now(IST).isoformat()
+    except AttributeError:
+        # Older persisted WatchlistEntry missing new fields — skip silently.
+        pass
     logger.info(
         f"[Router] {entry.symbol} → {route} | "
         f"rules_passed={passed} rules_failed={failed}"

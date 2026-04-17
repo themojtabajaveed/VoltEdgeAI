@@ -29,6 +29,22 @@ DEPENDS ON: src/strategies/base.py (WatchlistEntry), src/data_ingestion/pre_mark
 CALLED FROM: src/runner.py → between HYDRA scan (08:15) and DAWN email (08:52)
 SKIP: everything else
 
+## Phase 3: Execution Wiring (router output → trade paths)
+OPEN: src/strategies/dawn.py → select_dawn_candidates(router_filter=...)
+OPEN: src/runner.py → search "dawn_candidates_today" (outer-scope) and "hydra_shadows_today"
+OPEN: src/trading/conviction_engine.py → CONVICTION_THRESHOLD=70, [CONVICTION GATE] drop log
+OPEN: src/trading/executor.py → [DRY-RUN] log includes route/confidence/target/sl
+OPEN: src/reports/post_market_report.py → _build_section_10_router
+ARTIFACT: data/hydra_shadows_YYYY-MM-DD.json — counterfactual HYDRA tracker
+TESTS: tests/test_router.py, tests/test_phase3_wiring.py
+SKIP: everything else unless behavior bug crosses these files
+
+## Phase 4 Roadmap (not yet implemented)
+- Wire `route` + `confidence` into ConvictionEngine metadata so TradeRecord stores them
+- Pattern DB learning loop: use hydra_shadows_*.json to populate follow-through rates
+- Router R5 graduation: replace cold-start pass with live pattern_db lookup
+- Post-market feedback compares DAWN actual vs HYDRA shadow counterfactual
+
 ## DAWN Strategy (8:45 AM email + 9:15 market order)
 OPEN: src/strategies/viper.py → search "DAWN" block
 OPEN: src/reports/pre_market_brief.py → search "dawn" function

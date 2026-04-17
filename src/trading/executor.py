@@ -42,6 +42,10 @@ class TradeExecutor:
         qty: int,
         market_regime: Optional[MarketRegime] = None,
         symbol_stats: Optional[SymbolStats] = None,
+        route: str = "UNROUTED",
+        confidence: float = 0.0,
+        target: float = 0.0,
+        sl: float = 0.0,
     ) -> OrderResult:
         """Execute a LONG entry. qty is already computed from ATR-based sizing."""
         if ltp <= 0 or qty <= 0:
@@ -51,7 +55,11 @@ class TradeExecutor:
             )
 
         if not self.risk.live_mode or self._zerodha is None:
-            msg = f"DRY_RUN BUY: {qty} × {symbol} @ ~{ltp:.2f}"
+            msg = (
+                f"[DRY-RUN] {symbol} | route={route or 'UNROUTED'} | "
+                f"confidence={float(confidence or 0.0):.2f} | entry={ltp:.2f} | "
+                f"target={float(target or 0.0):.2f} | sl={float(sl or 0.0):.2f} | qty={qty} | side=BUY"
+            )
             logger.info(msg)
             return OrderResult(success=True, broker_order_id=None, message=msg,
                                filled_qty=qty, avg_price=ltp)
@@ -64,14 +72,27 @@ class TradeExecutor:
                                message=f"BUY crash {symbol}: {e}", filled_qty=0)
 
     # ── LONG exit ─────────────────────────────────────────────────────────────
-    def execute_sell(self, symbol: str, qty: int, ltp: float) -> OrderResult:
+    def execute_sell(
+        self,
+        symbol: str,
+        qty: int,
+        ltp: float,
+        route: str = "UNROUTED",
+        confidence: float = 0.0,
+        target: float = 0.0,
+        sl: float = 0.0,
+    ) -> OrderResult:
         """Exit a LONG position."""
         if qty <= 0 or ltp <= 0:
             return OrderResult(success=False, broker_order_id=None,
                                message=f"Invalid qty={qty} or ltp={ltp}", filled_qty=0)
 
         if not self.risk.live_mode or self._zerodha is None:
-            msg = f"DRY_RUN SELL: {qty} × {symbol} @ ~{ltp:.2f}"
+            msg = (
+                f"[DRY-RUN] {symbol} | route={route or 'UNROUTED'} | "
+                f"confidence={float(confidence or 0.0):.2f} | entry={ltp:.2f} | "
+                f"target={float(target or 0.0):.2f} | sl={float(sl or 0.0):.2f} | qty={qty} | side=SELL"
+            )
             logger.info(msg)
             return OrderResult(success=True, broker_order_id=None, message=msg,
                                filled_qty=qty, avg_price=ltp)
@@ -89,6 +110,10 @@ class TradeExecutor:
         symbol: str,
         ltp: float,
         qty: int,
+        route: str = "UNROUTED",
+        confidence: float = 0.0,
+        target: float = 0.0,
+        sl: float = 0.0,
     ) -> OrderResult:
         """
         Enter a SHORT position by selling shares we don't own (sell-to-open).
@@ -107,7 +132,11 @@ class TradeExecutor:
             return OrderResult(success=False, broker_order_id=None, message=msg, filled_qty=0)
 
         if not self.risk.live_mode or self._zerodha is None:
-            msg = f"DRY_RUN SHORT_SELL: {qty} × {symbol} @ ~{ltp:.2f}"
+            msg = (
+                f"[DRY-RUN] {symbol} | route={route or 'UNROUTED'} | "
+                f"confidence={float(confidence or 0.0):.2f} | entry={ltp:.2f} | "
+                f"target={float(target or 0.0):.2f} | sl={float(sl or 0.0):.2f} | qty={qty} | side=SHORT_SELL"
+            )
             logger.info(msg)
             return OrderResult(success=True, broker_order_id=None, message=msg,
                                filled_qty=qty, avg_price=ltp)
@@ -121,7 +150,16 @@ class TradeExecutor:
                                message=f"SHORT_SELL crash {symbol}: {e}", filled_qty=0)
 
     # ── SHORT exit (buy-to-cover) ─────────────────────────────────────────────
-    def execute_short_cover(self, symbol: str, qty: int, ltp: float) -> OrderResult:
+    def execute_short_cover(
+        self,
+        symbol: str,
+        qty: int,
+        ltp: float,
+        route: str = "UNROUTED",
+        confidence: float = 0.0,
+        target: float = 0.0,
+        sl: float = 0.0,
+    ) -> OrderResult:
         """
         Close a SHORT position by buying back (buy-to-cover).
         """
@@ -131,7 +169,11 @@ class TradeExecutor:
                                filled_qty=0)
 
         if not self.risk.live_mode or self._zerodha is None:
-            msg = f"DRY_RUN SHORT_COVER: {qty} × {symbol} @ ~{ltp:.2f}"
+            msg = (
+                f"[DRY-RUN] {symbol} | route={route or 'UNROUTED'} | "
+                f"confidence={float(confidence or 0.0):.2f} | entry={ltp:.2f} | "
+                f"target={float(target or 0.0):.2f} | sl={float(sl or 0.0):.2f} | qty={qty} | side=SHORT_COVER"
+            )
             logger.info(msg)
             return OrderResult(success=True, broker_order_id=None, message=msg,
                                filled_qty=qty, avg_price=ltp)

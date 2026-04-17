@@ -303,6 +303,10 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     last_dawn_dryrun_entry_date = None   # HYDRA dryrun entries recorded once at 09:15
     last_dawn_dryrun_update_time = None  # HYDRA dryrun update cadence (15-min)
 
+    # ── DawnHydraRouter output (populated at 08:15, consumed at 09:15) ──
+    dawn_candidates_today: list = []
+    hydra_shadows_today: list = []
+
     # ── Mid-session bearish discovery (SHORT-4) ──
     last_neg_pulse_date = None
 
@@ -577,8 +581,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         print(f"  ❌ HYDRA scan error: {e}")
 
                     # ── DawnHydraRouter: decide DAWN vs HYDRA per candidate ──
-                    dawn_candidates: list = []
-                    hydra_shadows: list = []
+                    dawn_candidates_today = []
+                    hydra_shadows_today = []
                     try:
                         from src.strategies.router import route_candidate, create_hydra_shadow
                         from src.data_ingestion.pre_market_data import (
@@ -590,8 +594,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                 _pm = _router_cache.get(_entry.symbol)
                                 _decision = route_candidate(_entry, _pm, pattern_db=None)
                                 if _decision.route == "DAWN":
-                                    dawn_candidates.append(_entry)
-                                    hydra_shadows.append(create_hydra_shadow(_entry))
+                                    dawn_candidates_today.append(_entry)
+                                    hydra_shadows_today.append(create_hydra_shadow(_entry))
                                     print(
                                         f"  🌅 Router: {_entry.symbol} → DAWN | {_decision.reasoning}"
                                     )
@@ -604,6 +608,35 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                     except Exception as _route_e:
                         logging.error(f"DawnHydraRouter failed: {_route_e}")
                         print(f"  ❌ Router error: {_route_e}")
+
+                    # ── Phase 3B: persist hydra_shadows to disk for counterfactual tracking ──
+                    try:
+                        import json as _json
+                        from pathlib import Path as _Path
+                        _shadow_path = _Path("data") / f"hydra_shadows_{current_date.isoformat()}.json"
+                        _shadow_payload = []
+                        for _sh, _ent in zip(hydra_shadows_today, dawn_candidates_today):
+                            _shadow_payload.append({
+                                "symbol": _sh.get("symbol"),
+                                "confidence": float(getattr(_ent, "confidence", 0.0) or 0.0),
+                                "route": getattr(_ent, "route", "") or "DAWN",
+                                "routed_at": getattr(_ent, "routed_at", None),
+                                "momentum_score": float(_ent.metadata.get("momentum_score", 0.0)) if isinstance(getattr(_ent, "metadata", None), dict) else 0.0,
+                                "avg_volume_20d": int(getattr(_ent, "avg_volume_20d", 0) or 0),
+                                "filing_category": getattr(_ent, "filing_category", "") or "",
+                                "filing_urgency": float(getattr(_ent, "filing_urgency", 0.0) or 0.0),
+                                "direction": _sh.get("direction"),
+                                "gap_pct": _sh.get("gap_pct"),
+                                "dawn_entry_time": _sh.get("dawn_entry_time"),
+                                "event_summary": _sh.get("event_summary"),
+                            })
+                        _shadow_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(_shadow_path, "w") as _f:
+                            _json.dump(_shadow_payload, _f, indent=2, default=str)
+                        logging.info(f"[Router] Persisted {len(_shadow_payload)} hydra_shadows to {_shadow_path}")
+                        print(f"  💾 Persisted {len(_shadow_payload)} HYDRA shadows to {_shadow_path.name}")
+                    except Exception as _persist_e:
+                        logging.error(f"hydra_shadows persistence failed: {_persist_e}")
 
                     last_hydra_scan_date = current_date
 
@@ -798,7 +831,10 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                     # ── DAWN: HYDRA dryrun entries at 09:15 (once per day) ──
                     if dt_time(9, 15) <= current_time <= dt_time(9, 20) and last_dawn_dryrun_entry_date != current_date:
                         try:
-                            hydra_dawn_picks = select_dawn_candidates(min_conviction=50)
+                            hydra_dawn_picks = select_dawn_candidates(
+                                min_conviction=50,
+                                router_filter=dawn_candidates_today,
+                            )
                             execute_dawn_dryrun(hydra_dawn_picks, {})
                             if hydra_dawn_picks:
                                 print(f"  🌅 DAWN DRYRUN: {len(hydra_dawn_picks)} HYDRA entries recorded")

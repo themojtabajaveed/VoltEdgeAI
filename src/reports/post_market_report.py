@@ -590,6 +590,70 @@ def _build_section_9_fallback(persisted_signals: list, movers_ctx: str, today: d
     return "\n".join(lines)
 
 
+def _build_section_10_router(today: date, trades: list) -> str:
+    """Section 10 — Router Performance.
+
+    Reads data/hydra_shadows_{today}.json and groups DB trades by strategy.
+    DAWN trades come from strategy='DAWN'; HYDRA trades from strategy='HYDRA'.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    shadow_path = _Path("data") / f"hydra_shadows_{today.isoformat()}.json"
+    shadows = []
+    if shadow_path.exists():
+        try:
+            with open(shadow_path) as f:
+                shadows = _json.load(f) or []
+        except Exception as e:
+            logger.warning(f"Router shadow read failed: {e}")
+
+    dawn_trades = [t for t in (trades or []) if (t.get("strategy") or "").upper() == "DAWN"]
+    hydra_trades = [t for t in (trades or []) if (t.get("strategy") or "").upper() == "HYDRA"]
+
+    shadow_confidences = [
+        float(s.get("confidence", 0.0) or 0.0) for s in shadows
+        if isinstance(s.get("confidence", None), (int, float))
+    ]
+    avg_conf = round(sum(shadow_confidences) / len(shadow_confidences), 2) if shadow_confidences else 0.0
+
+    lines = []
+    lines.append("## 10. Router Performance")
+    lines.append("")
+    lines.append(f"- DAWN trades executed: **{len(dawn_trades)}**")
+    lines.append(f"- HYDRA trades executed: **{len(hydra_trades)}**")
+    lines.append(f"- HYDRA shadows tracked: **{len(shadows)}**")
+    lines.append(f"- Avg router confidence (shadows): **{avg_conf:.2f}**")
+    lines.append("")
+
+    if dawn_trades or hydra_trades:
+        lines.append("| Symbol | Route | Direction | Entry | Exit | PnL | Strategy |")
+        lines.append("|---|---|---|---|---|---|---|")
+        for t in (dawn_trades + hydra_trades):
+            lines.append(
+                f"| {t.get('symbol','?')} | {t.get('strategy','?')} | {t.get('direction','?')} | "
+                f"{t.get('entry_price',0):.2f} | {t.get('exit_price',0):.2f} | "
+                f"{t.get('pnl',0):+.2f} | {t.get('strategy','?')} |"
+            )
+    else:
+        lines.append("_No DAWN or HYDRA trades executed today._")
+
+    if shadows:
+        lines.append("")
+        lines.append("### Shadow Roster (counterfactual HYDRA tracking)")
+        lines.append("| Symbol | Route | Confidence | Category | Urgency |")
+        lines.append("|---|---|---|---|---|")
+        for s in shadows:
+            lines.append(
+                f"| {s.get('symbol','?')} | {s.get('route','?')} | "
+                f"{float(s.get('confidence',0.0)):.2f} | "
+                f"{s.get('filing_category','')} | "
+                f"{float(s.get('filing_urgency',0.0)):.1f} |"
+            )
+
+    return "\n".join(lines)
+
+
 def _build_movers_context(kite_client, today: date) -> str:
     """Fetch top movers — Kite primary, NSE fallback."""
     try:
@@ -803,6 +867,13 @@ def generate_post_market_report(
         section_9 = section_9_fallback
         logger.info("[PostMarket] Using rule-based fallback for Section 9")
 
+    # ── Section 10: Router Performance (Phase 3F) ──
+    try:
+        section_10 = _build_section_10_router(today, db_ctx.get("trades", []))
+    except Exception as router_section_e:
+        logger.warning(f"Router section build failed: {router_section_e}")
+        section_10 = "## 10. Router Performance\n\n_Unavailable._"
+
     # ── Assemble machine-generated sections ──────────────────────────────
     machine_report = f"""# VoltEdge Post-Market Report — {today}
 
@@ -831,6 +902,8 @@ def generate_post_market_report(
 {section_8}
 
 {section_9}
+
+{section_10}
 """
 
     # ── Generate narrative via Gemini ─────────────────────────────────────

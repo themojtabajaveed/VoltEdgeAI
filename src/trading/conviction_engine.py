@@ -60,7 +60,7 @@ W_C_CATALYST = 0.45  # Catalyst quality (increased from 0.30)
 W_D_CATALYST = 0.20  # Technical confirmation (unchanged)
 W_E_CATALYST = 0.10  # Pattern match (unchanged)
 
-CONVICTION_THRESHOLD = 65.0
+CONVICTION_THRESHOLD = 70.0
 SIGNAL_MAX_AGE_HOURS = 4.0
 SIGNAL_EXPIRY_TIME = (14, 30)  # 14:30 IST — no new entries last hour
 
@@ -553,6 +553,10 @@ class ConvictionEngine:
                 logger.info(
                     f"[ConvEng] [DRY-RUN] {signal.symbol} {signal.direction} "
                     f"conviction={new_conviction:.0f} would trigger but is_dry_run=True — observing only"
+                )
+            else:
+                logger.info(
+                    f"[CONVICTION GATE] {signal.symbol} dropped — score {new_conviction:.0f} < {self._threshold:.0f}"
                 )
 
         self._prev_snapshot = market_snapshot

@@ -347,14 +347,47 @@ def score_dawn_conviction(candidate: dict, premarket_cache: Optional[Dict] = Non
     return final, breakdown
 
 
-def select_dawn_candidates(min_conviction: int = 50) -> list[dict]:
+def select_dawn_candidates(
+    min_conviction: int = 50,
+    router_filter: Optional[list] = None,
+) -> list[dict]:
     """
     Load HYDRA watchlist, score each candidate for gap-open potential,
     filter by min_conviction. Returns sorted list (highest first), max 5.
+
+    router_filter: optional list of WatchlistEntry (or objects with .symbol)
+        produced by DawnHydraRouter. When provided:
+          - empty list → return [] immediately (router said no DAWN today)
+          - non-empty → only candidates whose symbol appears in the list are scored.
+        When None, behavior is unchanged (no filter).
     """
     candidates = load_hydra_watchlist()
     if not candidates:
         return []
+
+    # ── Router filter (Phase 3) ───────────────────────────────────────
+    if router_filter is not None:
+        if len(router_filter) == 0:
+            logger.info(
+                "[ROUTER FILTER] Router returned 0 DAWN candidates — "
+                "DAWN select returns empty"
+            )
+            return []
+        allowed = set()
+        for rf in router_filter:
+            sym = getattr(rf, "symbol", None)
+            if sym is None and isinstance(rf, dict):
+                sym = rf.get("symbol")
+            if sym:
+                allowed.add(sym)
+        before = len(candidates)
+        candidates = [c for c in candidates if c.get("symbol") in allowed]
+        logger.info(
+            f"[ROUTER FILTER] DAWN candidates filtered to {len(candidates)} "
+            f"symbols by router (was {before})"
+        )
+        if not candidates:
+            return []
 
     # Load shared premarket cache once (for L8 liquidity). Empty dict on failure.
     premarket_cache: Dict = {}
