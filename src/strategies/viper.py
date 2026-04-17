@@ -56,13 +56,16 @@ class ViperStrategy(StrategyHead):
 
     # ── Core Interface ────────────────────────────────────
 
-    def scan(self, access_token: str = None) -> List[WatchlistEntry]:
+    def scan(self, access_token: str = None, movers: Optional[Dict] = None) -> List[WatchlistEntry]:
         """
         Scan top movers from Kite batch quote, classify them,
         and build the VIPER watchlist.
 
         Args:
             access_token: Kite access token (from runner)
+            movers: Optional pre-fetched result from fetch_top_movers()
+                    with shape {"gainers": [...], "losers": [...]}.
+                    When provided, avoids a duplicate scanner call.
 
         Returns:
             List of WatchlistEntry for tradeable movers.
@@ -70,8 +73,13 @@ class ViperStrategy(StrategyHead):
         self._scan_count_today += 1
         logger.info(f"[VIPER] Scan #{self._scan_count_today} starting...")
 
-        # 1. Fetch top movers
-        movers_data = self._fetch_movers(access_token)
+        # 1. Fetch top movers (or normalize pre-fetched result)
+        if movers is not None:
+            movers_data = self._normalize_movers(movers)
+            if movers_data:
+                self._scan_success_count += 1
+        else:
+            movers_data = self._fetch_movers(access_token)
         if not movers_data:
             logger.warning("[VIPER] No movers found — skipping scan")
             return []
@@ -449,6 +457,63 @@ class ViperStrategy(StrategyHead):
 
         return min(score, 30.0)
 
+    def _load_premarket_cache(self) -> Dict:
+        """Load shared premarket cache once per scan. Returns {} on failure.
+        Used to source real rel_volume when available (STEP 5)."""
+        try:
+            from src.data_ingestion.pre_market_data import (
+                fetch_all_premarket_data, get_scan_universe,
+            )
+            return fetch_all_premarket_data(get_scan_universe())
+        except Exception as e:
+            logger.debug(f"[VIPER] premarket cache unavailable: {e}")
+            return {}
+
+    def _normalize_movers(self, result: Dict) -> List[dict]:
+        """Normalize {'gainers': [...], 'losers': [...]} into flat list of mover dicts.
+        Sources volume_ratio from premarket cache when available; falls back to
+        price-derived proxy (abs(pct_change)/2) only when cache is missing.
+        """
+        premarket_cache = self._load_premarket_cache()
+        proxy_count = 0
+
+        movers: List[dict] = []
+        for c in result.get("gainers", []) + result.get("losers", []):
+            m = {
+                "symbol": c.symbol if hasattr(c, 'symbol') else c.get("symbol", ""),
+                "last_price": c.last_price if hasattr(c, 'last_price') else c.get("last_price", 0),
+                "prev_close": c.prev_close if hasattr(c, 'prev_close') else c.get("prev_close", 0),
+                "pct_change": c.pct_change if hasattr(c, 'pct_change') else c.get("pct_change", 0),
+                "volume": c.volume if hasattr(c, 'volume') else c.get("volume", 0),
+                "direction": c.direction if hasattr(c, 'direction') else c.get("direction", ""),
+            }
+            prev = float(m["prev_close"])
+            if prev > 0:
+                open_p = float(m.get("open_price", m["last_price"]))
+                m["gap_pct"] = round((open_p - prev) / prev * 100, 2)
+            else:
+                m["gap_pct"] = 0
+
+            symbol = m["symbol"]
+            cached = premarket_cache.get(symbol) if premarket_cache else None
+            if cached and getattr(cached, "rel_volume", 0) > 0:
+                m["volume_ratio"] = float(cached.rel_volume)
+            else:
+                m["volume_ratio"] = max(1.0, abs(float(m["pct_change"])) / 2.0)
+                proxy_count += 1
+                logger.debug(
+                    f"[VIPER] {symbol} using volume_ratio proxy — not in premarket cache"
+                )
+            m["open_price"] = m.get("open_price", m["last_price"])
+            movers.append(m)
+
+        if movers and proxy_count and self._scan_count_today <= 1:
+            logger.warning(
+                f"[VIPER] {proxy_count}/{len(movers)} movers fell back to volume_ratio proxy "
+                f"(not in premarket cache)"
+            )
+        return movers
+
     def _fetch_movers(self, access_token: str = None) -> List[dict]:
         """Fetch top movers from momentum_scanner with retry on empty."""
         import time as _time
@@ -457,37 +522,9 @@ class ViperStrategy(StrategyHead):
             try:
                 from src.sniper.momentum_scanner import fetch_top_movers
                 result = fetch_top_movers(access_token=access_token)
-
-                movers = []
-                for c in result.get("gainers", []) + result.get("losers", []):
-                    m = {
-                        "symbol": c.symbol if hasattr(c, 'symbol') else c.get("symbol", ""),
-                        "last_price": c.last_price if hasattr(c, 'last_price') else c.get("last_price", 0),
-                        "prev_close": c.prev_close if hasattr(c, 'prev_close') else c.get("prev_close", 0),
-                        "pct_change": c.pct_change if hasattr(c, 'pct_change') else c.get("pct_change", 0),
-                        "volume": c.volume if hasattr(c, 'volume') else c.get("volume", 0),
-                        "direction": c.direction if hasattr(c, 'direction') else c.get("direction", ""),
-                    }
-                    prev = float(m["prev_close"])
-                    if prev > 0:
-                        open_p = float(m.get("open_price", m["last_price"]))
-                        m["gap_pct"] = round((open_p - prev) / prev * 100, 2)
-                    else:
-                        m["gap_pct"] = 0
-                    # ⚠️ PROXY WARNING: volume_ratio is derived from price change,
-                    # not actual relative volume. momentum_scanner does not provide
-                    # average volume data. All downstream volume-based rules
-                    # (COIL exhaust, GAP_AND_TRAP, etc.) use this proxy.
-                    m["volume_ratio"] = max(1.0, abs(float(m["pct_change"])) / 2.0)
-                    m["open_price"] = m.get("open_price", m["last_price"])
-                    movers.append(m)
+                movers = self._normalize_movers(result)
 
                 if movers:
-                    if self._scan_count_today <= 1:
-                        logger.warning(
-                            "[VIPER] volume_ratio is a price-derived proxy (abs(pct_change)/2), "
-                            "not actual relative volume. Volume-based rules operate on estimated data."
-                        )
                     self._scan_success_count += 1
                     return movers
 

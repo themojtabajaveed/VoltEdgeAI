@@ -145,6 +145,31 @@ def load_hydra_watchlist() -> list[dict]:
         return []
 
 
+def _enrich_from_premarket_cache(hist: dict, symbol: str, cache: Optional[Dict]) -> dict:
+    """
+    Overlay pre_market_data cache fields onto a history-signals dict.
+    Shared 08:00 cache provides rel_volume (L3), pct_from_30d_high and
+    pct_from_20d_sma (L5), and avg_volume_20d (L8) — preferred over DAWN's
+    independent yfinance computation. L6/L7 (gap follow-through, momentum)
+    are not in the cache and keep their yfinance values.
+    """
+    if not cache or not symbol:
+        return hist
+    sig = cache.get(symbol)
+    if sig is None:
+        return hist
+    out = dict(hist)
+    rel_vol = getattr(sig, "rel_volume", 0) or 0
+    if rel_vol:
+        out["rel_volume"] = round(float(rel_vol), 2)
+    out["vs_30d_high_pct"] = round(float(getattr(sig, "pct_from_30d_high", 0.0) or 0.0), 2)
+    out["vs_20d_sma_pct"] = round(float(getattr(sig, "pct_from_20d_sma", 0.0) or 0.0), 2)
+    avg_vol = getattr(sig, "avg_volume_20d", 0) or 0
+    if avg_vol:
+        out["avg_daily_volume"] = int(avg_vol)
+    return out
+
+
 def _fetch_history_signals(symbol: str) -> dict:
     """
     Single yfinance history call for L3/L5/L6/L7/L8 scoring.
@@ -221,7 +246,7 @@ def _fetch_history_signals(symbol: str) -> dict:
         return defaults
 
 
-def score_dawn_conviction(candidate: dict) -> tuple[int, dict]:
+def score_dawn_conviction(candidate: dict, premarket_cache: Optional[Dict] = None) -> tuple[int, dict]:
     """
     Score a HYDRA candidate for DAWN gap-up/gap-down potential at 9:15 open.
     Returns (total_score, breakdown_dict). Score capped at 100.
@@ -234,7 +259,7 @@ def score_dawn_conviction(candidate: dict) -> tuple[int, dict]:
       L5 — Technical setup     : 0-12 pts  (yfinance history)
       L6 — Gap follow-through  : 0-8  pts  (yfinance history)
       L7 — Momentum 7d/30d     : 0-7  pts  (yfinance history)
-      L8 — Liquidity           : 0-5  pts  (yfinance history)
+      L8 — Liquidity           : 0-5  pts  (premarket cache → yfinance history fallback)
     """
     symbol = candidate.get("symbol", "")
     direction = candidate.get("direction", "LONG")
@@ -255,8 +280,11 @@ def score_dawn_conviction(candidate: dict) -> tuple[int, dict]:
     breakdown["L2_gap"] = l2
     total += l2
 
-    # Fetch history signals once for L3/L5/L6/L7/L8
+    # Fetch history signals once for L3/L5/L6/L7/L8, then overlay premarket cache
+    # where it carries authoritative fields (rel_volume, vs_30d_high, vs_20d_sma,
+    # avg_daily_volume). L6/L7 remain yfinance-sourced.
     hist = _fetch_history_signals(symbol) if symbol else {}
+    hist = _enrich_from_premarket_cache(hist, symbol, premarket_cache)
 
     # L3 — relative volume (0-15)
     rv = hist.get("rel_volume", 1.0)
@@ -307,7 +335,7 @@ def score_dawn_conviction(candidate: dict) -> tuple[int, dict]:
     breakdown["L7_momentum"] = l7
     total += l7
 
-    # L8 — liquidity (0-5)
+    # L8 — liquidity (0-5). hist.avg_daily_volume is now premarket-cache-enriched.
     avg_vol = hist.get("avg_daily_volume", 0)
     l8 = 5 if avg_vol >= 1_000_000 else 3 if avg_vol >= 500_000 else 1 if avg_vol >= 200_000 else 0
     breakdown["L8_liquidity"] = l8
@@ -328,9 +356,19 @@ def select_dawn_candidates(min_conviction: int = 50) -> list[dict]:
     if not candidates:
         return []
 
+    # Load shared premarket cache once (for L8 liquidity). Empty dict on failure.
+    premarket_cache: Dict = {}
+    try:
+        from src.data_ingestion.pre_market_data import fetch_all_premarket_data, get_scan_universe
+        cand_syms = [c.get("symbol", "") for c in candidates if c.get("symbol")]
+        universe = list({*get_scan_universe(), *cand_syms})
+        premarket_cache = fetch_all_premarket_data(universe)
+    except Exception as e:
+        logger.warning(f"[DAWN] premarket cache load failed: {e}")
+
     scored = []
     for c in candidates:
-        score, breakdown = score_dawn_conviction(c)
+        score, breakdown = score_dawn_conviction(c, premarket_cache=premarket_cache)
         if score >= min_conviction:
             scored.append({
                 **c,

@@ -36,8 +36,37 @@ except ImportError:
 from src.strategies.base import StrategyHead, ConvictionScore, WatchlistEntry
 from src.strategies.technical_body import TechnicalBody, TechnicalSnapshot
 from src.data_ingestion.event_scanner import EventScanner, MarketEvent
+from src.data_ingestion.pre_market_data import (
+    PreMarketSignals,
+    fetch_all_premarket_data,
+    get_scan_universe,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _volume_signal_from_rel(rel_volume: float) -> str:
+    if rel_volume >= 2.0:
+        return "SURGE"
+    if rel_volume >= 1.5:
+        return "ELEVATED"
+    return "NORMAL"
+
+
+def _technical_setup_from_cache(cache_setup: str) -> str:
+    if cache_setup == "BREAKOUT_READY":
+        return "BREAKOUT"
+    if cache_setup == "PULLBACK":
+        return "SUPPORT"
+    return "NEUTRAL"
+
+
+def _sector_momentum_from_cache(cache_momentum: str, fallback: str) -> str:
+    if cache_momentum in ("HOT", "WARM"):
+        return "BULLISH"
+    if cache_momentum == "COLD":
+        return "BEARISH"
+    return fallback
 
 
 def _fetch_gap_pct(symbol: str) -> float:
@@ -296,18 +325,28 @@ class HydraStrategy(StrategyHead):
 
         self._last_scan_time = datetime.now()
 
-        # Read macro regime once (for sector_momentum) — uses existing artifact, no new API call
-        _sector_momentum = "NEUTRAL"
+        # Read macro regime once (regime fallback for sector_momentum)
+        _regime_momentum = "NEUTRAL"
         try:
             with open("data/daily_regime.json") as _rf:
                 _regime = json.load(_rf)
             _trend = _regime.get("trend", "sideways")
             if _trend == "bullish":
-                _sector_momentum = "BULLISH"
+                _regime_momentum = "BULLISH"
             elif _trend == "bearish":
-                _sector_momentum = "BEARISH"
+                _regime_momentum = "BEARISH"
         except Exception:
             pass  # defaults to NEUTRAL
+
+        # Load pre-market cache once — shared source for gap/volume/technical/sector
+        premarket_cache: dict = {}
+        try:
+            event_syms = [e.symbol for e in events[:self.max_watchlist]]
+            if event_syms:
+                universe = list({*get_scan_universe(), *event_syms})
+                premarket_cache = fetch_all_premarket_data(universe)
+        except Exception as _e:
+            logger.warning(f"[HYDRA] premarket cache load failed: {_e}")
 
         # Convert MarketEvents to WatchlistEntries
         entries = []
@@ -319,15 +358,34 @@ class HydraStrategy(StrategyHead):
                 _catalyst_strength = "MEDIUM"
             else:
                 _catalyst_strength = "LOW"
+
+            cached: Optional[PreMarketSignals] = premarket_cache.get(event.symbol)
+            if cached:
+                gap_pct = cached.gap_pct
+                volume_signal = _volume_signal_from_rel(cached.rel_volume)
+                technical_setup = _technical_setup_from_cache(cached.technical_setup)
+                sector_momentum = _sector_momentum_from_cache(
+                    cached.sector_momentum, _regime_momentum
+                )
+            else:
+                gap_pct = _fetch_gap_pct(event.symbol)
+                volume_signal = "NORMAL"
+                technical_setup = "NEUTRAL"
+                sector_momentum = _regime_momentum
+                logger.debug(
+                    f"[HYDRA] {event.symbol} not in premarket cache — using yfinance fallback"
+                )
+
             entries.append(WatchlistEntry(
                 symbol=event.symbol,
                 direction=event.direction,
                 event_summary=event.summary or event.headline,
                 urgency=urgency,
                 catalyst_strength=_catalyst_strength,
-                sector_momentum=_sector_momentum,
-                gap_pct=_fetch_gap_pct(event.symbol),
-                # volume_signal, technical_setup, fii_flow: no data at scan time → defaults
+                sector_momentum=sector_momentum,
+                gap_pct=gap_pct,
+                volume_signal=volume_signal,
+                technical_setup=technical_setup,
             ))
 
         if entries:

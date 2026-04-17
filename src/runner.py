@@ -544,7 +544,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         logging.error(f"Pre-market oracle failed: {e}")
                     last_premarket_date = current_date
 
-                # 0a. HYDRA pre-market event scan at 09:00
+                # 0a. HYDRA pre-market event scan at 08:15
                 if _market_open_today and current_time >= HYDRA_SCAN_TIME and last_hydra_scan_date != current_date:
                     try:
                         print(f"\n[{datetime.now(IST).strftime('%H:%M:%S')}] 🔥 HYDRA: Pre-market event scan...")
@@ -617,7 +617,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         try:
                             print(f"\n[{datetime.now(IST).strftime('%H:%M:%S')}] 🐍 VIPER: Initial top mover scan...")
                             access_token = os.getenv("ZERODHA_ACCESS_TOKEN", "")
-                            viper_entries = viper.scan(access_token=access_token)
+                            viper_entries = viper.scan(access_token=access_token, movers=movers)
                             if viper_entries:
                                 print(f"  VIPER watchlist ({len(viper_entries)} movers):")
                                 for ve in viper_entries:
