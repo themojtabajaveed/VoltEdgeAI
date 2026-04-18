@@ -4,6 +4,9 @@ execution:
   per_trade_risk_inr: 100000
   max_open_positions: 5
   conviction_threshold: 70
+  live_order_tag: "VOLTEDGE_AUTO"
+  eod_squareoff_time_ist: "15:15"
+  live_startup_countdown: 10
 
 router:
   dawn_confidence_min: 0.85

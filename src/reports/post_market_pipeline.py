@@ -738,7 +738,64 @@ def _build_all_sections(
     if today.weekday() == 4:
         sections.append(_build_section_12_weekly_router())
 
+    # Section 13: Live Trades Today (only when execution.dry_run=false)
+    try:
+        from src.config_loader import get_dry_run
+        if not get_dry_run():
+            sections.append(_build_section_13_live_trades())
+    except Exception as _e:
+        logger.warning(f"[Section 13] skipped: {_e}")
+
     return sections, updated_predictions, learnings
+
+
+# ── Section 13: Live Trades Today ────────────────────────────────────
+def _build_section_13_live_trades() -> str:
+    """Section 13: Summary of live orders placed today (live-mode only)."""
+    try:
+        from src.trading.live_trade_tracker import get_all_trades_today
+        trades = get_all_trades_today()
+    except Exception as e:
+        return f"## 13. Live Trades Today\n\n_Error loading live trades: {e}_\n"
+
+    if not trades:
+        return (
+            "## 13. Live Trades Today\n\n"
+            "_No live orders placed today._\n"
+        )
+
+    header = (
+        "| Symbol | Order ID | Qty | Entry (₹) | Exit (₹) | PnL % | Status |\n"
+        "|--------|----------|----:|----------:|---------:|------:|--------|\n"
+    )
+    rows: List[str] = []
+    realized_pnl = 0.0
+    unrealized_count = 0
+    open_count = 0
+    for t in trades:
+        sym = t.get("symbol", "?")
+        oid = str(t.get("order_id", "?"))
+        qty = int(t.get("quantity", 0) or 0)
+        entry = float(t.get("entry_price", 0) or 0)
+        exit_p = t.get("exit_price")
+        pnl = t.get("pnl_pct")
+        status = t.get("status", "OPEN")
+
+        exit_str = f"{float(exit_p):.2f}" if isinstance(exit_p, (int, float)) else "—"
+        pnl_str = f"{float(pnl):+.2f}" if isinstance(pnl, (int, float)) else "—"
+        rows.append(f"| {sym} | {oid} | {qty} | {entry:.2f} | {exit_str} | {pnl_str} | {status} |")
+
+        if status == "CLOSED" and isinstance(pnl, (int, float)):
+            realized_pnl += float(pnl) * float(entry) * qty / 100.0
+        if status == "OPEN":
+            open_count += 1
+            unrealized_count += 1
+
+    summary = (
+        f"\n**Summary:** total={len(trades)} · open={open_count} · "
+        f"realized P&L ≈ ₹{realized_pnl:+.0f} · unrealized positions={unrealized_count}\n"
+    )
+    return "## 13. Live Trades Today\n\n" + header + "\n".join(rows) + summary
 
 
 # ── Section 0: System Health ─────────────────────────────────────────

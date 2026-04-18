@@ -236,11 +236,110 @@ backtest:
 
 TESTS: tests/test_backtest.py (8 tests)
 
-## Phase 7 Roadmap
-- [ ] Live mode: DRY_RUN=false + real Zerodha order placement
-- [ ] Intraday backtesting (15-min candles) for DAWN timing accuracy
-- [ ] Filing data replay (BSE announcement archive) for router R1/R2/R3 testing
-- [ ] Auto-apply router tuning suggestions after 5 consecutive same signals
+## Phase 7: Live Execution (DONE)
+
+Real Zerodha order placement is now wired. `execution.dry_run: true` remains
+the default and preserves pre-Phase-7 behavior exactly; setting it to `false`
+enables a 5-gate safety system before every real order.
+
+### 5-gate safety system (evaluated in order)
+1. **Config gate** — `get_dry_run()` must be `False`; otherwise
+   `[LIVE GATE 1 FAIL] dry_run=true — order blocked`.
+2. **Conviction gate** — `conviction >= get_conviction_threshold()` (70);
+   otherwise `[LIVE GATE 2 FAIL] {symbol} conviction={X} < {threshold}`.
+3. **Daily trade limit** — `trades_placed_today < get_max_trades()` (5);
+   otherwise `[LIVE GATE 3 FAIL] Daily limit {max} reached — {symbol} blocked`.
+4. **Position limit** — `open_positions < get_max_open_positions()` (5);
+   otherwise `[LIVE GATE 4 FAIL] Max positions {max} reached — {symbol} blocked`.
+5. **Market hours** — IST time within `09:15 ≤ t ≤ 15:15`;
+   otherwise `[LIVE GATE 5 FAIL] Outside trading hours {HH:MM} IST — {symbol} blocked`.
+
+Every gate PASS also logs `[LIVE GATE {n} PASS] ...`. Gates are implemented in
+`src/trading/executor.py::run_live_gates`. If any gate fails, `place_order` is
+never called — the runner continues.
+
+### Position sizing (live mode)
+```
+per_trade_risk = get_per_trade_risk()          # ₹100000 from config
+quantity       = int(per_trade_risk / entry_price)
+```
+Below-1 quantity → order skipped with
+`[LIVE] {symbol} quantity=0 at ₹{entry_price} — skipped (price too high)`.
+Successful sizing logs
+`[LIVE] {symbol} | qty={qty} | entry=₹{entry} | risk=₹{risk}`.
+
+### Live trade tracker
+`src/trading/live_trade_tracker.py` persists every live order to
+`data/live_trades_YYYY-MM-DD.json` with:
+```
+symbol, order_id, quantity, entry_price,
+route, confidence, conviction_score,
+placed_at (ISO IST),
+status ("OPEN" | "CLOSED"),
+exit_price, exit_at, pnl_pct
+```
+APIs: `record_live_trade`, `get_trades_placed_today`, `get_open_positions`,
+`get_open_trades_today`, `get_all_trades_today`, `update_trade_status`.
+
+### EOD square-off (15:15 IST)
+`src/runner.py` checks at 15:15 IST (config key `eod_squareoff_time_ist`).
+For each OPEN record in today's live-trades file, a SELL MIS order is placed
+via `executor.execute_sell`, the tracker is closed with exit price and
+`pnl_pct`, and a logline `[EOD SQUARE-OFF] {symbol} | qty={n} | order_id={id}`
+is emitted. Failures emit
+`[EOD SQUARE-OFF FAILED] {symbol} — MANUAL ACTION REQUIRED` plus an immediate
+email alert.
+
+### Startup banner
+When live mode is on at startup, runner prints:
+```
+⚠️  LIVE MODE ACTIVE — REAL ORDERS WILL BE PLACED
+Conviction threshold : 70
+Max trades/day       : 5
+Per-trade risk       : ₹1,00,000
+Max open positions   : 5
+Press Ctrl+C within 10 seconds to abort...
+```
+then sleeps `execution.live_startup_countdown` (default 10s) before proceeding.
+
+### Email alert on live order
+`src/reports/email_sender.py::send_live_order_alert` fires the moment an order
+is placed. Subject: `VoltEdgeAI LIVE ORDER: {symbol} | qty={qty} | ₹{entry}`.
+Body includes all 5 gate passes + conviction. Gated on
+`reporting.email_enabled`.
+
+### Post-market Section 13
+`src/reports/post_market_pipeline.py::_build_section_13_live_trades` adds
+`## 13. Live Trades Today` to the EOD email when dry_run=false:
+a per-trade table (symbol · order_id · qty · entry · exit · pnl_pct · status)
+plus a summary line with realized and unrealized totals.
+
+### New config.yaml keys (execution)
+```yaml
+execution:
+  live_order_tag: "VOLTEDGE_AUTO"
+  eod_squareoff_time_ist: "15:15"
+  live_startup_countdown: 10
+```
+Accessors: `get_live_order_tag()`, `get_eod_squareoff_time()`,
+`get_live_startup_countdown()`.
+
+### How to enable live mode
+Set `execution.dry_run: false` in `config.yaml`, then restart the service.
+WARNING: Real orders will be placed. Ensure Kite token is valid.
+
+### How to emergency-stop
+Set `execution.dry_run: true` in `config.yaml` and restart, OR
+`sudo systemctl stop voltedge` to halt the runner immediately.
+
+ARTIFACTS: `data/live_trades_YYYY-MM-DD.json`
+TESTS: `tests/test_live_execution.py` (10 tests)
+
+## Phase 8 Roadmap
+- [ ] Stoploss order placement (bracket orders or SL-M)
+- [ ] Intraday position monitoring (check order status every 15 min)
+- [ ] P&L dashboard (web UI or Telegram bot)
+- [ ] Multi-strategy capital allocation (DAWN vs HYDRA budget split)
 
 ## DAWN Strategy (8:45 AM email + 9:15 market order)
 OPEN: src/strategies/viper.py → search "DAWN" block

@@ -25,6 +25,9 @@ _DEFAULTS: Dict[str, Any] = {
         "per_trade_risk_inr": 100000,
         "max_open_positions": 5,
         "conviction_threshold": 70,
+        "live_order_tag": "VOLTEDGE_AUTO",
+        "eod_squareoff_time_ist": "15:15",
+        "live_startup_countdown": 10,
     },
     "router": {
         "dawn_confidence_min": 0.85,
@@ -216,6 +219,18 @@ def get_max_open_positions() -> int:
 
 def get_dry_run() -> bool:
     return bool(load_config().get("execution", {}).get("dry_run", True))
+
+
+def get_live_order_tag() -> str:
+    return str(load_config().get("execution", {}).get("live_order_tag", "VOLTEDGE_AUTO"))
+
+
+def get_eod_squareoff_time() -> str:
+    return str(load_config().get("execution", {}).get("eod_squareoff_time_ist", "15:15"))
+
+
+def get_live_startup_countdown() -> int:
+    return int(load_config().get("execution", {}).get("live_startup_countdown", 10))
 
 
 # ── Typed accessors — router ───────────────────────────────────────────────

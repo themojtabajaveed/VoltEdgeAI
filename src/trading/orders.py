@@ -17,6 +17,7 @@ class OrderRequest:
     quantity: int
     order_type: OrderType = OrderType.MARKET
     timestamp: Optional[datetime] = None
+    tag: Optional[str] = None
     # Optional: stop_loss, target, etc. later
 
 @dataclass

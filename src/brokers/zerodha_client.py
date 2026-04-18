@@ -65,15 +65,18 @@ class ZerodhaClient:
                 return OrderResult(success=False, broker_order_id=None, message=f"Invalid OrderSide: {req.side}")
 
             # Note: For intraday you might use PRODUCT_MIS. CNC is for delivery (cash n carry)
-            order_id = self._kite.place_order(
+            kite_kwargs = dict(
                 variety=self._kite.VARIETY_REGULAR,
                 exchange=self._kite.EXCHANGE_NSE,
                 tradingsymbol=req.symbol,
                 transaction_type=transaction_type,
                 quantity=req.quantity,
                 product=self._kite.PRODUCT_MIS,   # MIS = Margin Intraday Square-off (required for shorting + auto-squareoff)
-                order_type=self._kite.ORDER_TYPE_MARKET
+                order_type=self._kite.ORDER_TYPE_MARKET,
             )
+            if req.tag:
+                kite_kwargs["tag"] = req.tag
+            order_id = self._kite.place_order(**kite_kwargs)
             return OrderResult(
                 success=True,
                 broker_order_id=str(order_id),

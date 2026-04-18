@@ -116,3 +116,49 @@ def send_report_email(
     except Exception as e:
         logger.error(f"[Email] FAILED '{subject}' to {to_addr}: {type(e).__name__}: {e}")
         return False
+
+
+def send_live_order_alert(
+    symbol: str,
+    order_id: str,
+    quantity: int,
+    entry_price: float,
+    route: str = "UNROUTED",
+    conviction: float = 0.0,
+    side: str = "BUY",
+) -> bool:
+    """
+    Phase 7: Immediate email alert when a LIVE order is placed.
+    Gated on reporting.email_enabled in config.yaml — returns False if disabled
+    or if SMTP creds are missing. Never raises.
+    """
+    try:
+        from src.config_loader import get_email_enabled
+        if not get_email_enabled():
+            logger.info(f"[Email] Skipped live alert for {symbol} — email_enabled=false")
+            return False
+    except Exception:
+        pass
+
+    subject = f"VoltEdgeAI LIVE ORDER: {symbol} | qty={quantity} | ₹{entry_price:.2f}"
+    body = (
+        f"# LIVE ORDER PLACED\n\n"
+        f"- **Symbol:** {symbol}\n"
+        f"- **Side:** {side}\n"
+        f"- **Quantity:** {quantity}\n"
+        f"- **Entry Price:** ₹{entry_price:.2f}\n"
+        f"- **Order ID:** {order_id}\n"
+        f"- **Route:** {route}\n"
+        f"- **Conviction:** {conviction:.0f}\n\n"
+        f"## 5-Gate Safety Check\n"
+        f"- [LIVE GATE 1 PASS] dry_run=false\n"
+        f"- [LIVE GATE 2 PASS] conviction={conviction:.0f} >= threshold\n"
+        f"- [LIVE GATE 3 PASS] daily trade limit respected\n"
+        f"- [LIVE GATE 4 PASS] open-position limit respected\n"
+        f"- [LIVE GATE 5 PASS] within 09:15–15:15 IST trading window\n"
+    )
+    try:
+        return send_report_email(subject=subject, body_md=body)
+    except Exception as e:
+        logger.error(f"[Email] send_live_order_alert crashed for {symbol}: {e}")
+        return False

@@ -206,6 +206,33 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
         f"max_trades={cfg_max_trades}, risk=₹{cfg_per_trade_risk:,.0f})"
     )
 
+    # ── Phase 7: live-mode startup confirmation ────────────────────────
+    from src.config_loader import get_dry_run, get_live_startup_countdown
+    if not get_dry_run():
+        countdown = get_live_startup_countdown()
+        print("\n" + "=" * 60)
+        print("⚠️  LIVE MODE ACTIVE — REAL ORDERS WILL BE PLACED")
+        print(f"Conviction threshold : {cfg_conviction}")
+        print(f"Max trades/day       : {cfg_max_trades}")
+        print(f"Per-trade risk       : ₹{cfg_per_trade_risk:,.0f}")
+        print(f"Max open positions   : {cfg_max_open_positions}")
+        print(f"Press Ctrl+C within {countdown} seconds to abort...")
+        print("=" * 60)
+        logging.warning(
+            f"LIVE MODE ACTIVE — real orders enabled (conviction={cfg_conviction}, "
+            f"max_trades={cfg_max_trades}, risk=₹{cfg_per_trade_risk:,.0f})"
+        )
+        try:
+            time.sleep(countdown)
+        except KeyboardInterrupt:
+            print("\n[LIVE MODE ABORTED BY USER]")
+            logging.warning("Live mode aborted by user during countdown")
+            raise
+        print("Live mode confirmed — proceeding")
+        logging.info("Live mode confirmed — proceeding")
+    else:
+        print("DRY RUN MODE — no real orders will be placed")
+
     # P0-B: Email config validation at startup
     from src.reports.email_sender import validate_email_config
     email_status = validate_email_config()
@@ -306,6 +333,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     pre_market_ran      = False   # Track if pre-market brief succeeded today
     last_regime_update  = None    # V3: live regime updates
     last_autopsy_date        = None    # Phase G: EOD autopsy
+    last_squareoff_date      = None    # Phase 7: 15:15 live EOD square-off
     runner_start_time        = datetime.now(IST).time()  # Phase I: cascade prevention
     last_candle_cache_write  = None    # TimesFM: periodic 5-min candle refresh
     scanner_long_symbols:  list = []
@@ -950,7 +978,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
 
                                 if entry.direction == "BUY":
                                     stop_price = round(ltp - stop_dist, 2)
-                                    result = executor.execute_buy(symbol=entry.symbol, ltp=ltp, qty=qty, market_regime=load_daily_regime())
+                                    result = executor.execute_buy(symbol=entry.symbol, ltp=ltp, qty=qty, market_regime=load_daily_regime(), conviction=conviction.total, route="HYDRA")
                                     if result.success:
                                         risk_state.trades_taken += 1
                                         daily_traded_symbols.add(entry.symbol)
@@ -966,7 +994,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                                       meta={"strategy": "HYDRA_EVENT", "conviction": conviction.total, "stop": stop_price, "event": entry.event_summary})
                                 elif entry.direction == "SHORT":
                                     stop_price = round(ltp + stop_dist, 2)
-                                    result = executor.execute_short_sell(symbol=entry.symbol, ltp=ltp, qty=qty)
+                                    result = executor.execute_short_sell(symbol=entry.symbol, ltp=ltp, qty=qty, conviction=conviction.total, route="HYDRA")
                                     if result.success:
                                         risk_state.trades_taken += 1
                                         daily_traded_symbols.add(entry.symbol)
@@ -1084,7 +1112,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
 
                                     if entry.direction == "BUY":
                                         stop_price = round(ltp - stop_dist, 2)
-                                        result = executor.execute_buy(symbol=entry.symbol, ltp=ltp, qty=qty, market_regime=load_daily_regime())
+                                        result = executor.execute_buy(symbol=entry.symbol, ltp=ltp, qty=qty, market_regime=load_daily_regime(), conviction=conviction.total, route="VIPER")
                                         if result.success:
                                             risk_state.trades_taken += 1
                                             daily_traded_symbols.add(entry.symbol)
@@ -1104,7 +1132,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                                                 "confluence": slot_manager.is_confluence(entry.symbol)})
                                     elif entry.direction == "SHORT":
                                         stop_price = round(ltp + stop_dist, 2)
-                                        result = executor.execute_short_sell(symbol=entry.symbol, ltp=ltp, qty=qty)
+                                        result = executor.execute_short_sell(symbol=entry.symbol, ltp=ltp, qty=qty, conviction=conviction.total, route="VIPER")
                                         if result.success:
                                             risk_state.trades_taken += 1
                                             daily_traded_symbols.add(entry.symbol)
@@ -1306,7 +1334,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
 
                                 if sig.direction == "BUY":
                                     stop_price = round(ltp - stop_dist, 2)
-                                    result = executor.execute_buy(symbol=sym, ltp=ltp, qty=qty, market_regime=load_daily_regime())
+                                    result = executor.execute_buy(symbol=sym, ltp=ltp, qty=qty, market_regime=load_daily_regime(), conviction=float(sig.last_conviction or 0.0), route=sig.strategy)
                                     if result.success:
                                         risk_state.trades_taken += 1
                                         daily_traded_symbols.add(sym)
@@ -1321,7 +1349,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                                       meta={"strategy": f"{sig.strategy}_CONV", "conviction": sig.last_conviction, "stop": stop_price, "event": sig.event_summary})
                                 elif sig.direction == "SHORT":
                                     stop_price = round(ltp + stop_dist, 2)
-                                    result = executor.execute_short_sell(symbol=sym, ltp=ltp, qty=qty)
+                                    result = executor.execute_short_sell(symbol=sym, ltp=ltp, qty=qty, conviction=float(sig.last_conviction or 0.0), route=sig.strategy)
                                     if result.success:
                                         risk_state.trades_taken += 1
                                         daily_traded_symbols.add(sym)
@@ -1756,8 +1784,68 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
 
                         last_intraday_run = now
                 
+                # ── Phase 7: 15:15 IST — live EOD square-off (live-mode only) ──
+                try:
+                    from src.config_loader import get_dry_run as _cfg_dry_run, get_eod_squareoff_time
+                    if not _cfg_dry_run() and _market_open_today:
+                        _sq_str = get_eod_squareoff_time()
+                        _sq_h, _sq_m = [int(x) for x in _sq_str.split(":")]
+                        _sq_time = dt_time(_sq_h, _sq_m)
+                        if (_should_fire_scheduled_job(_sq_time, runner_start_time, current_time)
+                                and last_squareoff_date != current_date):
+                            from src.trading.live_trade_tracker import (
+                                get_open_positions as _lv_open,
+                                get_open_trades_today as _lv_open_trades,
+                                update_trade_status as _lv_update,
+                            )
+                            _open_count = _lv_open()
+                            if _open_count > 0:
+                                msg = f"[EOD] {_open_count} open positions detected at 15:15 — initiating square-off check"
+                                print(f"  ⏰ {msg}")
+                                logging.info(msg)
+                                for _otr in _lv_open_trades():
+                                    _sym = _otr.get("symbol", "")
+                                    _oqty = int(_otr.get("quantity", 0) or 0)
+                                    _tick = client.get_last_tick(_sym)
+                                    _ltp = _tick.ltp if _tick else float(_otr.get("entry_price", 0) or 0)
+                                    try:
+                                        _exit = executor.execute_sell(
+                                            symbol=_sym, qty=_oqty, ltp=_ltp,
+                                            route="EOD_SQUAREOFF",
+                                        )
+                                        if _exit.success:
+                                            _eid = _exit.broker_order_id or ""
+                                            _lv_update(order_id=_otr.get("order_id", ""),
+                                                       exit_price=_ltp,
+                                                       exit_at=datetime.now(IST).isoformat())
+                                            logging.info(
+                                                f"[EOD SQUARE-OFF] {_sym} | qty={_oqty} | order_id={_eid}"
+                                            )
+                                            print(f"  ✅ [EOD SQUARE-OFF] {_sym} | qty={_oqty} | order_id={_eid}")
+                                        else:
+                                            _err = f"[EOD SQUARE-OFF FAILED] {_sym} — MANUAL ACTION REQUIRED ({_exit.message})"
+                                            logging.error(_err)
+                                            print(f"  ❌ {_err}")
+                                            try:
+                                                from src.reports.email_sender import send_report_email
+                                                send_report_email(
+                                                    subject=f"VoltEdgeAI URGENT: EOD Square-Off FAILED for {_sym}",
+                                                    body_md=f"# URGENT\n\nEOD square-off failed for {_sym} (qty={_oqty}).\n\nReason: {_exit.message}\n\n**Manual action required on Kite now.**",
+                                                )
+                                            except Exception as _eem:
+                                                logging.error(f"[EOD] failure-alert email crashed: {_eem}")
+                                    except Exception as _se:
+                                        _err = f"[EOD SQUARE-OFF FAILED] {_sym} — MANUAL ACTION REQUIRED ({_se})"
+                                        logging.error(_err)
+                                        print(f"  ❌ {_err}")
+                            else:
+                                logging.info("[EOD] 15:15 check — no open live positions")
+                            last_squareoff_date = current_date
+                except Exception as _sq_e:
+                    logging.error(f"[EOD] Phase 7 square-off block failed: {_sq_e}")
+
                 # 2. End of Day tasks after 15:30
-                elif _market_open_today and current_time > MARKET_END:
+                if _market_open_today and current_time > MARKET_END:
                     if last_eod_run_date != current_date:
                         run_script("log_daily_performance.py")
                         # ── VIPER: Save COIL dry-run report + daily reset ──
