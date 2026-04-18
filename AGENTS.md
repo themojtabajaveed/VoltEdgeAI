@@ -175,11 +175,60 @@ ARTIFACTS: data/counterfactual_YYYY-MM-DD.json
 TESTS: tests/test_counterfactual.py, tests/test_router_tuner.py
 SKIP: everything else unless a bug crosses these modules
 
-## Phase 6 Roadmap (not yet implemented)
+## Phase 6: Backtesting Harness (DONE)
+
+### Architecture
+data_loader → signal_replayer → engine
+
+- `src/backtest/data_loader.py` — fetches daily OHLCV via Zerodha KiteConnect / SQLite cache
+- `src/backtest/signal_replayer.py` — builds WatchlistEntry from candle, runs router + conviction gate
+- `src/backtest/engine.py` — orchestrator: BacktestRouter, BacktestConvictionScorer, run_backtest(), print_backtest_report()
+- `src/backtest/__main__.py` — CLI entry point
+
+### How to run
+```
+python -m src.backtest --days 90
+python -m src.backtest --days 30 --no-persist
+```
+
+### What it tests
+Router + conviction gate replayed on 90 calendar days of real daily price data.
+No filing data, no news, no intraday resolution — pure daily OHLCV through the
+deterministic routing rules and simplified conviction scoring.
+
+### config.yaml backtest section
+```yaml
+backtest:
+  default_days: 90
+  target_pct: 2.0        # 2% profit target per trade
+  sl_pct: 1.5            # stop loss % (positive, applied as -sl_pct)
+  throttle_seconds: 0.35 # sleep between Kite API calls
+  auto_run_weekly: false  # set true to trigger every Friday post-market
+```
+
+### Limitations
+- No intraday simulation: uses daily open/close/high/low only; assumes 09:15 open entry
+- No filing or news data in replay: filing_category="" for all historical entries → router
+  R1/R2 rules always fail → most signals route to HYDRA, almost none to DAWN
+- KiteConnect cache only: requires `data/history.db` to be populated by live bar builder;
+  fresh installs return [] for all symbols (no live Kite client in backtest mode)
+- BacktestConvictionScorer is a simplified heuristic (gap_pct + volume), not the live
+  multi-layer engine — scores are directionally correct but not calibrated
+
+### Output
+`data/backtest_YYYY-MM-DD_90d.json` + formatted CLI report
+
+### config.yaml accessors added to config_loader.py
+`get_backtest_days()`, `get_backtest_target_pct()`, `get_backtest_sl_pct()`,
+`get_backtest_throttle()`, `get_backtest_auto_run_weekly()`
+
+TESTS: tests/test_backtest.py (8 tests)
+
+## Phase 7 Roadmap
 - [ ] Live mode: DRY_RUN=false + real Zerodha order placement
-- [ ] Backtesting harness (replay historical days through router + conviction gate)
-- [ ] Auto-apply tuning suggestions after N consecutive same-direction signals
-- [ ] Telegram/WhatsApp alert for missed opportunities > 3 in a week
+- [ ] Intraday backtesting (15-min candles) for DAWN timing accuracy
+- [ ] Filing data replay (BSE announcement archive) for router R1/R2/R3 testing
+- [ ] Auto-apply router tuning suggestions after 5 consecutive same signals
 
 ## DAWN Strategy (8:45 AM email + 9:15 market order)
 OPEN: src/strategies/viper.py → search "DAWN" block

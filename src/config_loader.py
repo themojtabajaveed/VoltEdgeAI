@@ -61,6 +61,13 @@ _DEFAULTS: Dict[str, Any] = {
         "sl_pct": -1.5,
         "auto_run_post_market": True,
     },
+    "backtest": {
+        "default_days": 90,
+        "target_pct": 2.0,
+        "sl_pct": 1.5,
+        "throttle_seconds": 0.35,
+        "auto_run_weekly": False,
+    },
 }
 
 
@@ -253,3 +260,25 @@ def get_router_filter_log() -> bool:
 
 def get_dry_run_log() -> bool:
     return bool(load_config().get("logging", {}).get("dry_run_log", True))
+
+
+# ── Typed accessors — backtest ─────────────────────────────────────────────
+
+def get_backtest_days() -> int:
+    return int(load_config().get("backtest", {}).get("default_days", 90))
+
+
+def get_backtest_target_pct() -> float:
+    return float(load_config().get("backtest", {}).get("target_pct", 2.0))
+
+
+def get_backtest_sl_pct() -> float:
+    return float(load_config().get("backtest", {}).get("sl_pct", 1.5))
+
+
+def get_backtest_throttle() -> float:
+    return float(load_config().get("backtest", {}).get("throttle_seconds", 0.35))
+
+
+def get_backtest_auto_run_weekly() -> bool:
+    return bool(load_config().get("backtest", {}).get("auto_run_weekly", False))

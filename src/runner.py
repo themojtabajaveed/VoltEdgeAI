@@ -1906,6 +1906,29 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             logging.error(f"Counterfactual analysis failed: {cf_e}")
                             print(f"  ❌ Counterfactual failed: {cf_e}")
 
+                        # ── Phase 6: Weekly backtest auto-run (Fridays only) ──
+                        try:
+                            from src.config_loader import (
+                                get_backtest_auto_run_weekly, get_backtest_days,
+                            )
+                            if get_backtest_auto_run_weekly() and weekday == 4:
+                                from src.backtest.engine import run_backtest
+                                _bt_days = get_backtest_days()
+                                _bt_result = run_backtest(days=_bt_days)
+                                logging.info(
+                                    f"[BACKTEST] Weekly backtest complete — "
+                                    f"see data/backtest_{current_date}_{_bt_days}d.json"
+                                )
+                                print(
+                                    f"  📈 Backtest ({_bt_days}d): "
+                                    f"{_bt_result['trades_taken']} trades | "
+                                    f"WR={_bt_result['win_rate']:.1%} | "
+                                    f"P&L={_bt_result['total_pnl_pct']:+.2f}%"
+                                )
+                        except Exception as bt_e:
+                            logging.error(f"Weekly backtest failed: {bt_e}")
+                            print(f"  ❌ Weekly backtest failed: {bt_e}")
+
                         last_report_date = current_date
                         last_autopsy_date = current_date
 

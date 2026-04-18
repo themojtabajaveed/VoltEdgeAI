@@ -91,6 +91,11 @@ class WatchlistEntry:
         if self.added_at is None:
             self.added_at = datetime.now()
 
+    @property
+    def momentum_score(self) -> float:
+        """Intraday move as a decimal fraction (gap_pct / 100)."""
+        return self.gap_pct / 100.0
+
 
 class StrategyHead(ABC):
     """

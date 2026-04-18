@@ -39,3 +39,10 @@ counterfactual:
   target_pct: 2.0
   sl_pct: -1.5
   auto_run_post_market: true
+
+backtest:
+  default_days: 90
+  target_pct: 2.0        # 2% profit target
+  sl_pct: 1.5            # stop loss % (positive number, applied as -sl_pct)
+  throttle_seconds: 0.35 # sleep between Kite API calls
+  auto_run_weekly: false  # if true, runner.py triggers backtest every Friday
