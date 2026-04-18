@@ -867,12 +867,20 @@ def generate_post_market_report(
         section_9 = section_9_fallback
         logger.info("[PostMarket] Using rule-based fallback for Section 9")
 
-    # ── Section 10: Router Performance (Phase 3F) ──
+    # ── Section 10: Router Performance (Phase 3F, gated by config.yaml) ──
     try:
-        section_10 = _build_section_10_router(today, db_ctx.get("trades", []))
-    except Exception as router_section_e:
-        logger.warning(f"Router section build failed: {router_section_e}")
-        section_10 = "## 10. Router Performance\n\n_Unavailable._"
+        from src.config_loader import get_router_performance_section
+        _section_10_enabled = get_router_performance_section()
+    except Exception:
+        _section_10_enabled = True
+    if not _section_10_enabled:
+        section_10 = ""
+    else:
+        try:
+            section_10 = _build_section_10_router(today, db_ctx.get("trades", []))
+        except Exception as router_section_e:
+            logger.warning(f"Router section build failed: {router_section_e}")
+            section_10 = "## 10. Router Performance\n\n_Unavailable._"
 
     # ── Assemble machine-generated sections ──────────────────────────────
     machine_report = f"""# VoltEdge Post-Market Report — {today}

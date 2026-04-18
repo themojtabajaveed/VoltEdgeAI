@@ -1,5 +1,39 @@
+execution:
+  dry_run: true
+  max_trades_per_day: 5
+  per_trade_risk_inr: 100000
+  max_open_positions: 5
+  conviction_threshold: 70
+
 router:
   dawn_confidence_min: 0.85
+  hydra_confidence_min: 0.0
+  router_enabled: true
+
+dawn:
+  pre_market_scan_enabled: true
+  scan_time_ist: "08:30"
+  select_time_ist: "08:45"
+
+hydra:
+  scan_time_ist: "08:15"
+  shadows_persist: true
+  shadows_dir: "data/"
+
+market:
+  open_time_ist: "09:15"
+  close_time_ist: "15:30"
+  intraday_interval_minutes: 15
+
+reporting:
+  post_market_report_enabled: true
+  router_performance_section: true
+  email_enabled: true
+
+logging:
+  conviction_gate_log: true
+  router_filter_log: true
+  dry_run_log: true
 
 counterfactual:
   target_pct: 2.0

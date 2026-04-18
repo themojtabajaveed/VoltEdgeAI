@@ -157,7 +157,7 @@ def _should_fire_scheduled_job(scheduled_time: dt_time, runner_start_time: dt_ti
 def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_per_day: int = 3):
     # Ensure logs directory exists
     os.makedirs(LOG_DIR, exist_ok=True)
-    
+
     # Configure logging inline
     logging.basicConfig(
         filename=LOG_FILE,
@@ -165,11 +165,31 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
 
+    # ── Phase 4: load config.yaml and override runtime params ──────────
+    from src.config_loader import (
+        get_conviction_threshold, get_max_open_positions, get_max_trades,
+        get_per_trade_risk, validate_config,
+    )
+    try:
+        validate_config()
+    except ValueError as _cfg_err:
+        logging.error(f"[config] validate_config failed: {_cfg_err}")
+        print(f"  ❌ config.yaml invalid: {_cfg_err}")
+        raise
+
+    cfg_conviction = get_conviction_threshold()
+    cfg_max_trades = get_max_trades()
+    cfg_per_trade_risk = get_per_trade_risk()
+    cfg_max_open_positions = get_max_open_positions()
+
     risk_cfg = load_risk_config()
+    # Env var LIVE_MODE=true wins for live_mode only; all other params: config.yaml wins.
     risk_cfg.live_mode = live_mode
-    risk_cfg.per_trade_capital_rupees = float(per_trade_capital)
-    risk_cfg.max_trades_per_day = max_trades_per_day
-    
+    risk_cfg.per_trade_capital_rupees = float(cfg_per_trade_risk)
+    risk_cfg.max_trades_per_day = cfg_max_trades
+    risk_cfg.max_open_positions = cfg_max_open_positions
+    max_trades_per_day = cfg_max_trades
+
     print("--- VoltEdgeAI Automated Runner ---")
     print(f"Market Hours: {MARKET_START} to {MARKET_END} IST")
     print(f"Intraday interval: {INTRADAY_INTERVAL_MIN} minutes")
@@ -181,6 +201,10 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     print(f"Max Trades / Day: {risk_cfg.max_trades_per_day}")
     print(f"Per-Trade Risk : ₹{risk_cfg.per_trade_capital_rupees:,.2f}")
     print(f"Open Positions : {risk_cfg.max_open_positions}")
+    print(
+        f"Config: config.yaml (conviction={cfg_conviction}, "
+        f"max_trades={cfg_max_trades}, risk=₹{cfg_per_trade_risk:,.0f})"
+    )
 
     # P0-B: Email config validation at startup
     from src.reports.email_sender import validate_email_config
@@ -611,30 +635,34 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
 
                     # ── Phase 3B: persist hydra_shadows to disk for counterfactual tracking ──
                     try:
-                        import json as _json
-                        from pathlib import Path as _Path
-                        _shadow_path = _Path("data") / f"hydra_shadows_{current_date.isoformat()}.json"
-                        _shadow_payload = []
-                        for _sh, _ent in zip(hydra_shadows_today, dawn_candidates_today):
-                            _shadow_payload.append({
-                                "symbol": _sh.get("symbol"),
-                                "confidence": float(getattr(_ent, "confidence", 0.0) or 0.0),
-                                "route": getattr(_ent, "route", "") or "DAWN",
-                                "routed_at": getattr(_ent, "routed_at", None),
-                                "momentum_score": float(_ent.metadata.get("momentum_score", 0.0)) if isinstance(getattr(_ent, "metadata", None), dict) else 0.0,
-                                "avg_volume_20d": int(getattr(_ent, "avg_volume_20d", 0) or 0),
-                                "filing_category": getattr(_ent, "filing_category", "") or "",
-                                "filing_urgency": float(getattr(_ent, "filing_urgency", 0.0) or 0.0),
-                                "direction": _sh.get("direction"),
-                                "gap_pct": _sh.get("gap_pct"),
-                                "dawn_entry_time": _sh.get("dawn_entry_time"),
-                                "event_summary": _sh.get("event_summary"),
-                            })
-                        _shadow_path.parent.mkdir(parents=True, exist_ok=True)
-                        with open(_shadow_path, "w") as _f:
-                            _json.dump(_shadow_payload, _f, indent=2, default=str)
-                        logging.info(f"[Router] Persisted {len(_shadow_payload)} hydra_shadows to {_shadow_path}")
-                        print(f"  💾 Persisted {len(_shadow_payload)} HYDRA shadows to {_shadow_path.name}")
+                        from src.config_loader import get_shadows_dir, get_shadows_persist
+                        if not get_shadows_persist():
+                            logging.info("[Router] shadows_persist=False via config.yaml — skipping persistence")
+                        else:
+                            import json as _json
+                            from pathlib import Path as _Path
+                            _shadow_path = _Path(get_shadows_dir()) / f"hydra_shadows_{current_date.isoformat()}.json"
+                            _shadow_payload = []
+                            for _sh, _ent in zip(hydra_shadows_today, dawn_candidates_today):
+                                _shadow_payload.append({
+                                    "symbol": _sh.get("symbol"),
+                                    "confidence": float(getattr(_ent, "confidence", 0.0) or 0.0),
+                                    "route": getattr(_ent, "route", "") or "DAWN",
+                                    "routed_at": getattr(_ent, "routed_at", None),
+                                    "momentum_score": float(_ent.metadata.get("momentum_score", 0.0)) if isinstance(getattr(_ent, "metadata", None), dict) else 0.0,
+                                    "avg_volume_20d": int(getattr(_ent, "avg_volume_20d", 0) or 0),
+                                    "filing_category": getattr(_ent, "filing_category", "") or "",
+                                    "filing_urgency": float(getattr(_ent, "filing_urgency", 0.0) or 0.0),
+                                    "direction": _sh.get("direction"),
+                                    "gap_pct": _sh.get("gap_pct"),
+                                    "dawn_entry_time": _sh.get("dawn_entry_time"),
+                                    "event_summary": _sh.get("event_summary"),
+                                })
+                            _shadow_path.parent.mkdir(parents=True, exist_ok=True)
+                            with open(_shadow_path, "w") as _f:
+                                _json.dump(_shadow_payload, _f, indent=2, default=str)
+                            logging.info(f"[Router] Persisted {len(_shadow_payload)} hydra_shadows to {_shadow_path}")
+                            print(f"  💾 Persisted {len(_shadow_payload)} HYDRA shadows to {_shadow_path.name}")
                     except Exception as _persist_e:
                         logging.error(f"hydra_shadows persistence failed: {_persist_e}")
 
@@ -2002,8 +2030,13 @@ if __name__ == "__main__":
         else:
             print("⚠️ No access token available. Set ZERODHA_USER_ID, ZERODHA_PASSWORD, ZERODHA_TOTP_SECRET for auto-login.")
 
+    # Phase 4: config.yaml is the source of truth. Env LIVE_MODE=1 still wins
+    # (forces live mode even if config.dry_run=true). All other params from config.
+    from src.config_loader import get_dry_run, get_max_trades, get_per_trade_risk
+    _env_live = os.getenv("VOLTEDGE_LIVE_MODE", "0") == "1" or os.getenv("LIVE_MODE", "").lower() == "true"
+    _cfg_live = not get_dry_run()
     run_loop(
-        live_mode=os.getenv("VOLTEDGE_LIVE_MODE", "0") == "1",
-        per_trade_capital=int(float(os.getenv("VOLTEDGE_PER_TRADE_CAPITAL", "5000"))),
-        max_trades_per_day=int(os.getenv("VOLTEDGE_MAX_TRADES_PER_DAY", "5"))
+        live_mode=_env_live or _cfg_live,
+        per_trade_capital=int(get_per_trade_risk()),
+        max_trades_per_day=int(get_max_trades()),
     )

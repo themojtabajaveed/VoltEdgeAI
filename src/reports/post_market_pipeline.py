@@ -1628,7 +1628,15 @@ def _persist_and_email(
         except Exception as e:
             logger.warning(f"[PostMarket/S5] Learning persistence failed: {e}")
 
-    # 4. Email
+    # 4. Email (Phase 4: gated on config.yaml:reporting.email_enabled)
+    try:
+        from src.config_loader import get_email_enabled
+        _email_enabled = get_email_enabled()
+    except Exception:
+        _email_enabled = True
+    if not _email_enabled:
+        logger.info("[PostMarket/S5] email_enabled=false via config.yaml — skipping email send")
+        return report_path
     try:
         from src.reports.email_sender import send_report_email
         email_ok = send_report_email(

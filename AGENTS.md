@@ -39,11 +39,100 @@ ARTIFACT: data/hydra_shadows_YYYY-MM-DD.json — counterfactual HYDRA tracker
 TESTS: tests/test_router.py, tests/test_phase3_wiring.py
 SKIP: everything else unless behavior bug crosses these files
 
-## Phase 4 Roadmap (not yet implemented)
+## Phase 4: Config System (COMPLETE)
+config.yaml at repo root is now the single source of truth for all tunable params.
+Zero hardcoded values remain in runner / conviction_engine / router / post-market
+report / executor. Env var LIVE_MODE=1 (or VOLTEDGE_LIVE_MODE=1) is the sole
+override — it forces live_mode even if config says dry_run:true.
+
+### Full config.yaml (8 sections)
+```yaml
+execution:
+  dry_run: true
+  max_trades_per_day: 5
+  per_trade_risk_inr: 100000
+  max_open_positions: 5
+  conviction_threshold: 70
+
+router:
+  dawn_confidence_min: 0.85
+  hydra_confidence_min: 0.0
+  router_enabled: true
+
+dawn:
+  pre_market_scan_enabled: true
+  scan_time_ist: "08:30"
+  select_time_ist: "08:45"
+
+hydra:
+  scan_time_ist: "08:15"
+  shadows_persist: true
+  shadows_dir: "data/"
+
+market:
+  open_time_ist: "09:15"
+  close_time_ist: "15:30"
+  intraday_interval_minutes: 15
+
+reporting:
+  post_market_report_enabled: true
+  router_performance_section: true
+  email_enabled: true
+
+logging:
+  conviction_gate_log: true
+  router_filter_log: true
+  dry_run_log: true
+
+counterfactual:
+  target_pct: 2.0
+  sl_pct: -1.5
+  auto_run_post_market: true
+```
+
+### Wiring table (param → config key → reader)
+| Param                  | Config key                              | Reader (file)                           |
+|------------------------|-----------------------------------------|-----------------------------------------|
+| conviction threshold   | execution.conviction_threshold          | src/trading/conviction_engine.py        |
+| dry-run / live mode    | execution.dry_run (env LIVE_MODE wins)  | src/runner.py (entry point)             |
+| max trades / day       | execution.max_trades_per_day            | src/runner.py                           |
+| per-trade risk ₹       | execution.per_trade_risk_inr            | src/runner.py                           |
+| max open positions     | execution.max_open_positions            | src/runner.py                           |
+| router kill-switch     | router.router_enabled                   | src/strategies/router.py                |
+| DAWN min confidence    | router.dawn_confidence_min              | src/strategies/router.py                |
+| HYDRA min confidence   | router.hydra_confidence_min             | src/strategies/router.py                |
+| shadow persistence     | hydra.shadows_persist                   | src/runner.py (08:15 block)             |
+| shadow directory       | hydra.shadows_dir                       | src/runner.py (08:15 block)             |
+| Section 10 toggle      | reporting.router_performance_section    | src/reports/post_market_report.py       |
+| email send toggle      | reporting.email_enabled                 | src/reports/post_market_pipeline.py     |
+| conviction-gate log    | logging.conviction_gate_log             | src/trading/conviction_engine.py        |
+| dry-run log            | logging.dry_run_log                     | src/trading/executor.py                 |
+| counterfactual targets | counterfactual.target_pct / sl_pct      | src/analysis/counterfactual.py          |
+| counterfactual auto    | counterfactual.auto_run_post_market     | src/runner.py (16:00 post-market block) |
+
+### validate_config() — raises ValueError on:
+- execution.conviction_threshold not int in [50, 100]
+- execution.max_trades_per_day not int in [1, 20]
+- execution.per_trade_risk_inr not numeric > 0
+- execution.max_open_positions not int in [1, 20]
+- execution.dry_run not bool
+- router.dawn_confidence_min not float in [0.0, 1.0]
+- router.hydra_confidence_min not float in [0.0, 1.0]
+- counterfactual.target_pct / sl_pct not numeric
+- counterfactual.auto_run_post_market not bool
+
+Called at runner startup — service fails loudly on bad config rather than
+trading with garbage parameters.
+
+### Phase 4 Roadmap (remaining, not yet implemented)
 - Wire `route` + `confidence` into ConvictionEngine metadata so TradeRecord stores them
 - Pattern DB learning loop: use hydra_shadows_*.json to populate follow-through rates
 - Router R5 graduation: replace cold-start pass with live pattern_db lookup
 - Post-market feedback compares DAWN actual vs HYDRA shadow counterfactual
+
+### One-liner: disable the router without touching code
+Set `router.router_enabled: false` in config.yaml → restart voltedge service.
+All candidates then bypass routing as route="UNROUTED".
 
 ## Phase 5: Counterfactual Analysis (DONE)
 Purpose: feedback loop telling you whether the router's DAWN-vs-HYDRA decisions

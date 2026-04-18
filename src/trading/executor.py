@@ -17,6 +17,15 @@ from src.data_ingestion.short_ban_list import is_safe_to_short
 
 logger = logging.getLogger(__name__)
 
+
+def _dry_run_log_enabled() -> bool:
+    try:
+        from src.config_loader import get_dry_run_log
+        return get_dry_run_log()
+    except Exception:
+        return True
+
+
 try:
     from src.brokers.zerodha_client import ZerodhaClient
 except ImportError:
@@ -60,7 +69,8 @@ class TradeExecutor:
                 f"confidence={float(confidence or 0.0):.2f} | entry={ltp:.2f} | "
                 f"target={float(target or 0.0):.2f} | sl={float(sl or 0.0):.2f} | qty={qty} | side=BUY"
             )
-            logger.info(msg)
+            if _dry_run_log_enabled():
+                logger.info(msg)
             return OrderResult(success=True, broker_order_id=None, message=msg,
                                filled_qty=qty, avg_price=ltp)
         try:
@@ -93,7 +103,8 @@ class TradeExecutor:
                 f"confidence={float(confidence or 0.0):.2f} | entry={ltp:.2f} | "
                 f"target={float(target or 0.0):.2f} | sl={float(sl or 0.0):.2f} | qty={qty} | side=SELL"
             )
-            logger.info(msg)
+            if _dry_run_log_enabled():
+                logger.info(msg)
             return OrderResult(success=True, broker_order_id=None, message=msg,
                                filled_qty=qty, avg_price=ltp)
         try:
@@ -137,7 +148,8 @@ class TradeExecutor:
                 f"confidence={float(confidence or 0.0):.2f} | entry={ltp:.2f} | "
                 f"target={float(target or 0.0):.2f} | sl={float(sl or 0.0):.2f} | qty={qty} | side=SHORT_SELL"
             )
-            logger.info(msg)
+            if _dry_run_log_enabled():
+                logger.info(msg)
             return OrderResult(success=True, broker_order_id=None, message=msg,
                                filled_qty=qty, avg_price=ltp)
         try:
@@ -174,7 +186,8 @@ class TradeExecutor:
                 f"confidence={float(confidence or 0.0):.2f} | entry={ltp:.2f} | "
                 f"target={float(target or 0.0):.2f} | sl={float(sl or 0.0):.2f} | qty={qty} | side=SHORT_COVER"
             )
-            logger.info(msg)
+            if _dry_run_log_enabled():
+                logger.info(msg)
             return OrderResult(success=True, broker_order_id=None, message=msg,
                                filled_qty=qty, avg_price=ltp)
         try:

@@ -165,8 +165,35 @@ def route_candidate(
 ) -> RouteDecision:
     """Route a pre-market candidate to DAWN or HYDRA.
 
-    All 6 rules must pass for DAWN; any failure → HYDRA.
+    All 6 rules must pass for DAWN; any failure → HYDRA. If config says
+    `router.router_enabled=false`, all candidates pass through as UNROUTED.
+    If route=DAWN but confidence < router.dawn_confidence_min, demote to HYDRA.
     """
+    # ── Phase 4: router kill-switch ─────────────────────────────────────
+    try:
+        from src.config_loader import get_router_enabled
+        router_enabled = get_router_enabled()
+    except Exception:
+        router_enabled = True
+    if not router_enabled:
+        logger.info(
+            "[ROUTER] Router disabled via config — all candidates pass through unrouted"
+        )
+        try:
+            entry.route = "UNROUTED"
+            entry.confidence = 0.0
+            entry.routed_at = datetime.now(IST).isoformat()
+        except AttributeError:
+            pass
+        return RouteDecision(
+            symbol=entry.symbol,
+            route="UNROUTED",
+            confidence=0.0,
+            rules_passed=[],
+            rules_failed=[],
+            reasoning="router_enabled=false — bypassed",
+        )
+
     passed: List[str] = []
     failed: List[str] = []
     notes: List[str] = []
@@ -256,6 +283,28 @@ def route_candidate(
 
     route = "DAWN" if not failed else "HYDRA"
     confidence = round(len(passed) / 6.0, 2)
+
+    # ── Phase 4: confidence-threshold demotion ──────────────────────────
+    try:
+        from src.config_loader import (
+            get_hydra_confidence_min, get_router_dawn_confidence_min,
+        )
+        dawn_min = get_router_dawn_confidence_min()
+        hydra_min = get_hydra_confidence_min()
+    except Exception:
+        dawn_min = 0.85
+        hydra_min = 0.0
+    if route == "DAWN" and confidence < dawn_min:
+        notes.append(
+            f"confidence={confidence:.2f}<dawn_confidence_min={dawn_min:.2f} — demoted"
+        )
+        route = "HYDRA"
+    if route == "HYDRA" and confidence < hydra_min:
+        notes.append(
+            f"confidence={confidence:.2f}<hydra_confidence_min={hydra_min:.2f} — dropped"
+        )
+        route = "UNROUTED"
+
     reasoning = (
         f"{route}: "
         + (f"passed {passed}" if passed else "no rules passed")

@@ -60,7 +60,15 @@ W_C_CATALYST = 0.45  # Catalyst quality (increased from 0.30)
 W_D_CATALYST = 0.20  # Technical confirmation (unchanged)
 W_E_CATALYST = 0.10  # Pattern match (unchanged)
 
-CONVICTION_THRESHOLD = 70.0
+def _load_conviction_threshold() -> float:
+    try:
+        from src.config_loader import get_conviction_threshold
+        return float(get_conviction_threshold())
+    except Exception:
+        return 70.0
+
+
+CONVICTION_THRESHOLD = _load_conviction_threshold()
 SIGNAL_MAX_AGE_HOURS = 4.0
 SIGNAL_EXPIRY_TIME = (14, 30)  # 14:30 IST — no new entries last hour
 
@@ -353,10 +361,10 @@ class ConvictionEngine:
     for all signals every cycle using live market data.
     """
 
-    def __init__(self, threshold: float = CONVICTION_THRESHOLD):
+    def __init__(self, threshold: Optional[float] = None):
         self._watchboard: Dict[str, ActiveSignal] = {}  # keyed by symbol
         self._phase_state = PhaseState()
-        self._threshold = threshold
+        self._threshold = float(threshold) if threshold is not None else _load_conviction_threshold()
         self._prev_snapshot: Optional[MarketSnapshot] = None
         self._morning_regime_bias: float = 0.0  # from Grok, -10 to +10
         self._pattern_db = PatternDB()
@@ -555,9 +563,15 @@ class ConvictionEngine:
                     f"conviction={new_conviction:.0f} would trigger but is_dry_run=True — observing only"
                 )
             else:
-                logger.info(
-                    f"[CONVICTION GATE] {signal.symbol} dropped — score {new_conviction:.0f} < {self._threshold:.0f}"
-                )
+                try:
+                    from src.config_loader import get_conviction_gate_log
+                    _gate_log_on = get_conviction_gate_log()
+                except Exception:
+                    _gate_log_on = True
+                if _gate_log_on:
+                    logger.info(
+                        f"[CONVICTION GATE] {signal.symbol} dropped — score {new_conviction:.0f} < {self._threshold:.0f}"
+                    )
 
         self._prev_snapshot = market_snapshot
 
