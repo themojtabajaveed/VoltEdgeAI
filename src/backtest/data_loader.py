@@ -15,6 +15,10 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(_HERE))
+_ENV_PATH = os.path.join(_PROJECT_ROOT, ".env")
+
 # Module-level flag so the "no Kite auth" warning only fires once per process.
 _NO_AUTH_WARNED = False
 
@@ -22,15 +26,14 @@ _NO_AUTH_WARNED = False
 def get_kite_client() -> Optional[Any]:
     """Return an authenticated KiteConnect client, or None if auth is unavailable.
 
-    Uses the same env-based auth path as the live runner
-    (.env → ZERODHA_API_KEY + ZERODHA_ACCESS_TOKEN).  Does NOT attempt the
-    auto-login TOTP flow — the backtest is a read-only tool; if the token is
-    missing/expired the caller degrades gracefully to the SQLite cache.
+    Fast path: reads existing token from .env, tests it via kite.profile().
+    If the token is expired, auto-refreshes via auto_refresh_access_token().
+    Degrades gracefully to None (SQLite cache-only) on any unrecoverable error.
     """
     global _NO_AUTH_WARNED
     try:
         from dotenv import load_dotenv
-        load_dotenv(".env")
+        load_dotenv(_ENV_PATH)
     except Exception:
         pass  # dotenv is optional; env may already be loaded
 
@@ -56,10 +59,36 @@ def get_kite_client() -> Optional[Any]:
     try:
         kite = KiteConnect(api_key=api_key)
         kite.set_access_token(access_token)
+        kite.profile()  # lightweight call to verify token is still valid
         return kite
-    except Exception as e:
-        logger.warning("[BACKTEST] KiteConnect init failed: %s — cache-only mode", e)
-        return None
+    except Exception as fast_path_err:
+        # Determine if this is an auth failure (token expired/invalid)
+        try:
+            from kiteconnect import exceptions as _ke
+            _is_auth = isinstance(fast_path_err, (_ke.TokenException, _ke.PermissionException))
+        except Exception:
+            _is_auth = any(
+                kw in str(fast_path_err).lower()
+                for kw in ("token", "expired", "invalid", "unauthorized", "permission")
+            )
+
+        if not _is_auth:
+            logger.warning("[BACKTEST] KiteConnect init failed: %s — cache-only mode", fast_path_err)
+            return None
+
+        logger.info("[BACKTEST] Token expired — attempting auto-refresh via auto_login...")
+        try:
+            from src.tools.auto_login import auto_refresh_access_token
+            new_token = auto_refresh_access_token(env_file=_ENV_PATH)
+            if new_token:
+                kite2 = KiteConnect(api_key=api_key)
+                kite2.set_access_token(new_token)
+                return kite2
+            logger.warning("[BACKTEST] Auto-refresh failed — cache-only mode")
+            return None
+        except Exception as refresh_err:
+            logger.warning("[BACKTEST] Auto-refresh error: %s — cache-only mode", refresh_err)
+            return None
 
 
 def get_backtest_universe() -> list[str]:
