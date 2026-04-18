@@ -12,11 +12,26 @@ v3 changes:
 """
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import threading
 import uuid
+
+
+def _parse_time_ist(v: Any) -> Optional[dt_time]:
+    """Accept 'HH:MM' string, datetime.time, or None. Return dt_time or None."""
+    if v is None:
+        return None
+    if isinstance(v, dt_time):
+        return v
+    if isinstance(v, str) and len(v) == 5 and v[2] == ":":
+        try:
+            hh = int(v[:2]); mm = int(v[3:])
+            return dt_time(hh, mm)
+        except ValueError:
+            return None
+    return None
 
 
 @dataclass
@@ -42,11 +57,21 @@ class Position:
     partial_sold_pct: float = 0.0                # How much % of original qty sold (0.0 to 1.0)
     original_qty: int = 0                        # Qty at entry (before partials)
     rally_avg_volume: float = 0.0                # Avg volume during favorable move (for fake dip detection)
+    # Phase 8: per-position strategy config (snapshot of stoploss.by_strategy[strategy] at entry)
+    strategy_config: Dict[str, Any] = field(default_factory=dict)
+    time_stop_ist: Optional[dt_time] = None      # per-strategy time stop (e.g. 13:30 for DAWN)
+    orb_stop_low: Optional[float] = None         # DAWN ORB-low hard floor (armed at 09:30)
+    peak_r: float = 0.0                          # max favorable R multiple reached so far
+    conviction_at_entry: float = 0.0             # conviction score snapshot
+    partial_1_done: bool = False                 # partial #1 exit fired
+    partial_2_done: bool = False                 # partial #2 exit fired
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["entry_time"] = self.entry_time.isoformat()
         d["last_update_time"] = self.last_update_time.isoformat()
+        if self.time_stop_ist is not None:
+            d["time_stop_ist"] = self.time_stop_ist.strftime("%H:%M")
         return d
 
     @classmethod
@@ -54,6 +79,8 @@ class Position:
         data = data.copy()
         data["entry_time"] = datetime.fromisoformat(data["entry_time"])
         data["last_update_time"] = datetime.fromisoformat(data["last_update_time"])
+        if "time_stop_ist" in data:
+            data["time_stop_ist"] = _parse_time_ist(data["time_stop_ist"])
         return cls(**data)
 
     def unrealized_pnl(self, ltp: float) -> float:
@@ -107,6 +134,10 @@ class PositionBook:
         initial_stop_price: Optional[float] = None,
         atr: Optional[float] = None,
         broker_order_id: Optional[str] = None,
+        strategy_config: Optional[Dict[str, Any]] = None,
+        time_stop_ist: Optional[Any] = None,
+        orb_stop_low: Optional[float] = None,
+        conviction_at_entry: float = 0.0,
     ) -> Position:
         """Open or add to a LONG position."""
         now = datetime.now()
@@ -129,6 +160,10 @@ class PositionBook:
                     highest_price=price,
                     atr=atr,
                     original_qty=qty,
+                    strategy_config=dict(strategy_config) if strategy_config else {},
+                    time_stop_ist=_parse_time_ist(time_stop_ist),
+                    orb_stop_low=orb_stop_low,
+                    conviction_at_entry=float(conviction_at_entry or 0.0),
                 )
                 self._positions[symbol] = pos
             else:
@@ -142,6 +177,13 @@ class PositionBook:
                     pos.trailing_stop_price = initial_stop_price
                 if broker_order_id:
                     pos.broker_order_ids.append(broker_order_id)
+                if strategy_config:
+                    pos.strategy_config = dict(strategy_config)
+                ts = _parse_time_ist(time_stop_ist)
+                if ts is not None:
+                    pos.time_stop_ist = ts
+                if orb_stop_low is not None:
+                    pos.orb_stop_low = orb_stop_low
             return pos
 
     def on_short_fill(
@@ -154,6 +196,9 @@ class PositionBook:
         initial_stop_price: Optional[float] = None,
         atr: Optional[float] = None,
         broker_order_id: Optional[str] = None,
+        strategy_config: Optional[Dict[str, Any]] = None,
+        time_stop_ist: Optional[Any] = None,
+        conviction_at_entry: float = 0.0,
     ) -> Position:
         """Open or add to a SHORT position."""
         now = datetime.now()
@@ -176,6 +221,9 @@ class PositionBook:
                     lowest_price=price,
                     atr=atr,
                     original_qty=qty,
+                    strategy_config=dict(strategy_config) if strategy_config else {},
+                    time_stop_ist=_parse_time_ist(time_stop_ist),
+                    conviction_at_entry=float(conviction_at_entry or 0.0),
                 )
                 self._positions[symbol] = pos
             else:
@@ -189,6 +237,11 @@ class PositionBook:
                     pos.trailing_stop_price = initial_stop_price
                 if broker_order_id:
                     pos.broker_order_ids.append(broker_order_id)
+                if strategy_config:
+                    pos.strategy_config = dict(strategy_config)
+                ts = _parse_time_ist(time_stop_ist)
+                if ts is not None:
+                    pos.time_stop_ist = ts
             return pos
 
     def on_sell_fill(self, symbol: str, qty: int, price: float) -> Optional[Position]:

@@ -13,6 +13,7 @@ v2 changes:
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
+from typing import Tuple
 import threading
 
 
@@ -26,6 +27,9 @@ class DailyRiskState:
     _realized_pnl: Decimal = field(default_factory=lambda: Decimal("0.00"), repr=False)
     _unrealized_pnl: Decimal = field(default_factory=lambda: Decimal("0.00"), repr=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+    # Phase 8f: circuit breaker state
+    _halted: bool = field(default=False, repr=False)
+    _halt_reason: str = field(default="", repr=False)
 
     # ── Human-friendly float properties ──────────────────────────────────────
 
@@ -78,9 +82,69 @@ class DailyRiskState:
             self.trades_taken = 0
             self._realized_pnl = Decimal("0.00")
             self._unrealized_pnl = Decimal("0.00")
+            self._halted = False
+            self._halt_reason = ""
 
     @property
     def total_loss(self) -> float:
         with self._lock:
             total = self._realized_pnl + self._unrealized_pnl
             return float(min(Decimal("0.00"), total))
+
+    # ── Phase 8f: circuit breaker ─────────────────────────────────────────────
+
+    @property
+    def is_halted(self) -> bool:
+        with self._lock:
+            return self._halted
+
+    @property
+    def halt_reason(self) -> str:
+        with self._lock:
+            return self._halt_reason
+
+    def halt_trading(self, reason: str) -> None:
+        """Mark trading halted for today. Idempotent — safe to call multiple times."""
+        with self._lock:
+            self._halted = True
+            self._halt_reason = reason
+
+    def check_halt(self, per_trade_risk: float) -> Tuple[bool, str]:
+        """
+        Phase 8f: evaluate daily P&L against circuit-breaker thresholds.
+
+        Returns (should_flatten, reason) where:
+          - should_flatten=True   means daily_pnl ≤ -flatten_mult × per_trade_risk
+          - should_flatten=False + is_halted=True means daily_pnl ≤ -halt_mult × per_trade_risk
+          - (False, "") means within normal operating range
+
+        Caller should:
+          - If should_flatten: call exit_engine.flatten_all(), then halt_trading()
+          - If not should_flatten and is_halted: skip new entries
+          - Else: proceed normally
+        """
+        from src.config_loader import (
+            get_daily_loss_halt_multiplier, get_daily_loss_flatten_multiplier,
+        )
+        current_pnl = self.daily_pnl
+        if per_trade_risk <= 0:
+            return False, ""
+
+        flatten_thresh = -abs(per_trade_risk) * get_daily_loss_flatten_multiplier()
+        halt_thresh = -abs(per_trade_risk) * get_daily_loss_halt_multiplier()
+
+        if current_pnl <= flatten_thresh:
+            reason = (
+                f"DAILY_FLATTEN: P&L ₹{current_pnl:.0f} ≤ flatten threshold ₹{flatten_thresh:.0f}"
+            )
+            self.halt_trading(reason)
+            return True, reason
+
+        if current_pnl <= halt_thresh:
+            reason = (
+                f"DAILY_HALT: P&L ₹{current_pnl:.0f} ≤ halt threshold ₹{halt_thresh:.0f}"
+            )
+            self.halt_trading(reason)
+            return False, reason
+
+        return False, ""

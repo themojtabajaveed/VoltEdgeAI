@@ -113,20 +113,56 @@ def run_live_gates(
     return True, "all gates passed"
 
 
-def _compute_live_quantity(symbol: str, entry_price: float) -> int:
-    """Phase 7 live-mode position sizing: qty = int(per_trade_risk / entry_price)."""
-    from src.config_loader import get_per_trade_risk
+def _compute_live_quantity(
+    symbol: str,
+    entry_price: float,
+    stop_distance: Optional[float] = None,
+) -> int:
+    """
+    Phase 8 live-mode position sizing: risk-at-stop semantics.
+
+    qty = int(per_trade_risk / stop_distance)   [when stop_distance provided]
+    qty = int(per_trade_risk / (entry_price × max_stop_pct/100))  [fallback]
+
+    The fallback caps blow-up risk if ATR is unavailable — never defaults
+    back to the pre-Phase-8 notional-deployed sizing.
+    """
+    from src.config_loader import get_per_trade_risk, get_max_stop_pct
     per_trade_risk = get_per_trade_risk()
     if entry_price <= 0:
         return 0
-    qty = int(per_trade_risk / entry_price)
+
+    sd = float(stop_distance) if stop_distance is not None else 0.0
+    if sd <= 0:
+        max_pct = get_max_stop_pct()
+        sd = float(entry_price) * (max_pct / 100.0)
+        logger.warning(
+            f"[LIVE] {symbol} stop_distance=0 — falling back to {max_pct}% of entry "
+            f"(stop_distance=₹{sd:.2f})"
+        )
+
+    if sd <= 0:
+        return 0
+
+    qty = int(per_trade_risk / sd)
     if qty < 1:
         logger.warning(
-            f"[LIVE] {symbol} quantity=0 at ₹{entry_price:.2f} — skipped (price too high)"
+            f"[LIVE] {symbol} qty=0 — stop_distance=₹{sd:.2f} too wide for "
+            f"per_trade_risk=₹{per_trade_risk:.0f}"
         )
         return 0
+
+    # Notional safety cap: never let a single position deploy more than 10× per_trade_risk
+    max_notional = per_trade_risk * 10.0
+    if qty * entry_price > max_notional:
+        qty = int(max_notional / entry_price)
+        logger.warning(
+            f"[LIVE] {symbol} qty capped to {qty} (notional > 10× per_trade_risk)"
+        )
+
     logger.info(
-        f"[LIVE] {symbol} | qty={qty} | entry=₹{entry_price:.2f} | risk=₹{per_trade_risk:.0f}"
+        f"[LIVE] {symbol} | qty={qty} | entry=₹{entry_price:.2f} | "
+        f"stop_distance=₹{sd:.2f} | risk=₹{per_trade_risk:.0f}"
     )
     return qty
 
@@ -151,10 +187,16 @@ class TradeExecutor:
         conviction: float,
         route: str,
         confidence: float,
+        stop_distance: Optional[float] = None,
+        qty_override: Optional[int] = None,
     ) -> OrderResult:
         """
         Runs 5 gates → computes sized qty → places MIS market order via Zerodha →
         records to live tracker → fires email alert. Never crashes the caller.
+
+        Phase 8: accepts stop_distance for risk-at-stop sizing. When qty_override
+        is provided (runner already sized via conviction engine), it wins over
+        computed qty — avoids double sizing.
         """
         from src.config_loader import get_live_order_tag
 
@@ -164,7 +206,13 @@ class TradeExecutor:
                 success=False, broker_order_id=None, message=_reason, filled_qty=0
             )
 
-        qty = _compute_live_quantity(symbol, entry_price)
+        if qty_override is not None and qty_override > 0:
+            qty = int(qty_override)
+            logger.info(
+                f"[LIVE] {symbol} | qty={qty} (caller-provided) | entry=₹{entry_price:.2f}"
+            )
+        else:
+            qty = _compute_live_quantity(symbol, entry_price, stop_distance)
         if qty < 1:
             return OrderResult(
                 success=False, broker_order_id=None,
@@ -237,8 +285,17 @@ class TradeExecutor:
         target: float = 0.0,
         sl: float = 0.0,
         conviction: float = 0.0,
+        atr: Optional[float] = None,
+        strategy_config: Optional[dict] = None,
     ) -> OrderResult:
-        """Execute a LONG entry. qty is already computed from ATR-based sizing."""
+        """
+        Execute a LONG entry. qty is already computed by the caller (risk-at-stop).
+
+        Phase 8: accepts `atr` + `strategy_config` so the caller can keep the
+        full Phase-8 context on the order. When `sl` is provided, we derive
+        `stop_distance = max(0, ltp - sl)` and use that if the caller did not
+        pre-size qty (fallback safety path).
+        """
         if ltp <= 0 or qty <= 0:
             return OrderResult(
                 success=False, broker_order_id=None,
@@ -256,9 +313,12 @@ class TradeExecutor:
             return OrderResult(success=True, broker_order_id=None, message=msg,
                                filled_qty=qty, avg_price=ltp)
 
+        stop_dist = max(0.0, float(ltp) - float(sl or 0.0)) if sl else 0.0
         return self._place_live_market_order(
             symbol=symbol, side=OrderSide.BUY, entry_price=ltp,
             conviction=conviction, route=route, confidence=confidence,
+            stop_distance=stop_dist if stop_dist > 0 else None,
+            qty_override=qty,
         )
 
     # ── LONG exit ─────────────────────────────────────────────────────────────
@@ -308,6 +368,8 @@ class TradeExecutor:
         target: float = 0.0,
         sl: float = 0.0,
         conviction: float = 0.0,
+        atr: Optional[float] = None,
+        strategy_config: Optional[dict] = None,
     ) -> OrderResult:
         """
         Enter a SHORT position by selling shares we don't own (sell-to-open).
@@ -336,9 +398,12 @@ class TradeExecutor:
             return OrderResult(success=True, broker_order_id=None, message=msg,
                                filled_qty=qty, avg_price=ltp)
 
+        stop_dist = max(0.0, float(sl or 0.0) - float(ltp)) if sl else 0.0
         return self._place_live_market_order(
             symbol=symbol, side=OrderSide.SELL, entry_price=ltp,
             conviction=conviction, route=route, confidence=confidence,
+            stop_distance=stop_dist if stop_dist > 0 else None,
+            qty_override=qty,
         )
 
     # ── SHORT exit (buy-to-cover) ─────────────────────────────────────────────

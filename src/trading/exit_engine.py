@@ -30,7 +30,7 @@ import logging
 import time as _time
 from dataclasses import dataclass
 from datetime import datetime, time as dt_time
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from src.trading.positions import PositionBook, Position
 from src.config.risk import RiskConfig
@@ -38,7 +38,10 @@ from src.data_ingestion.market_live import KiteLiveClient
 
 logger = logging.getLogger(__name__)
 
-# ── Phase-adaptive ATR multipliers ──
+# ── Legacy fallback defaults (used when pos.strategy_config is absent) ──
+# These mirror the pre-Phase-8 module constants. New positions read from
+# pos.strategy_config at entry time; these remain the "unknown route" safety
+# net so the engine never crashes on an old position missing new fields.
 PHASE_SETTLE_ATR = 2.0       # 0-15 min: wide — absorb entry noise
 PHASE_CONFIRM_ATR = 1.5      # 15-45 min: tighten as thesis confirms
 PHASE_LOCK_ATR = 1.0         # in profit > 1.5R: aggressive lock
@@ -52,16 +55,25 @@ FAKE_DIP_VOLUME_RATIO = 0.40   # dip volume < 40% of rally = fake
 REAL_DIP_VOLUME_RATIO = 0.70   # dip volume > 70% of rally = real
 FAKE_DIP_GRACE_BARS = 2        # hold through fake dip for max N additional bars
 
-# ── Partial profit targets (in R multiples) ──
-PARTIAL_1_R = 1.5    # sell 50% at 1.5R
+# ── Legacy partial defaults (fallback only; new positions use strategy_config) ──
+PARTIAL_1_R = 1.5
 PARTIAL_1_PCT = 0.50
-PARTIAL_2_R = 2.5    # sell 25% more at 2.5R
+PARTIAL_2_R = 2.5
 PARTIAL_2_PCT = 0.25
-# Remaining 25% runs with PHASE_ACCELERATE_ATR trail
-
-# Strategy-specific multipliers for partials
-VIPER_PARTIAL_1_R = 2.0   # VIPER momentum runs further before first exit
+# Legacy VIPER hard-coded values — preserved for any in-flight Position
+# created before Phase 8. New VIPER entries pick these up via config.
+VIPER_PARTIAL_1_R = 2.0
 VIPER_PARTIAL_2_R = 3.0
+
+
+def _cfg(pos: Position, key: str, default: Any) -> Any:
+    """
+    Read a Phase-8 stoploss param off pos.strategy_config, falling back to
+    the supplied default. Always safe on legacy Positions (empty strategy_config).
+    """
+    sc = getattr(pos, "strategy_config", None) or {}
+    v = sc.get(key)
+    return default if v is None else v
 
 
 @dataclass
@@ -131,16 +143,24 @@ class ExitEngine:
                 continue
             ltp = tick.ltp
 
-            # ── 1. Time exit ──────────────────────────────────────────────
-            if pos.mode == "INTRADAY" and current_time >= self._exit_time:
-                signals.append(self._make_signal(pos, ltp, "TIME_EXIT"))
-                continue
+            # ── 1. Time exit — per-position (Phase 8) or global fallback ──
+            if pos.mode == "INTRADAY":
+                exit_t = pos.time_stop_ist or self._exit_time
+                if current_time >= exit_t:
+                    signals.append(self._make_signal(pos, ltp, "TIME_EXIT"))
+                    continue
 
             # ── 2. Compute time in position ───────────────────────────────
             mins_open = (now - pos.entry_time).total_seconds() / 60 if pos.entry_time else 0
 
             # ── 3. Update running extremes & trailing stop ────────────────
             self._update_trail(pos, ltp, mins_open)
+
+            # ── 3b. ORB stop (DAWN only; armed at 09:30) ──────────────────
+            orb_signal = self._check_orb_stop(pos, ltp)
+            if orb_signal is not None:
+                signals.append(orb_signal)
+                continue
 
             # ── 4. Hard stop (before breakeven is active) ─────────────────
             if not pos.breakeven_activated and pos.initial_stop_price is not None:
@@ -234,12 +254,19 @@ class ExitEngine:
 
     def _get_phase_multiplier(self, pos: Position, mins_open: float) -> float:
         """
-        Determine ATR multiplier based on time and profit level.
-        Profit-based phases override time-based phases (tighter is better for profit).
+        Determine ATR multiplier based on time and profit level. Phase 8:
+        reads trail_atr_{settle,confirm,lock,accelerate} from pos.strategy_config
+        with module-constant fallback.
+        Profit-based phases override time-based phases.
         """
+        settle = float(_cfg(pos, "trail_atr_settle", PHASE_SETTLE_ATR))
+        confirm = float(_cfg(pos, "trail_atr_confirm", PHASE_CONFIRM_ATR))
+        lock = float(_cfg(pos, "trail_atr_lock", PHASE_LOCK_ATR))
+        accelerate = float(_cfg(pos, "trail_atr_accelerate", PHASE_ACCELERATE_ATR))
+
         one_r = pos.risk_unit()
         if one_r <= 0:
-            return PHASE_SETTLE_ATR  # Default wide if no risk unit
+            return settle  # Default wide if no risk unit
 
         # Calculate current R multiple
         if pos.side == "LONG":
@@ -250,16 +277,15 @@ class ExitEngine:
 
         # Profit-based phases (override time)
         if r_multiple >= 2.5:
-            return PHASE_ACCELERATE_ATR   # 0.75× — squeeze maximum
+            return accelerate
         elif r_multiple >= 1.5:
-            return PHASE_LOCK_ATR          # 1.0× — lock gains
-        # Time-based phases
+            return lock
         elif mins_open >= PHASE_CONFIRM_MINUTES:
-            return PHASE_CONFIRM_ATR       # 1.5× — tighten after 45 min
+            return confirm
         elif mins_open >= PHASE_SETTLE_MINUTES:
-            return PHASE_CONFIRM_ATR       # 1.5× — tighten after 15 min
+            return confirm
         else:
-            return PHASE_SETTLE_ATR        # 2.0× — wide for early noise
+            return settle
 
     def _update_trail(self, pos: Position, ltp: float, mins_open: float) -> None:
         """
@@ -270,15 +296,19 @@ class ExitEngine:
         one_r = pos.risk_unit()
         multiplier = self._get_phase_multiplier(pos, mins_open)
 
+        # Phase 8: breakeven threshold is configurable per strategy
+        breakeven_r = float(_cfg(pos, "breakeven_r", 1.0))
+
         if pos.side == "LONG":
             per_share_gain = ltp - pos.avg_price
 
-            # Breakeven activation: price moved 1R in our favour
-            if not pos.breakeven_activated and one_r > 0 and per_share_gain >= one_r:
+            # Breakeven activation: price moved breakeven_r × 1R in our favour
+            if not pos.breakeven_activated and one_r > 0 and per_share_gain >= one_r * breakeven_r:
                 pos.trailing_stop_price = pos.avg_price
                 pos.breakeven_activated = True
                 logger.info(
-                    f"[TRAIL] {pos.symbol} LONG breakeven activated @ {pos.avg_price:.2f}"
+                    f"[TRAIL] {pos.symbol} LONG breakeven activated @ {pos.avg_price:.2f} "
+                    f"(at {breakeven_r:.2f}R)"
                 )
 
             # Trail on new highs
@@ -300,12 +330,13 @@ class ExitEngine:
         elif pos.side == "SHORT":
             per_share_gain = pos.avg_price - ltp
 
-            # Breakeven activation
-            if not pos.breakeven_activated and one_r > 0 and per_share_gain >= one_r:
+            # Breakeven activation (Phase 8: breakeven_r configurable)
+            if not pos.breakeven_activated and one_r > 0 and per_share_gain >= one_r * breakeven_r:
                 pos.trailing_stop_price = pos.avg_price
                 pos.breakeven_activated = True
                 logger.info(
-                    f"[TRAIL] {pos.symbol} SHORT breakeven activated @ {pos.avg_price:.2f}"
+                    f"[TRAIL] {pos.symbol} SHORT breakeven activated @ {pos.avg_price:.2f} "
+                    f"(at {breakeven_r:.2f}R)"
                 )
 
             # Trail on new lows
@@ -379,7 +410,16 @@ class ExitEngine:
         """
         Check if we've reached a partial profit milestone.
         Sell a portion of the position and let the rest run.
+
+        Phase 8: all params (partials_enabled, partial_1_r/pct, partial_2_r/pct)
+        read from pos.strategy_config. Legacy positions fall back to module
+        constants — VIPER gets the legacy 2.0R/3.0R targets via its strategy string.
         """
+        # Strategy config honor: if partials disabled for this strategy, skip entirely
+        partials_enabled = bool(_cfg(pos, "partials_enabled", True))
+        if not partials_enabled:
+            return None
+
         one_r = pos.risk_unit()
         if one_r <= 0 or pos.original_qty <= 0:
             return None
@@ -391,19 +431,29 @@ class ExitEngine:
             per_share_gain = pos.avg_price - ltp
         r_multiple = per_share_gain / one_r
 
-        # Strategy-specific targets
-        is_viper = "VIPER" in pos.strategy.upper() if pos.strategy else False
-        p1_r = VIPER_PARTIAL_1_R if is_viper else PARTIAL_1_R
-        p2_r = VIPER_PARTIAL_2_R if is_viper else PARTIAL_2_R
+        # Legacy fallback for pre-Phase-8 positions: honor old VIPER branch
+        is_legacy_viper = (
+            "VIPER" in (pos.strategy or "").upper()
+            and not (pos.strategy_config or {})
+        )
+        default_p1_r = VIPER_PARTIAL_1_R if is_legacy_viper else PARTIAL_1_R
+        default_p2_r = VIPER_PARTIAL_2_R if is_legacy_viper else PARTIAL_2_R
 
-        # Partial 1: sell 50% at 1.5R (or 2R for VIPER)
-        if pos.partial_sold_pct < PARTIAL_1_PCT and r_multiple >= p1_r:
-            qty_to_sell = int(pos.original_qty * PARTIAL_1_PCT)
+        # Phase 8: per-position partial params (with sensible fallbacks)
+        p1_r = float(_cfg(pos, "partial_1_r", default_p1_r))
+        p1_pct = float(_cfg(pos, "partial_1_pct", PARTIAL_1_PCT))
+        p2_r = float(_cfg(pos, "partial_2_r", default_p2_r))
+        p2_pct = float(_cfg(pos, "partial_2_pct", PARTIAL_2_PCT))
+
+        # Partial 1
+        if pos.partial_sold_pct < p1_pct and r_multiple >= p1_r:
+            qty_to_sell = int(pos.original_qty * p1_pct)
             if qty_to_sell >= 1 and qty_to_sell < pos.total_qty:
-                pos.partial_sold_pct = PARTIAL_1_PCT
+                pos.partial_sold_pct = p1_pct
+                pos.partial_1_done = True
                 logger.info(
-                    f"[PARTIAL-1] {pos.symbol}: {r_multiple:.1f}R profit — "
-                    f"selling {qty_to_sell}/{pos.original_qty} ({PARTIAL_1_PCT:.0%})"
+                    f"[PARTIAL-1] {pos.symbol}: {r_multiple:.1f}R profit (target {p1_r:.1f}R) — "
+                    f"selling {qty_to_sell}/{pos.original_qty} ({p1_pct:.0%})"
                 )
                 return ExitSignal(
                     symbol=pos.symbol,
@@ -416,14 +466,15 @@ class ExitEngine:
                     qty=qty_to_sell,
                 )
 
-        # Partial 2: sell 25% more at 2.5R (or 3R for VIPER)
-        if pos.partial_sold_pct < (PARTIAL_1_PCT + PARTIAL_2_PCT) and r_multiple >= p2_r:
-            qty_to_sell = int(pos.original_qty * PARTIAL_2_PCT)
+        # Partial 2
+        if pos.partial_sold_pct < (p1_pct + p2_pct) and r_multiple >= p2_r:
+            qty_to_sell = int(pos.original_qty * p2_pct)
             if qty_to_sell >= 1 and qty_to_sell < pos.total_qty:
-                pos.partial_sold_pct = PARTIAL_1_PCT + PARTIAL_2_PCT
+                pos.partial_sold_pct = p1_pct + p2_pct
+                pos.partial_2_done = True
                 logger.info(
-                    f"[PARTIAL-2] {pos.symbol}: {r_multiple:.1f}R profit — "
-                    f"selling {qty_to_sell} more ({PARTIAL_2_PCT:.0%}), "
+                    f"[PARTIAL-2] {pos.symbol}: {r_multiple:.1f}R profit (target {p2_r:.1f}R) — "
+                    f"selling {qty_to_sell} more ({p2_pct:.0%}), "
                     f"remaining {pos.total_qty - qty_to_sell} rides with tight trail"
                 )
                 return ExitSignal(
@@ -438,6 +489,42 @@ class ExitEngine:
                 )
 
         return None
+
+    def _check_orb_stop(self, pos: Position, ltp: float) -> Optional[ExitSignal]:
+        """
+        Phase 8: ORB (Opening Range Breakout) stop — DAWN-specific hard floor.
+        If the position entered blind at 09:15 and the 09:15–09:30 candle low
+        has been armed on pos.orb_stop_low, a LONG position is force-exited
+        when ltp breaches that floor.
+        """
+        if pos.orb_stop_low is None or pos.side != "LONG":
+            return None
+        if not bool(_cfg(pos, "orb_stop_enabled", False)):
+            return None
+        if ltp <= float(pos.orb_stop_low):
+            logger.info(
+                f"[ORB-STOP] {pos.symbol}: ltp {ltp:.2f} <= ORB low {pos.orb_stop_low:.2f} — exit"
+            )
+            return self._make_signal(pos, ltp, "ORB_STOP")
+        return None
+
+    def flatten_all(self, reason: str = "DAILY_LOSS_FLATTEN") -> List[ExitSignal]:
+        """
+        Phase 8f: emit a synthetic exit signal for every open position.
+        Used by the daily loss circuit breaker and any forced halt path.
+        Does NOT mutate PositionBook — the runner drains these signals as
+        if they were normal exit signals and calls on_sell_fill/on_cover_fill.
+        """
+        signals: List[ExitSignal] = []
+        for pos in self.positions.get_open_positions():
+            tick = self.live_client.get_last_tick(pos.symbol)
+            ltp = tick.ltp if tick else pos.avg_price
+            signals.append(self._make_signal(pos, ltp, reason))
+        if signals:
+            logger.warning(
+                f"[FLATTEN_ALL] {reason}: emitting {len(signals)} exit signals"
+            )
+        return signals
 
     def _check_exhaustion_exit(self, pos: Position, ltp: float) -> bool:
         """

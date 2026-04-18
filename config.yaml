@@ -49,3 +49,69 @@ backtest:
   sl_pct: 1.5            # stop loss % (positive number, applied as -sl_pct)
   throttle_seconds: 0.35 # sleep between Kite API calls
   auto_run_weekly: false  # if true, runner.py triggers backtest every Friday
+
+# ── Phase 8: Unified stop-loss system ─────────────────────────────────────
+# ExitEngine reads per-strategy params off Position.strategy_config (set at
+# entry time). All strategies pass through the same engine — differentiation
+# is config-driven, not code-branched.
+stoploss:
+  # Daily circuit breakers (multipliers of execution.per_trade_risk_inr)
+  daily_loss_halt_multiplier: 3.0       # halt new entries when daily_pnl ≤ -3× per-trade risk
+  daily_loss_flatten_multiplier: 5.0    # flatten all open positions at -5× per-trade risk
+
+  # Position-level hard cap on stop distance (% of LTP)
+  max_stop_pct: 2.5
+
+  # Conviction-weighted stop adjustment applied at entry
+  conviction_modifiers:
+    high_threshold: 85
+    high_multiplier: 1.2                # wider stop for high conviction (let trade breathe)
+    low_threshold: 75
+    low_multiplier: 0.8                 # tighter stop for lower conviction
+
+  by_strategy:
+    DAWN:
+      initial_atr_multiplier: 1.5
+      orb_stop_enabled: true            # use max(ORB low, atr stop) once 09:30 bar closes
+      breakeven_r: 1.0
+      trail_atr_settle: 2.0
+      trail_atr_confirm: 1.5
+      trail_atr_lock: 1.2
+      trail_atr_accelerate: 0.75
+      partials_enabled: true
+      partial_1_r: 1.5
+      partial_1_pct: 0.50
+      partial_2_r: 2.5
+      partial_2_pct: 0.25
+      time_stop_ist: "15:20"            # Phase-8 rollout default; flip to 13:30 after 1 week stable
+      rr_target: 2.5
+    HYDRA:
+      initial_atr_multiplier: 1.2
+      orb_stop_enabled: false
+      breakeven_r: 1.0
+      trail_atr_settle: 2.0
+      trail_atr_confirm: 1.5
+      trail_atr_lock: 1.0
+      trail_atr_accelerate: 0.75
+      partials_enabled: true
+      partial_1_r: 1.5
+      partial_1_pct: 0.50
+      partial_2_r: 2.5
+      partial_2_pct: 0.25
+      time_stop_ist: "15:20"            # Phase-8 rollout default; flip to 12:30 after 1 week stable
+      rr_target: 1.8
+    VIPER:
+      initial_atr_multiplier: 1.5
+      orb_stop_enabled: false
+      breakeven_r: 1.0
+      trail_atr_settle: 2.0
+      trail_atr_confirm: 1.5
+      trail_atr_lock: 1.0
+      trail_atr_accelerate: 0.75
+      partials_enabled: true
+      partial_1_r: 2.0                  # matches legacy VIPER_PARTIAL_1_R (no regression)
+      partial_1_pct: 0.50
+      partial_2_r: 3.0                  # matches legacy VIPER_PARTIAL_2_R
+      partial_2_pct: 0.25
+      time_stop_ist: "15:20"
+      rr_target: 2.5

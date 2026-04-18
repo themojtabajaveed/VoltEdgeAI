@@ -300,6 +300,15 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     exit_engine = ExitEngine(positions=positions, live_client=client, risk=risk_cfg)
     # v4: Give ExitEngine read access to streaming TA states for RSI divergence detection
     exit_engine.set_streaming_states(_streaming_states)
+
+    # Phase 8h: shadow book for dry-run SL effectiveness validation
+    try:
+        from src.trading.shadow_book import ShadowBook
+        shadow_book: Optional["ShadowBook"] = ShadowBook()
+        logging.info("[SHADOW] Shadow PositionBook initialised for dry-run validation")
+    except Exception as _sb_e:
+        shadow_book = None
+        logging.warning(f"[SHADOW] ShadowBook init failed (non-fatal): {_sb_e}")
     pos_monitor = PositionMonitor(live_client=client)
 
     # ── P1: Push tick pipeline — replaces bar_builder_worker polling loop ──
@@ -800,6 +809,25 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         logging.error(f"Momentum scanner failed: {e}")
                     last_scanner_date = current_date
 
+                    # ── Phase 8g: arm ORB stop for DAWN positions after 09:30 ──
+                    try:
+                        for _pos in positions.get_open_positions():
+                            if (
+                                _pos.strategy == "DAWN"
+                                and _pos.side == "LONG"
+                                and _pos.orb_stop_low is None
+                                and bool((_pos.strategy_config or {}).get("orb_stop_enabled", False))
+                            ):
+                                _orb_bars = get_intraday_bars_for_symbol(_pos.symbol, lookback_minutes=20)
+                                if _orb_bars:
+                                    _orb_low = min(b.low for b in _orb_bars)
+                                    _pos.orb_stop_low = round(_orb_low, 2)
+                                    logging.info(
+                                        f"[ORB-ARM] {_pos.symbol} ORB low armed @ {_pos.orb_stop_low:.2f}"
+                                    )
+                    except Exception as _orb_e:
+                        logging.warning(f"[ORB-ARM] failed: {_orb_e}")
+
                 # 0c. VIPER re-scans at 10:00, 10:30, 11:00, 12:00
                 if (_market_open_today
                         and viper_rescan_index < len(VIPER_RESCAN_TIMES)
@@ -874,6 +902,45 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                 # 1. Intraday tasks between 9:15 and 15:30
                 if _market_open_today and MARKET_START <= current_time <= MARKET_END:
 
+                    # ── Phase 8f: Daily loss circuit breaker ─────────────────
+                    try:
+                        _should_flatten, _cb_reason = risk_state.check_halt(
+                            per_trade_risk=risk_cfg.per_trade_capital_rupees
+                        )
+                        if _should_flatten and _cb_reason:
+                            logging.critical(
+                                f"[CIRCUIT BREAKER] {_cb_reason} — flattening all positions"
+                            )
+                            print(f"  🚨 CIRCUIT BREAKER: {_cb_reason}")
+                            try:
+                                _flatten_signals = exit_engine.flatten_all(_cb_reason)
+                                for _fs in _flatten_signals:
+                                    if _fs.side == "SELL":
+                                        executor.execute_sell(
+                                            symbol=_fs.symbol, qty=_fs.qty or 9999,
+                                            ltp=_fs.ltp,
+                                        )
+                                    elif _fs.side == "COVER":
+                                        executor.execute_short_cover(
+                                            symbol=_fs.symbol, qty=_fs.qty or 9999,
+                                            ltp=_fs.ltp,
+                                        )
+                                    positions.on_sell_fill(_fs.symbol, _fs.qty or 9999, _fs.ltp)
+                                try:
+                                    from src.reports.email_sender import send_alert_email
+                                    send_alert_email(
+                                        subject=f"VoltEdgeAI CIRCUIT BREAKER: {_cb_reason[:80]}",
+                                        body=f"Daily P&L: ₹{risk_state.daily_pnl:.0f}\n{_cb_reason}",
+                                    )
+                                except Exception as _email_e:
+                                    logging.warning(f"[CB] alert email failed: {_email_e}")
+                            except Exception as _flat_e:
+                                logging.error(f"[CIRCUIT BREAKER] flatten failed: {_flat_e}")
+                        elif _cb_reason and risk_state.is_halted:
+                            logging.warning(f"[CIRCUIT BREAKER] {_cb_reason} — new entries blocked")
+                    except Exception as _cb_e:
+                        logging.error(f"[CIRCUIT BREAKER] check failed: {_cb_e}")
+
                     # ── DAWN: Record virtual entries at market open ──
                     if dawn._signals and dt_time(9, 15) <= current_time <= dt_time(9, 20):
                         if any(s.status == "PENDING" for s in dawn._signals):
@@ -884,7 +951,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             except Exception as dawn_entry_e:
                                 logging.error(f"DAWN entry recording failed: {dawn_entry_e}")
 
-                    # ── DAWN: HYDRA dryrun entries at 09:15 (once per day) ──
+                    # ── DAWN: entries at 09:15 (once per day) ──────────────
                     if dt_time(9, 15) <= current_time <= dt_time(9, 20) and last_dawn_dryrun_entry_date != current_date:
                         try:
                             hydra_dawn_picks = select_dawn_candidates(
@@ -894,8 +961,81 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             execute_dawn_dryrun(hydra_dawn_picks, {})
                             if hydra_dawn_picks:
                                 print(f"  🌅 DAWN DRYRUN: {len(hydra_dawn_picks)} HYDRA entries recorded")
+
+                            # ── Phase 8e: Live execution path for DAWN ────────────
+                            if risk_cfg.live_mode and hydra_dawn_picks and not risk_state.is_halted:
+                                from src.config_loader import (
+                                    get_stoploss_config, apply_conviction_modifier, get_max_stop_pct,
+                                    get_conviction_threshold,
+                                )
+                                from src.trading.atr import compute_daily_atr_from_cache
+                                dawn_sl_cfg = get_stoploss_config("DAWN")
+                                for pick in hydra_dawn_picks:
+                                    sym = pick.get("symbol", "")
+                                    conviction_score = float(pick.get("dawn_conviction", 0.0))
+                                    if not sym or conviction_score < get_conviction_threshold():
+                                        continue
+                                    if sym in daily_traded_symbols:
+                                        continue
+                                    if risk_state.trades_taken >= risk_cfg.max_trades_per_day:
+                                        break
+                                    if risk_state.is_halted:
+                                        break
+                                    allowed, _ = slot_manager.can_trade(sym, "BUY")
+                                    if not allowed:
+                                        continue
+                                    tick = client.get_last_tick(sym)
+                                    ltp = tick.ltp if tick else 0.0
+                                    if ltp <= 0:
+                                        continue
+
+                                    # ATR: best-effort from daily cache; fallback to max_stop_pct
+                                    atr_val = compute_daily_atr_from_cache(sym, ltp=ltp) or ltp * (get_max_stop_pct() / 100.0)
+
+                                    # Conviction-weighted stop distance
+                                    raw_mult = float(dawn_sl_cfg.get("initial_atr_multiplier", 1.5))
+                                    adj_mult = apply_conviction_modifier(raw_mult, conviction_score)
+                                    stop_dist = min(
+                                        atr_val * adj_mult,
+                                        ltp * (get_max_stop_pct() / 100.0),
+                                    )
+                                    stop_price = round(ltp - stop_dist, 2)
+                                    qty = max(1, int(risk_cfg.per_trade_capital_rupees / stop_dist)) if stop_dist > 0 else 1
+
+                                    result = executor.execute_buy(
+                                        symbol=sym, ltp=ltp, qty=qty,
+                                        route="DAWN", confidence=conviction_score / 100.0,
+                                        sl=stop_price, conviction=conviction_score,
+                                        atr=atr_val, strategy_config=dawn_sl_cfg,
+                                    )
+                                    if result.success:
+                                        risk_state.trades_taken += 1
+                                        daily_traded_symbols.add(sym)
+                                        slot_manager.allocate("DAWN", sym, "BUY", conviction_score)
+                                        positions.on_buy_fill(
+                                            symbol=sym,
+                                            qty=result.filled_qty,
+                                            price=result.avg_price or ltp,
+                                            mode="INTRADAY",
+                                            strategy="DAWN",
+                                            initial_stop_price=stop_price,
+                                            atr=atr_val,
+                                            strategy_config=dawn_sl_cfg,
+                                            time_stop_ist=dawn_sl_cfg.get("time_stop_ist"),
+                                            conviction_at_entry=conviction_score,
+                                        )
+                                        print(
+                                            f"  🌅 DAWN LIVE: {qty}x {sym} @ {ltp:.2f} "
+                                            f"SL={stop_price:.2f} conviction={conviction_score:.0f}"
+                                        )
+                                        logging.info(
+                                            f"[DAWN LIVE] {sym} | qty={qty} | entry={ltp:.2f} | "
+                                            f"sl={stop_price:.2f} | atr={atr_val:.2f} | "
+                                            f"conviction={conviction_score:.0f}"
+                                        )
+
                         except Exception as dryrun_e:
-                            logging.error(f"DAWN dryrun entry failed: {dryrun_e}")
+                            logging.error(f"DAWN entry failed: {dryrun_e}")
                         last_dawn_dryrun_entry_date = current_date
 
                     # ── DAWN: HYDRA dryrun update every 15 min ──
@@ -1318,6 +1458,10 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                 if not time_ok:
                                     continue
 
+                                # Phase 8f: halt gate
+                                if risk_state.is_halted:
+                                    break
+
                                 # Get fresh price data
                                 tick = client.get_last_tick(sym)
                                 ltp = tick.ltp if tick else 0
@@ -1326,7 +1470,18 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
 
                                 tech_snap = ce_tech_snaps.get(sym)
                                 atr_val = tech_snap.atr14 if tech_snap and tech_snap.atr14 > 0 else ltp * 0.015
-                                stop_dist = min(atr_val * 1.5, ltp * 0.025)
+
+                                # Phase 8: load strategy config and apply conviction modifier
+                                from src.config_loader import get_stoploss_config, apply_conviction_modifier
+                                _ce_strat = (sig.strategy or "HYDRA").upper().split("_")[0]
+                                _sl_cfg = get_stoploss_config(_ce_strat)
+                                _raw_mult = float(_sl_cfg.get("initial_atr_multiplier", 1.5))
+                                _adj_mult = apply_conviction_modifier(_raw_mult, float(sig.last_conviction or 0.0))
+                                from src.config_loader import get_max_stop_pct
+                                stop_dist = min(atr_val * _adj_mult, ltp * (get_max_stop_pct() / 100.0))
+                                if stop_dist <= 0:
+                                    stop_dist = ltp * 0.015
+
                                 capital_pct = slot_manager.get_capital_allocation(sig.last_conviction, sym)
                                 qty = compute_atr_position_size(
                                     risk_cfg.per_trade_capital_rupees * capital_pct, stop_dist
@@ -1334,7 +1489,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
 
                                 if sig.direction == "BUY":
                                     stop_price = round(ltp - stop_dist, 2)
-                                    result = executor.execute_buy(symbol=sym, ltp=ltp, qty=qty, market_regime=load_daily_regime(), conviction=float(sig.last_conviction or 0.0), route=sig.strategy)
+                                    result = executor.execute_buy(symbol=sym, ltp=ltp, qty=qty, market_regime=load_daily_regime(), conviction=float(sig.last_conviction or 0.0), route=sig.strategy, sl=stop_price, atr=atr_val, strategy_config=_sl_cfg)
                                     if result.success:
                                         risk_state.trades_taken += 1
                                         daily_traded_symbols.add(sym)
@@ -1343,13 +1498,30 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                             symbol=sym, qty=result.filled_qty, price=result.avg_price or ltp,
                                             mode="INTRADAY", strategy=f"{sig.strategy}_CONV",
                                             initial_stop_price=stop_price, atr=atr_val,
+                                            strategy_config=_sl_cfg,
+                                            time_stop_ist=_sl_cfg.get("time_stop_ist"),
+                                            conviction_at_entry=float(sig.last_conviction or 0.0),
                                         )
+                                        # Phase 8h: shadow entry for dry-run SL validation
+                                        if shadow_book is not None:
+                                            try:
+                                                shadow_book.on_entry(
+                                                    symbol=sym, qty=result.filled_qty,
+                                                    price=result.avg_price or ltp,
+                                                    strategy=f"{sig.strategy}_CONV",
+                                                    initial_stop_price=stop_price, atr=atr_val,
+                                                    strategy_config=_sl_cfg,
+                                                    time_stop_ist=_sl_cfg.get("time_stop_ist"),
+                                                    conviction_at_entry=float(sig.last_conviction or 0.0),
+                                                )
+                                            except Exception as _sh_e:
+                                                logging.warning(f"[SHADOW] entry failed: {_sh_e}")
                                         print(f"  ⚡ CONVICTION BUY: {qty}x {sym} @ {ltp:.2f} SL={stop_price:.2f} conviction={sig.last_conviction:.0f} [{sig.strategy}]")
                                         log_execution(exec_logger, symbol=sym, ltp=ltp, result=result,
                                                       meta={"strategy": f"{sig.strategy}_CONV", "conviction": sig.last_conviction, "stop": stop_price, "event": sig.event_summary})
                                 elif sig.direction == "SHORT":
                                     stop_price = round(ltp + stop_dist, 2)
-                                    result = executor.execute_short_sell(symbol=sym, ltp=ltp, qty=qty, conviction=float(sig.last_conviction or 0.0), route=sig.strategy)
+                                    result = executor.execute_short_sell(symbol=sym, ltp=ltp, qty=qty, conviction=float(sig.last_conviction or 0.0), route=sig.strategy, sl=stop_price, atr=atr_val, strategy_config=_sl_cfg)
                                     if result.success:
                                         risk_state.trades_taken += 1
                                         daily_traded_symbols.add(sym)
@@ -1358,6 +1530,9 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                             symbol=sym, qty=result.filled_qty, price=result.avg_price or ltp,
                                             mode="INTRADAY", strategy=f"{sig.strategy}_CONV",
                                             initial_stop_price=stop_price, atr=atr_val,
+                                            strategy_config=_sl_cfg,
+                                            time_stop_ist=_sl_cfg.get("time_stop_ist"),
+                                            conviction_at_entry=float(sig.last_conviction or 0.0),
                                         )
                                         print(f"  ⚡ CONVICTION SHORT: {qty}x {sym} @ {ltp:.2f} SL={stop_price:.2f} conviction={sig.last_conviction:.0f} [{sig.strategy}]")
                                         log_execution(exec_logger, symbol=sym, ltp=ltp, result=result,
@@ -1774,6 +1949,18 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                             "exit_reason":  es.reason,
                                         })
 
+                                        # Phase 8h: shadow exit record
+                                        if shadow_book is not None:
+                                            try:
+                                                shadow_book.on_exit(
+                                                    symbol=es.symbol, qty=exit_qty,
+                                                    exit_price=price,
+                                                    exit_reason=es.reason,
+                                                    exit_ts=datetime.now(IST),
+                                                )
+                                            except Exception as _sh_e:
+                                                logging.warning(f"[SHADOW] exit failed: {_sh_e}")
+
                                 meta = {"reason": es.reason, "mode": es.mode,
                                         "strategy": es.strategy, "stop_price": es.stop_price,
                                         "direction": direction}
@@ -1818,6 +2005,14 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                             _lv_update(order_id=_otr.get("order_id", ""),
                                                        exit_price=_ltp,
                                                        exit_at=datetime.now(IST).isoformat())
+                                            # Phase 8g: close in PositionBook so ExitEngine
+                                            # 15:20 TIME_EXIT doesn't fire a duplicate order
+                                            try:
+                                                positions.on_sell_fill(_sym, _oqty, _ltp)
+                                            except Exception as _pb_e:
+                                                logging.warning(
+                                                    f"[EOD] PositionBook close failed for {_sym}: {_pb_e}"
+                                                )
                                             logging.info(
                                                 f"[EOD SQUARE-OFF] {_sym} | qty={_oqty} | order_id={_eid}"
                                             )
@@ -1963,6 +2158,17 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                 pre_market_ran=pre_market_ran,
                                 grok_call_count=grok_call_count,
                             )
+
+                            # Phase 8h: append Section 14 (SL shadow) to post-market log
+                            try:
+                                from src.trading.shadow_book import generate_shadow_report_section
+                                _sec14 = generate_shadow_report_section(current_date)
+                                if _sec14:
+                                    logging.info(f"\n{_sec14}")
+                                    print(f"\n{_sec14}")
+                            except Exception as _s14_e:
+                                logging.warning(f"[SHADOW] Section 14 failed: {_s14_e}")
+
                         except Exception as chron_e:
                             logging.error(f"Post-Market Report failed: {chron_e}")
                             print(f"  ❌ Post-Market Report error: {chron_e}")

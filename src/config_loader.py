@@ -71,6 +71,67 @@ _DEFAULTS: Dict[str, Any] = {
         "throttle_seconds": 0.35,
         "auto_run_weekly": False,
     },
+    "stoploss": {
+        "daily_loss_halt_multiplier": 3.0,
+        "daily_loss_flatten_multiplier": 5.0,
+        "max_stop_pct": 2.5,
+        "conviction_modifiers": {
+            "high_threshold": 85,
+            "high_multiplier": 1.2,
+            "low_threshold": 75,
+            "low_multiplier": 0.8,
+        },
+        "by_strategy": {
+            "DAWN": {
+                "initial_atr_multiplier": 1.5,
+                "orb_stop_enabled": True,
+                "breakeven_r": 1.0,
+                "trail_atr_settle": 2.0,
+                "trail_atr_confirm": 1.5,
+                "trail_atr_lock": 1.2,
+                "trail_atr_accelerate": 0.75,
+                "partials_enabled": True,
+                "partial_1_r": 1.5,
+                "partial_1_pct": 0.50,
+                "partial_2_r": 2.5,
+                "partial_2_pct": 0.25,
+                "time_stop_ist": "15:20",
+                "rr_target": 2.5,
+            },
+            "HYDRA": {
+                "initial_atr_multiplier": 1.2,
+                "orb_stop_enabled": False,
+                "breakeven_r": 1.0,
+                "trail_atr_settle": 2.0,
+                "trail_atr_confirm": 1.5,
+                "trail_atr_lock": 1.0,
+                "trail_atr_accelerate": 0.75,
+                "partials_enabled": True,
+                "partial_1_r": 1.5,
+                "partial_1_pct": 0.50,
+                "partial_2_r": 2.5,
+                "partial_2_pct": 0.25,
+                "time_stop_ist": "15:20",
+                "rr_target": 1.8,
+            },
+            "VIPER": {
+                "initial_atr_multiplier": 1.5,
+                "orb_stop_enabled": False,
+                "breakeven_r": 1.0,
+                "trail_atr_settle": 2.0,
+                "trail_atr_confirm": 1.5,
+                "trail_atr_lock": 1.0,
+                "trail_atr_accelerate": 0.75,
+                "partials_enabled": True,
+                "partial_1_r": 2.0,
+                "partial_1_pct": 0.50,
+                "partial_2_r": 3.0,
+                "partial_2_pct": 0.25,
+                "time_stop_ist": "15:20",
+                "rr_target": 2.5,
+            },
+        },
+    },
 }
 
 
@@ -177,6 +238,73 @@ def validate_config(cfg: Optional[Dict[str, Any]] = None) -> bool:
             f"counterfactual.auto_run_post_market={cf.get('auto_run_post_market')!r} "
             "invalid — must be bool"
         )
+
+    # ── Phase 8 stoploss validation ──────────────────────────────────────
+    sl = cfg.get("stoploss", {})
+    for k in ("daily_loss_halt_multiplier", "daily_loss_flatten_multiplier", "max_stop_pct"):
+        v = sl.get(k)
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or v <= 0:
+            raise ValueError(f"stoploss.{k}={v!r} invalid — must be numeric > 0")
+    halt = float(sl.get("daily_loss_halt_multiplier", 0))
+    flat = float(sl.get("daily_loss_flatten_multiplier", 0))
+    if flat <= halt:
+        raise ValueError(
+            f"stoploss.daily_loss_flatten_multiplier={flat} must be > halt multiplier={halt}"
+        )
+
+    cm = sl.get("conviction_modifiers", {})
+    for k in ("high_threshold", "low_threshold"):
+        v = cm.get(k)
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or not (0 <= v <= 100):
+            raise ValueError(
+                f"stoploss.conviction_modifiers.{k}={v!r} invalid — must be numeric in [0, 100]"
+            )
+    for k in ("high_multiplier", "low_multiplier"):
+        v = cm.get(k)
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or v <= 0:
+            raise ValueError(
+                f"stoploss.conviction_modifiers.{k}={v!r} invalid — must be numeric > 0"
+            )
+
+    by_strategy = sl.get("by_strategy", {})
+    required_strategies = ("DAWN", "HYDRA", "VIPER")
+    required_keys = (
+        "initial_atr_multiplier", "orb_stop_enabled", "breakeven_r",
+        "trail_atr_settle", "trail_atr_confirm", "trail_atr_lock", "trail_atr_accelerate",
+        "partials_enabled", "partial_1_r", "partial_1_pct", "partial_2_r", "partial_2_pct",
+        "time_stop_ist", "rr_target",
+    )
+    for strat in required_strategies:
+        block = by_strategy.get(strat)
+        if not isinstance(block, dict):
+            raise ValueError(
+                f"stoploss.by_strategy.{strat} missing or not a dict"
+            )
+        for k in required_keys:
+            if k not in block:
+                raise ValueError(
+                    f"stoploss.by_strategy.{strat}.{k} missing"
+                )
+        # type checks for critical fields
+        for k in ("initial_atr_multiplier", "breakeven_r", "trail_atr_settle",
+                  "trail_atr_confirm", "trail_atr_lock", "trail_atr_accelerate",
+                  "partial_1_r", "partial_1_pct", "partial_2_r", "partial_2_pct",
+                  "rr_target"):
+            v = block.get(k)
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0:
+                raise ValueError(
+                    f"stoploss.by_strategy.{strat}.{k}={v!r} invalid — must be numeric >= 0"
+                )
+        for k in ("orb_stop_enabled", "partials_enabled"):
+            if not isinstance(block.get(k), bool):
+                raise ValueError(
+                    f"stoploss.by_strategy.{strat}.{k}={block.get(k)!r} invalid — must be bool"
+                )
+        ts = block.get("time_stop_ist")
+        if not isinstance(ts, str) or len(ts) != 5 or ts[2] != ":":
+            raise ValueError(
+                f"stoploss.by_strategy.{strat}.time_stop_ist={ts!r} invalid — must be 'HH:MM'"
+            )
 
     return True
 
@@ -297,3 +425,60 @@ def get_backtest_throttle() -> float:
 
 def get_backtest_auto_run_weekly() -> bool:
     return bool(load_config().get("backtest", {}).get("auto_run_weekly", False))
+
+
+# ── Typed accessors — Phase 8 stoploss ────────────────────────────────────
+
+def _default_strategy_stoploss() -> Dict[str, Any]:
+    """VIPER's block is the fallback — matches legacy behavior for unknown routes."""
+    return dict(_DEFAULTS["stoploss"]["by_strategy"]["VIPER"])
+
+
+def get_stoploss_config(strategy: str) -> Dict[str, Any]:
+    """
+    Return per-strategy stoploss params as a plain dict. Unknown strategies
+    fall back to VIPER defaults so the engine never crashes on a new route name.
+    Always returns a fresh copy so mutations don't leak into config cache.
+    """
+    key = (strategy or "").upper()
+    by = load_config().get("stoploss", {}).get("by_strategy", {})
+    block = by.get(key)
+    if not isinstance(block, dict):
+        block = _default_strategy_stoploss()
+    return dict(block)
+
+
+def get_daily_loss_halt_multiplier() -> float:
+    return float(load_config().get("stoploss", {}).get("daily_loss_halt_multiplier", 3.0))
+
+
+def get_daily_loss_flatten_multiplier() -> float:
+    return float(load_config().get("stoploss", {}).get("daily_loss_flatten_multiplier", 5.0))
+
+
+def get_max_stop_pct() -> float:
+    return float(load_config().get("stoploss", {}).get("max_stop_pct", 2.5))
+
+
+def get_conviction_modifiers() -> Dict[str, float]:
+    cm = load_config().get("stoploss", {}).get("conviction_modifiers", {})
+    return {
+        "high_threshold": float(cm.get("high_threshold", 85)),
+        "high_multiplier": float(cm.get("high_multiplier", 1.2)),
+        "low_threshold": float(cm.get("low_threshold", 75)),
+        "low_multiplier": float(cm.get("low_multiplier", 0.8)),
+    }
+
+
+def apply_conviction_modifier(base_multiplier: float, conviction: float) -> float:
+    """
+    Scale the ATR multiplier by conviction: wider stop for high conviction,
+    tighter for low. Pure function — no side effects, safe to call anywhere.
+    """
+    cm = get_conviction_modifiers()
+    c = float(conviction or 0.0)
+    if c >= cm["high_threshold"]:
+        return float(base_multiplier) * cm["high_multiplier"]
+    if c < cm["low_threshold"]:
+        return float(base_multiplier) * cm["low_multiplier"]
+    return float(base_multiplier)
