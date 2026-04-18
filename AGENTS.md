@@ -189,7 +189,15 @@ data_loader → signal_replayer → engine
 ```
 python -m src.backtest --days 90
 python -m src.backtest --days 30 --no-persist
+python -m src.backtest --days 90 --warm-cache    # fetch fresh data first
 ```
+
+### Populating the history cache (run ONCE after install)
+```
+python scripts/populate_history.py               # 201 symbols × 0.35s = ~70s
+```
+Requires `ZERODHA_API_KEY` + `ZERODHA_ACCESS_TOKEN` in `.env`.  If the token
+is expired, run `python -m src.tools.auto_login` first.
 
 ### What it tests
 Router + conviction gate replayed on 90 calendar days of real daily price data.
@@ -210,10 +218,14 @@ backtest:
 - No intraday simulation: uses daily open/close/high/low only; assumes 09:15 open entry
 - No filing or news data in replay: filing_category="" for all historical entries → router
   R1/R2 rules always fail → most signals route to HYDRA, almost none to DAWN
-- KiteConnect cache only: requires `data/history.db` to be populated by live bar builder;
-  fresh installs return [] for all symbols (no live Kite client in backtest mode)
 - BacktestConvictionScorer is a simplified heuristic (gap_pct + volume), not the live
   multi-layer engine — scores are directionally correct but not calibrated
+- KiteConnect auth is reused from `.env` (ZERODHA_API_KEY + ZERODHA_ACCESS_TOKEN); if
+  the token is absent/expired the backtest falls back to SQLite cache only — see
+  "Populating the history cache" above and/or the `--warm-cache` flag
+- The summary now reports `symbols_with_data`, `symbols_cache_only`, and
+  `data_quality_pct` so you can tell at a glance when results are skewed by
+  missing data
 
 ### Output
 `data/backtest_YYYY-MM-DD_90d.json` + formatted CLI report

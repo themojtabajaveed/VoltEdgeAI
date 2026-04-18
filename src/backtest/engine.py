@@ -85,7 +85,13 @@ def run_backtest(
     scorer = _scorer_override or BacktestConvictionScorer()
 
     all_results: list[dict] = []
+    symbols_with_data = 0
+    symbols_cache_only = 0
     for symbol, candles in universe_data.items():
+        if len(candles) >= 5:
+            symbols_with_data += 1
+        else:
+            symbols_cache_only += 1
         if not candles:
             continue
         all_results.extend(replay_symbol(symbol, candles, router, scorer))
@@ -125,9 +131,17 @@ def run_backtest(
     )
     router_accuracy = correct_routes / trades_taken if trades_taken > 0 else 0.0
 
+    universe_size = len(universe_data)
+    data_quality_pct = (
+        symbols_with_data / universe_size * 100.0 if universe_size > 0 else 0.0
+    )
+
     summary: dict = {
         "period": {"from_date": from_date_str, "to_date": to_date_str, "days": days},
-        "universe_size": len(universe_data),
+        "universe_size": universe_size,
+        "symbols_with_data": symbols_with_data,
+        "symbols_cache_only": symbols_cache_only,
+        "data_quality_pct": round(data_quality_pct, 2),
         "total_days_simulated": len(all_results),
         "trades_taken": trades_taken,
         "trades_skipped_conviction": len(skipped_conviction),
@@ -193,6 +207,13 @@ def print_backtest_report(summary: dict) -> None:
         print(f"Best     : {best['symbol']} {best['date']} ({best['pnl_pct']:+.2f}%)")
     if worst:
         print(f"Worst    : {worst['symbol']} {worst['date']} ({worst['pnl_pct']:+.2f}%)")
+    print("────────────────────────────────────")
+    sw = summary.get("symbols_with_data", 0)
+    sc = summary.get("symbols_cache_only", 0)
+    dq = summary.get("data_quality_pct", 0.0)
+    print(f"Data Quality: {sw}/{summary['universe_size']} symbols ({dq:.0f}%)")
+    if sc > 0:
+        print(f"⚠ {sc} symbols had insufficient data — results may be skewed")
     print("────────────────────────────────────")
     print("By Route:")
     print(

@@ -1,9 +1,10 @@
 """
 __main__.py — Backtest CLI entry point
-Run: python -m src.backtest [--days 90] [--no-persist]
+Run: python -m src.backtest [--days 90] [--no-persist] [--warm-cache]
 """
 import argparse
 import logging
+from datetime import date, timedelta
 
 from src.backtest.engine import print_backtest_report, run_backtest
 from src.config_loader import get_backtest_days
@@ -24,10 +25,24 @@ def main() -> None:
         action="store_true",
         help="Print report but do not write JSON to data/",
     )
+    parser.add_argument(
+        "--warm-cache",
+        action="store_true",
+        help="Populate the SQLite history cache before running the backtest",
+    )
     args = parser.parse_args()
 
     days = args.days if args.days is not None else get_backtest_days()
     persist = not args.no_persist
+
+    if args.warm_cache:
+        from src.backtest.data_loader import warm_cache
+        today = date.today()
+        to_d = today.isoformat()
+        from_d = (today - timedelta(days=days)).isoformat()
+        print(f"🔥 Warming cache for {from_d} → {to_d} ...")
+        fetched = warm_cache(from_d, to_d)
+        print(f"✅ Cache warm complete: {fetched} symbols have sufficient data")
 
     summary = run_backtest(days=days, persist=persist)
     print_backtest_report(summary)

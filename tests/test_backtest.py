@@ -152,3 +152,69 @@ def test_run_backtest_empty_universe(monkeypatch):
 
     result = run_backtest(days=5, persist=False)
     assert result["trades_taken"] == 0
+
+
+# ── Test 9: get_kite_client() returns None without auth ─────────────────
+
+def test_get_kite_client_returns_none_without_auth(monkeypatch):
+    """Missing ZERODHA_API_KEY / ACCESS_TOKEN → None, no crash."""
+    from src.backtest import data_loader
+    monkeypatch.delenv("ZERODHA_API_KEY", raising=False)
+    monkeypatch.delenv("ZERODHA_ACCESS_TOKEN", raising=False)
+    monkeypatch.setattr(data_loader, "_NO_AUTH_WARNED", False)
+    # Prevent load_dotenv from repopulating env from a real .env file.
+    monkeypatch.setattr(data_loader, "load_dotenv", lambda *a, **kw: None, raising=False)
+    import sys
+    # Shim: make dotenv.load_dotenv a no-op inside the function scope.
+    fake_dotenv = type(sys)("dotenv")
+    fake_dotenv.load_dotenv = lambda *a, **kw: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    assert data_loader.get_kite_client() is None
+
+
+# ── Test 10: warm_cache() with mocked fetch returns correct count ───────
+
+def test_warm_cache_counts_symbols_with_data(monkeypatch):
+    """warm_cache returns the count of symbols with ≥ 5 candles in cache."""
+    from src.backtest import data_loader
+
+    monkeypatch.setattr(data_loader, "get_backtest_universe", lambda: ["A", "B", "C"])
+    # Make fetch return 5 candles for A, 3 for B (degraded), 5 for C
+    def _fake_fetch(sym, f, t, kite_client=None):
+        n = {"A": 5, "B": 3, "C": 5}.get(sym, 0)
+        return [{"date": f"2026-01-{i+1:02d}", "open": 100, "high": 101,
+                 "low": 99, "close": 100, "volume": 1000} for i in range(n)]
+    monkeypatch.setattr(data_loader, "fetch_historical_ohlcv", _fake_fetch)
+    monkeypatch.setattr(data_loader, "get_kite_client", lambda: None)
+    monkeypatch.setattr("src.config_loader.get_backtest_throttle", lambda: 0.0)
+
+    fetched = data_loader.warm_cache("2025-10-01", "2026-01-01")
+    assert fetched == 2  # only A and C have ≥5
+
+
+# ── Test 11: data quality fields present in run_backtest summary ────────
+
+def test_run_backtest_summary_has_data_quality_fields(monkeypatch):
+    """Summary must include symbols_with_data, symbols_cache_only, data_quality_pct."""
+    from src.backtest.engine import run_backtest
+
+    # 2 symbols: one with 5 candles (good), one with 2 candles (degraded)
+    good_candles = [
+        _candle(open_p=100, high_p=103, low_p=99, close_p=102, date=f"2026-01-0{i+1}")
+        for i in range(5)
+    ]
+    bad_candles = good_candles[:2]
+    monkeypatch.setattr(
+        "src.backtest.engine.fetch_universe_historical",
+        lambda from_d, to_d: {"GOOD": good_candles, "BAD": bad_candles},
+    )
+
+    result = run_backtest(
+        days=5, persist=False,
+        _router_override=_MockRouterDAWN(),
+        _scorer_override=_scorer(80.0),
+    )
+    assert result["symbols_with_data"] == 1
+    assert result["symbols_cache_only"] == 1
+    assert result["data_quality_pct"] == pytest.approx(50.0, abs=0.01)
