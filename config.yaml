@@ -1,0 +1,7 @@
+router:
+  dawn_confidence_min: 0.85
+
+counterfactual:
+  target_pct: 2.0
+  sl_pct: -1.5
+  auto_run_post_market: true

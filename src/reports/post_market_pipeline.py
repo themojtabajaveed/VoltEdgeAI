@@ -731,6 +731,13 @@ def _build_all_sections(
     # Section 8: Tomorrow's Setup
     sections.append(_build_section_8_tomorrow(analysis))
 
+    # Section 11: Counterfactual Analysis (HYDRA Shadows)
+    sections.append(_build_section_11_counterfactual(today))
+
+    # Section 12: Weekly Router Summary (Fridays only)
+    if today.weekday() == 4:
+        sections.append(_build_section_12_weekly_router())
+
     return sections, updated_predictions, learnings
 
 
@@ -1412,6 +1419,136 @@ def _build_section_8_tomorrow(analysis: PostMarketAnalysis) -> str:
     if readiness:
         lines.append(f"**System readiness:** {readiness}")
 
+    return "\n".join(lines)
+
+
+# ── Section 11: Counterfactual Analysis (HYDRA Shadows) ─────────────
+
+def _build_section_11_counterfactual(today: date) -> str:
+    """
+    Section 11: Counterfactual analysis for today's HYDRA shadows.
+
+    Prefers the persisted data/counterfactual_YYYY-MM-DD.json written by the
+    runner; falls back to running the analysis inline if missing.
+    """
+    from src.analysis.counterfactual import (
+        load_counterfactual, load_shadows, run_counterfactual,
+    )
+
+    date_str = today.isoformat()
+    cf = load_counterfactual(date_str)
+    if cf is None:
+        if not load_shadows(date_str):
+            return (
+                "## 11. Counterfactual Analysis (HYDRA Shadows)\n\n"
+                "No HYDRA shadows recorded today."
+            )
+        try:
+            cf = run_counterfactual(date_str)
+        except Exception as e:
+            logger.warning(f"[PostMarket/S11] Counterfactual inline run failed: {e}")
+            return (
+                "## 11. Counterfactual Analysis (HYDRA Shadows)\n\n"
+                f"_Counterfactual analysis unavailable: {e}_"
+            )
+
+    total = int(cf.get("total_shadows", 0) or 0)
+    if total == 0:
+        return (
+            "## 11. Counterfactual Analysis (HYDRA Shadows)\n\n"
+            "No HYDRA shadows recorded today."
+        )
+
+    correct = int(cf.get("correct_routes", 0) or 0)
+    missed = int(cf.get("missed_opportunities", 0) or 0)
+    accuracy = float(cf.get("router_accuracy", 0.0) or 0.0)
+
+    if accuracy >= 0.70:
+        interpretation = "Router is routing correctly. No tuning needed."
+    elif missed > correct:
+        interpretation = (
+            "Router is over-routing to HYDRA. Consider lowering dawn_confidence_min."
+        )
+    else:
+        interpretation = (
+            "Router may be too aggressive for DAWN. Consider raising dawn_confidence_min."
+        )
+
+    lines = ["## 11. Counterfactual Analysis (HYDRA Shadows)\n"]
+    lines.append(f"- Shadows analyzed: **{total}**")
+    lines.append(f"- Router accuracy: **{accuracy:.1%}** ({correct} correct routes / {total})")
+    lines.append(
+        f"- Missed opportunities: **{missed}** stocks moved ≥ target "
+        "but were routed to HYDRA"
+    )
+    lines.append(
+        f"- Correct routes: **{correct}** stocks dropped — HYDRA routing was right"
+    )
+    lines.append("")
+    lines.append("| Symbol | Pct Move | Direction | Verdict |")
+    lines.append("|---|---:|---|---|")
+    for d in cf.get("details", []):
+        pct = d.get("pct_move")
+        pct_str = f"{pct:+.2f}%" if isinstance(pct, (int, float)) else "N/A"
+        lines.append(
+            f"| {d.get('symbol','?')} | {pct_str} | "
+            f"{d.get('direction','?')} | {d.get('verdict','?')} |"
+        )
+    lines.append("")
+    lines.append(f"**Interpretation:** {interpretation}")
+    return "\n".join(lines)
+
+
+# ── Section 12: Weekly Router Summary (Fridays only) ─────────────────
+
+def _build_section_12_weekly_router() -> str:
+    """
+    Section 12 (Fridays only): 5-day router accuracy trend + tuning suggestion.
+
+    Read-only — does not modify config.yaml.
+    """
+    from src.analysis.router_tuner import compute_tuning_suggestion, load_cf_history
+
+    history = load_cf_history(days=5)
+    suggestion = compute_tuning_suggestion(history)
+
+    lines = ["## 12. Weekly Router Summary\n"]
+    if not history:
+        lines.append("_No counterfactual history available for this week._")
+        lines.append("")
+        lines.append(
+            "To apply any future change: edit config.yaml → "
+            "router.dawn_confidence_min → restart service."
+        )
+        return "\n".join(lines)
+
+    lines.append("| Date | Accuracy | Missed | Correct | Total |")
+    lines.append("|---|---:|---:|---:|---:|")
+    for h in history:
+        lines.append(
+            f"| {h.get('date','?')} | "
+            f"{float(h.get('router_accuracy',0.0)):.1%} | "
+            f"{int(h.get('missed_opportunities',0))} | "
+            f"{int(h.get('correct_routes',0))} | "
+            f"{int(h.get('total_shadows',0))} |"
+        )
+    lines.append("")
+    lines.append(
+        f"**5-day avg accuracy:** {suggestion['avg_router_accuracy']:.1%} "
+        f"(missed={suggestion['total_missed']}, correct={suggestion['total_correct']})"
+    )
+    lines.append(
+        f"**Tuning suggestion:** `{suggestion['action']}` — {suggestion['reason']}"
+    )
+    if suggestion["action"] != "NO_CHANGE":
+        lines.append(
+            f"**Current → Suggested:** {suggestion['current_value']} → "
+            f"{suggestion['suggested_value']}"
+        )
+    lines.append("")
+    lines.append(
+        "To apply: edit config.yaml → router.dawn_confidence_min → restart service."
+    )
     return "\n".join(lines)
 
 

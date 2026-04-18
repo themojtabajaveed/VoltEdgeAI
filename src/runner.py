@@ -1850,6 +1850,34 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         except Exception as chron_e:
                             logging.error(f"Post-Market Report failed: {chron_e}")
                             print(f"  ❌ Post-Market Report error: {chron_e}")
+
+                        # ── Phase 5: Counterfactual analysis (router quality feedback) ──
+                        try:
+                            from src.config_loader import get_cf_auto_run
+                            if get_cf_auto_run():
+                                from src.analysis.counterfactual import (
+                                    run_counterfactual, persist_counterfactual, load_shadows,
+                                )
+                                _cf_date = current_date.isoformat()
+                                if load_shadows(_cf_date):
+                                    cf_result = run_counterfactual(_cf_date)
+                                    persist_counterfactual(cf_result)
+                                    logging.info(
+                                        f"[COUNTERFACTUAL] {cf_result['total_shadows']} shadows analyzed | "
+                                        f"router_accuracy={cf_result['router_accuracy']:.1%} | "
+                                        f"missed={cf_result['missed_opportunities']}"
+                                    )
+                                    print(
+                                        f"  📐 Counterfactual: {cf_result['total_shadows']} shadows | "
+                                        f"accuracy={cf_result['router_accuracy']:.1%} | "
+                                        f"missed={cf_result['missed_opportunities']}"
+                                    )
+                                else:
+                                    logging.info(f"[COUNTERFACTUAL] No shadows for {_cf_date} — skipping")
+                        except Exception as cf_e:
+                            logging.error(f"Counterfactual analysis failed: {cf_e}")
+                            print(f"  ❌ Counterfactual failed: {cf_e}")
+
                         last_report_date = current_date
                         last_autopsy_date = current_date
 

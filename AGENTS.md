@@ -45,6 +45,53 @@ SKIP: everything else unless behavior bug crosses these files
 - Router R5 graduation: replace cold-start pass with live pattern_db lookup
 - Post-market feedback compares DAWN actual vs HYDRA shadow counterfactual
 
+## Phase 5: Counterfactual Analysis (DONE)
+Purpose: feedback loop telling you whether the router's DAWN-vs-HYDRA decisions
+were correct. Reads the HYDRA shadow roster persisted each morning, fetches
+EOD prices, compares actual market outcome to what DAWN would have captured.
+
+OPEN: src/analysis/counterfactual.py
+- `load_shadows(date_str)` → reads data/hydra_shadows_YYYY-MM-DD.json
+- `fetch_eod_result(symbol, date_str)` → yfinance (.NS) OHLCV
+- `score_shadow(shadow, eod)` → pct_move, direction, verdict
+- `run_counterfactual(date_str)` → summary dict {total_shadows,
+  correct_routes, missed_opportunities, neutral, router_accuracy, details}
+- `persist_counterfactual(summary)` → data/counterfactual_YYYY-MM-DD.json
+
+Verdicts:
+- CORRECT_ROUTE      — pct_move ≤ sl_pct (HYDRA was right; DAWN would have stopped out)
+- MISSED_OPPORTUNITY — pct_move ≥ target_pct (DAWN would have captured the move)
+- NEUTRAL            — neither threshold hit
+Thresholds from config.yaml:counterfactual (target_pct, sl_pct).
+
+OPEN: src/analysis/router_tuner.py (READ-ONLY — never writes config.yaml)
+- `load_cf_history(days=5)` → recent counterfactual_*.json summaries
+- `compute_tuning_suggestion(history)` → {action, current_value,
+  suggested_value, reason}
+- `print_tuning_report(days=5)` → CLI-friendly summary
+CLI: `python -m src.analysis.router_tuner`
+
+OPEN: src/config_loader.py → get_cf_target_pct, get_cf_sl_pct, get_cf_auto_run,
+  get_router_dawn_confidence_min
+OPEN: src/reports/post_market_pipeline.py → _build_section_11_counterfactual,
+  _build_section_12_weekly_router (Fridays only, weekday==4)
+OPEN: src/runner.py → search "Phase 5: Counterfactual" — runs after 16:00 report
+  if get_cf_auto_run() is True
+
+Weekly summary (Fridays only): 5-day accuracy table + tuning suggestion.
+How to act on suggestions: edit config.yaml → router.dawn_confidence_min →
+restart voltedge service. NEVER auto-applied.
+
+ARTIFACTS: data/counterfactual_YYYY-MM-DD.json
+TESTS: tests/test_counterfactual.py, tests/test_router_tuner.py
+SKIP: everything else unless a bug crosses these modules
+
+## Phase 6 Roadmap (not yet implemented)
+- [ ] Live mode: DRY_RUN=false + real Zerodha order placement
+- [ ] Backtesting harness (replay historical days through router + conviction gate)
+- [ ] Auto-apply tuning suggestions after N consecutive same-direction signals
+- [ ] Telegram/WhatsApp alert for missed opportunities > 3 in a week
+
 ## DAWN Strategy (8:45 AM email + 9:15 market order)
 OPEN: src/strategies/viper.py → search "DAWN" block
 OPEN: src/reports/pre_market_brief.py → search "dawn" function
