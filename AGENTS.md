@@ -335,11 +335,17 @@ Set `execution.dry_run: true` in `config.yaml` and restart, OR
 ARTIFACTS: `data/live_trades_YYYY-MM-DD.json`
 TESTS: `tests/test_live_execution.py` (10 tests)
 
-## Phase 8 Roadmap
-- [ ] Stoploss order placement (bracket orders or SL-M)
-- [ ] Intraday position monitoring (check order status every 15 min)
-- [ ] P&L dashboard (web UI or Telegram bot)
-- [ ] Multi-strategy capital allocation (DAWN vs HYDRA budget split)
+## Phase 8: Stop-Loss Unification (DONE)
+OPEN: src/trading/exit_engine.py — unified ExitEngine, reads pos.strategy_config
+OPEN: src/trading/positions.py — Position now carries strategy_config, time_stop_ist, orb_stop_low
+OPEN: src/trading/daily_risk_state.py — circuit breaker, halt/flatten logic
+OPEN: src/trading/shadow_book.py — dry-run shadow PositionBook, write-through JSON
+OPEN: src/trading/stoploss_config.py — DEFAULT_STRATEGY_CONFIG fallback (implemented in config_loader.py)
+OPEN: src/trading/atr.py — compute_daily_atr_from_cache helper
+OPEN: config.yaml — stoploss: section (by_strategy: DAWN/HYDRA/VIPER)
+OPEN: src/config_loader.py — get_stoploss_config(), get_daily_loss_halt_multiplier(), apply_conviction_modifier()
+ARTIFACTS: data/sl_shadow_YYYY-MM-DD.json
+TESTS: tests/test_phase8_stoploss.py, tests/test_phase8_dawn_live.py
 
 ## DAWN Strategy (8:45 AM email + 9:15 market order)
 OPEN: src/strategies/viper.py → search "DAWN" block
@@ -386,3 +392,20 @@ SKIP: strategies/, db/, runner.py
 OPEN: src/juror/ (full)
 OPEN: src/llm/ → only the vendor file relevant to the bug (gemini.py / grok.py / claude.py)
 SKIP: strategies/, reports/, db/
+
+## R4 4-Layer Event Evaluation (DONE — Steps 1-9)
+OPEN: src/utils/market_calendar.py — market_minutes_of_exposure, get_nse_holidays (year-aware)
+OPEN: src/utils/filing_freshness.py — PRISTINE/FRESH/WARM/STALE classifier
+OPEN: src/utils/event_quality.py — quality scoring + classify_market_confirmation
+OPEN: src/data_ingestion/event_scanner.py — apply_event_evaluation_gate (L1/L2/L3/L4)
+OPEN: src/strategies/router.py — R4 wiring into pre-market routing
+OPEN: src/trading/conviction_engine.py — apply_filing_metadata_adjustment
+OPEN: src/data_ingestion/exchange_filings.py — deal-size regex + enrich_filing
+OPEN: config.yaml — router.filing_freshness, router.event_quality, router.market_confirmation, conviction.filing_metadata
+TESTS: test_r4_freshness, test_event_quality, test_event_scanner, test_conviction_engine, test_exchange_filings, test_market_calendar
+
+## Annual Maintenance
+SCRIPT: scripts/fetch_nse_holidays.py — run once every December
+  Writes data/nse_holidays_{year+1}.json from NSE API.
+  is_market_day() falls back to weekends-only if the file is missing (logs WARNING).
+  Example: `python scripts/fetch_nse_holidays.py 2027`

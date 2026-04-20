@@ -64,7 +64,88 @@ class FilingEvent:
     filed_at: str         # ISO 8601 timestamp (IST)
     exchange: str         # "NSE" or "BSE"
     urgency: float        # 0-10 computed from category keywords
+    # 4-layer event-evaluation enrichment — populated at fetch time where
+    # possible; downstream callers fill remaining fields from cache/LTP.
+    deal_size_inr: Optional[float] = None          # parsed from headline via regex
+    price_at_filing_time: Optional[float] = None   # filled by enrich_filing()
+    market_cap_inr: Optional[float] = None         # filled by enrich_filing()
+    earnings_surprise_pct: Optional[float] = None  # reserved for future parser
     raw: dict = field(default_factory=dict, repr=False)
+
+
+# ── Deal-size parser ──────────────────────────────────────────────────────────
+# Used by Layer-3 event-quality scoring. Handles common Indian/USD formats in
+# NSE/BSE subject lines: "₹500 crore", "Rs. 200 Cr", "INR 1500 Mn",
+# "USD 50 million", "order worth 300 crores". USD conversion uses an
+# approximate spot rate (good enough for scoring, not for trading).
+
+_USD_INR_APPROX = 83.0  # circa 2026; scoring-only precision
+
+_DEAL_SIZE_RE = re.compile(
+    r"(?P<curr>₹|Rs\.?|INR|USD|US\$|\$)?"
+    r"\s*"
+    r"(?P<amt>\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)"
+    r"\s*"
+    r"(?P<unit>crores?|billion|million|lakhs?|mln|cr|mn|bn)\b",
+    re.IGNORECASE,
+)
+
+_UNIT_MULTIPLIERS = {
+    "crore": 1e7, "crores": 1e7, "cr": 1e7,
+    "lakh": 1e5, "lakhs": 1e5,
+    "million": 1e6, "mn": 1e6, "mln": 1e6,
+    "billion": 1e9, "bn": 1e9,
+}
+
+
+def _parse_deal_size_inr(text: str) -> Optional[float]:
+    """Extract a deal/order size in INR from a subject/headline string.
+
+    Returns the INR value, or None if no amount pattern is present. USD
+    amounts are converted at _USD_INR_APPROX. Intentionally conservative:
+    if multiple amounts appear, only the first is returned (subjects rarely
+    have more than one meaningful number anyway).
+    """
+    if not text:
+        return None
+    m = _DEAL_SIZE_RE.search(text)
+    if not m:
+        return None
+    try:
+        amount = float(m.group("amt").replace(",", ""))
+    except ValueError:
+        return None
+    unit = m.group("unit").lower()
+    mult = _UNIT_MULTIPLIERS.get(unit)
+    if mult is None:
+        return None
+    value_inr = amount * mult
+    # Detect USD from either the captured currency group or a 10-char prefix
+    # (covers "deal worth USD 50 million" where USD sits just before the amt).
+    curr = (m.group("curr") or "").lower()
+    prefix = text[max(0, m.start() - 10):m.start()].lower()
+    if "usd" in curr or "$" in curr or "usd" in prefix or "us$" in prefix:
+        value_inr *= _USD_INR_APPROX
+    return value_inr
+
+
+def enrich_filing(
+    filing: FilingEvent,
+    previous_close: Optional[float] = None,
+    market_cap_inr: Optional[float] = None,
+) -> FilingEvent:
+    """Attach pre-market context (previous close, market cap) to a FilingEvent.
+
+    Called by the pre-market pipeline after the premarket cache is available.
+    Mutates and returns the same object for fluent use. Deal size is already
+    set at fetch time; this fills the two fields that require per-symbol
+    lookup data the filing fetchers don't have.
+    """
+    if previous_close is not None and filing.price_at_filing_time is None:
+        filing.price_at_filing_time = float(previous_close)
+    if market_cap_inr is not None and filing.market_cap_inr is None:
+        filing.market_cap_inr = float(market_cap_inr)
+    return filing
 
 
 # ── Urgency scoring ───────────────────────────────────────────────────────────
@@ -215,6 +296,7 @@ def _fetch_nse_filings(cutoff: datetime) -> List[FilingEvent]:
             filed_at=filed_dt.isoformat(),
             exchange="NSE",
             urgency=urgency,
+            deal_size_inr=_parse_deal_size_inr(subject),
             raw=item,
         ))
 
@@ -319,6 +401,7 @@ def _fetch_bse_filings(cutoff: datetime) -> List[FilingEvent]:
             filed_at=filed_dt.isoformat(),
             exchange="BSE",
             urgency=urgency,
+            deal_size_inr=_parse_deal_size_inr(headline),
             raw=item,
         ))
 

@@ -319,6 +319,100 @@ def _compute_sector_independence_boost(
         return 0.0
 
 
+def apply_filing_metadata_adjustment(
+    base_score: float,
+    signal_or_entry,
+    config: Optional[dict] = None,
+) -> Tuple[float, List[str]]:
+    """
+    Apply the additive filing-metadata adjustment on top of the weighted 5-layer
+    conviction score. Duck-typed so the same helper works for both:
+      * ActiveSignal — reads from .metadata dict
+      * WatchlistEntry — reads first-class attributes
+
+    Two contributions (in order):
+      1. Scanner-stamped conviction_modifier (PRISTINE/FRESH freshness bonus
+         + L4 CONFIRMED bonus / NO_DATA penalty, already packed in event_scanner).
+      2. Quality bonus/penalty based on event_quality_score:
+         quality ≥ 80 → +high_quality_conviction_bonus (default +6)
+         quality < 55 → -low_quality_conviction_penalty (default -15, defensive)
+         55 ≤ quality < 80 → 0 (neutral)
+
+    Final score is clamped to [0, 100].
+
+    Returns:
+        (adjusted_score, reasons_list) — reasons is list of human-readable
+        contributions for the greppable [ConvEng] log line.
+    """
+    if config is None:
+        try:
+            from src.config_loader import get_conviction_filing_metadata_config
+            config = get_conviction_filing_metadata_config()
+        except Exception:
+            config = {
+                "high_quality_conviction_bonus": 6,
+                "low_quality_conviction_penalty": 15,
+                "apply_enabled": True,
+            }
+
+    reasons: List[str] = []
+    adjusted = float(base_score)
+
+    if not bool(config.get("apply_enabled", True)):
+        return adjusted, reasons
+
+    # Duck-type read: first-class attrs first (WatchlistEntry), then .metadata (ActiveSignal).
+    meta = getattr(signal_or_entry, "metadata", None) or {}
+
+    def _lookup(name):
+        val = getattr(signal_or_entry, name, None)
+        # Dataclass defaults (e.g. conviction_modifier=0) count as "set" — only fall
+        # through to metadata when the attribute simply doesn't exist or is None.
+        if val is None:
+            val = meta.get(name)
+        elif name == "conviction_modifier" and val == 0 and "conviction_modifier" in meta:
+            # Prefer metadata if first-class is still default-zero and metadata has a value.
+            val = meta.get("conviction_modifier", 0)
+        return val
+
+    conviction_mod = _lookup("conviction_modifier")
+    quality = _lookup("event_quality_score")
+    freshness = _lookup("filing_freshness")
+
+    # 1. Scanner-stamped modifier (freshness + L4 confirmation, already packed)
+    if conviction_mod not in (None, 0):
+        try:
+            mod = int(conviction_mod)
+        except (TypeError, ValueError):
+            mod = 0
+        if mod != 0:
+            adjusted += mod
+            tag = freshness or "filing"
+            reasons.append(f"{tag}+L4 {mod:+d}")
+
+    # 2. Quality bonus/penalty
+    if quality is not None:
+        try:
+            q = float(quality)
+        except (TypeError, ValueError):
+            q = None  # type: ignore[assignment]
+        if q is not None:
+            if q >= 80.0:
+                bonus = int(config.get("high_quality_conviction_bonus", 6))
+                if bonus:
+                    adjusted += bonus
+                    reasons.append(f"quality={q:.0f} +{bonus}")
+            elif q < 55.0:
+                penalty = int(config.get("low_quality_conviction_penalty", 15))
+                if penalty:
+                    adjusted -= penalty
+                    reasons.append(f"quality={q:.0f} -{penalty}")
+            # 55 ≤ q < 80 → neutral, no reason line
+
+    adjusted = max(0.0, min(100.0, adjusted))
+    return adjusted, reasons
+
+
 def _compute_conviction(
     signal: ActiveSignal,
     layer_a: float,
@@ -526,7 +620,14 @@ class ConvictionEngine:
 
             # Weighted sum
             prev_conviction = signal.last_conviction
-            new_conviction = _compute_conviction(signal, layer_a, layer_b, layer_d)
+            raw_conviction = _compute_conviction(signal, layer_a, layer_b, layer_d)
+
+            # Additive filing-metadata adjustment (freshness + L4 + quality).
+            # No-op for signals that don't carry filing metadata (pre-4-layer callers).
+            new_conviction, adj_reasons = apply_filing_metadata_adjustment(
+                raw_conviction, signal,
+            )
+            adj_delta = new_conviction - raw_conviction
 
             delta = new_conviction - prev_conviction
             signal.last_conviction = new_conviction
@@ -540,12 +641,20 @@ class ConvictionEngine:
             # Log every recomputation (single line, greppable)
             weight_tag = "CAT" if _is_catalyst_signal(signal) else "MOM"
             boost_str = f" boost={sec_boost:+.0f}" if sec_boost > 0 else ""
+            if adj_reasons:
+                adj_str = (
+                    f" | filing_adj={adj_delta:+.0f} ["
+                    + ", ".join(adj_reasons) + "]"
+                )
+            else:
+                adj_str = ""
             logger.info(
                 f"[ConvEng] {signal.symbol} {signal.direction} [{weight_tag}] | "
                 f"A={layer_a:.0f}{boost_str} B={layer_b:.0f} C={signal.layer_c_score:.0f} "
                 f"D={layer_d:.0f} E={signal.layer_e_score:.0f} "
                 f"→ conv={new_conviction:.0f} | phase={phase.value} "
                 f"| prev={prev_conviction:.0f} | Δ={delta:+.0f}"
+                f"{adj_str}"
             )
 
             # Check threshold — dry-run signals NEVER trigger execution

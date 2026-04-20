@@ -29,10 +29,44 @@ _DEFAULTS: Dict[str, Any] = {
         "eod_squareoff_time_ist": "15:15",
         "live_startup_countdown": 10,
     },
+    "conviction": {
+        "filing_metadata": {
+            "high_quality_conviction_bonus": 6,
+            "low_quality_conviction_penalty": 15,
+            "apply_enabled": True,
+        },
+    },
     "router": {
         "dawn_confidence_min": 0.85,
         "hydra_confidence_min": 0.0,
         "router_enabled": True,
+        "filing_freshness": {
+            "pristine_market_minutes": 0,
+            "fresh_market_minutes_max": 30,
+            "warm_market_minutes_max": 90,
+            "price_reaction_fresh_pct": 1.0,
+            "price_reaction_warm_pct": 2.0,
+            "pristine_conviction_bonus": 8,
+            "fresh_conviction_bonus": 4,
+            "warm_conviction_bonus": 0,
+        },
+        "event_quality": {
+            "min_passing_score": 55,
+            "weight_event_type": 0.35,
+            "weight_deal_size_ratio": 0.25,
+            "weight_earnings_surprise": 0.20,
+            "weight_sector_followthrough": 0.10,
+            "weight_repetition_penalty": 0.10,
+            "repetition_lookback_days": 5,
+            "low_quality_conviction_penalty": 15,
+        },
+        "market_confirmation": {
+            "min_market_minutes_before_check": 15,
+            "volume_spike_multiplier": 2.0,
+            "min_price_velocity_pct": 0.5,
+            "indifferent_conviction_penalty": 20,
+            "confirmed_conviction_bonus": 10,
+        },
     },
     "dawn": {
         "pre_market_scan_enabled": True,
@@ -369,6 +403,51 @@ def get_router_enabled() -> bool:
 
 def get_hydra_confidence_min() -> float:
     return float(load_config().get("router", {}).get("hydra_confidence_min", 0.0))
+
+
+def get_filing_freshness_config() -> Dict[str, Any]:
+    """Return the router.filing_freshness sub-block as a plain dict (fresh copy)."""
+    block = load_config().get("router", {}).get("filing_freshness", {})
+    defaults = _DEFAULTS["router"]["filing_freshness"]
+    out = dict(defaults)
+    if isinstance(block, dict):
+        out.update(block)
+    return out
+
+
+def get_event_quality_config() -> Dict[str, Any]:
+    """Return the router.event_quality sub-block as a plain dict (fresh copy)."""
+    block = load_config().get("router", {}).get("event_quality", {})
+    defaults = _DEFAULTS["router"]["event_quality"]
+    out = dict(defaults)
+    if isinstance(block, dict):
+        out.update(block)
+    return out
+
+
+def get_market_confirmation_config() -> Dict[str, Any]:
+    """Return the router.market_confirmation sub-block as a plain dict (fresh copy)."""
+    block = load_config().get("router", {}).get("market_confirmation", {})
+    defaults = _DEFAULTS["router"]["market_confirmation"]
+    out = dict(defaults)
+    if isinstance(block, dict):
+        out.update(block)
+    return out
+
+
+def get_conviction_filing_metadata_config() -> Dict[str, Any]:
+    """Return the conviction.filing_metadata sub-block as a plain dict (fresh copy).
+
+    Controls the additive conviction adjustment applied after the weighted
+    5-layer sum, using event_quality_score and the scanner-stamped
+    conviction_modifier.
+    """
+    block = load_config().get("conviction", {}).get("filing_metadata", {})
+    defaults = _DEFAULTS["conviction"]["filing_metadata"]
+    out = dict(defaults)
+    if isinstance(block, dict):
+        out.update(block)
+    return out
 
 
 # ── Typed accessors — hydra ────────────────────────────────────────────────

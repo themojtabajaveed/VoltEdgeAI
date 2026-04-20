@@ -386,6 +386,14 @@ class HydraStrategy(StrategyHead):
                 gap_pct=gap_pct,
                 volume_signal=volume_signal,
                 technical_setup=technical_setup,
+                # 4-layer R4 inputs — prev_close doubles as price_at_filing for
+                # pre-market filings (close is the last known level); deal_size
+                # flows through from the regex parser in event_scanner.
+                filing_subject=event.headline,
+                price_at_filing_time=(cached.prev_close if cached and cached.prev_close > 0 else None),
+                deal_size_inr=event.deal_size_inr,
+                market_cap_inr=event.market_cap_inr,
+                filed_at=(event.filed_at_dt.isoformat() if event.filed_at_dt else None),
             ))
 
         if entries:

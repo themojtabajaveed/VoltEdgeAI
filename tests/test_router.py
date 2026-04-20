@@ -67,8 +67,13 @@ def test_somestock_missing_category_routes_to_hydra():
 
 
 def test_stale_filing_routes_to_hydra():
-    """Filing older than 16h → R4 fails → HYDRA."""
-    old = (datetime.now(IST) - timedelta(hours=30)).isoformat()
+    """Filing filed 30 days ago → far beyond warm_market_minutes_max=90 →
+    freshness STALE → R4 fails → HYDRA.
+
+    Using days instead of hours makes this independent of which weekday the
+    test runs on. ~22 trading days × 375 session min/day >> 90 min threshold,
+    so the filing is deterministically STALE regardless of NSE holidays."""
+    old = (datetime.now(IST) - timedelta(days=30)).isoformat()
     entry = WatchlistEntry(
         symbol="OLD",
         direction="BUY",

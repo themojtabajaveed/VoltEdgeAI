@@ -1155,22 +1155,53 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             if new_events:
                                 classified = hydra.event_scanner.classify_events(new_events)
                                 hot = [e for e in classified if e.urgency >= 7.0]
+                                # 4-layer gate (L1 freshness, L3 quality, L4 confirmation).
+                                # Returns the surviving subset, tagged with filing_freshness,
+                                # event_quality_score, market_confirmation, conviction_modifier.
+                                gated: list = []
                                 if hot:
-                                    print(f"  🔥 HYDRA: {len(hot)} new hot events detected!")
+                                    from src.data_ingestion.event_scanner import (
+                                        apply_event_evaluation_gate,
+                                    )
+                                    gated = apply_event_evaluation_gate(
+                                        hot,
+                                        seen_headlines=hydra.event_scanner._seen_headlines,
+                                    )
+                                    print(
+                                        f"  🔥 HYDRA: {len(hot)} hot events → "
+                                        f"{len(gated)} survived 4-layer gate"
+                                    )
+                                if gated:
                                     from src.strategies.base import WatchlistEntry
-                                    for evt in hot:
+                                    for evt in gated:
                                         hydra.watchlist.append(WatchlistEntry(
                                             symbol=evt.symbol, direction=evt.direction,
                                             event_summary=evt.summary or evt.headline, urgency=evt.urgency,
+                                            filing_subject=evt.headline,
+                                            deal_size_inr=evt.deal_size_inr,
+                                            market_cap_inr=evt.market_cap_inr,
+                                            price_at_filing_time=evt.price_at_filing,
+                                            filed_at=(evt.filed_at_dt.isoformat() if evt.filed_at_dt else None),
+                                            filing_freshness=evt.filing_freshness,
+                                            event_quality_score=evt.event_quality_score,
+                                            conviction_modifier=evt.conviction_modifier,
                                         ))
-                                        # Also add to conviction engine watchboard
+                                        # Also add to conviction engine watchboard.
+                                        # Stash filing metadata in .metadata so
+                                        # apply_filing_metadata_adjustment() can read it.
                                         conviction_engine.add_signal(ActiveSignal(
                                             symbol=evt.symbol,
                                             direction=evt.direction,
                                             strategy="HYDRA",
                                             layer_c_score=min(100.0, evt.urgency * 10.0),
                                             event_summary=evt.summary or evt.headline,
-                                            metadata={"urgency": evt.urgency},
+                                            metadata={
+                                                "urgency": evt.urgency,
+                                                "filing_freshness": evt.filing_freshness,
+                                                "event_quality_score": evt.event_quality_score,
+                                                "conviction_modifier": evt.conviction_modifier,
+                                                "market_confirmation": evt.market_confirmation,
+                                            },
                                         ))
                                     hydra.watchlist.sort(key=lambda e: e.urgency, reverse=True)
                                     hydra.watchlist = hydra.watchlist[:hydra.max_watchlist]

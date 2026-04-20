@@ -82,6 +82,18 @@ class WatchlistEntry:
     filing_urgency: float = 0.0         # 0-10 from filing classifier
     avg_volume_20d: int = 0             # 20d average daily volume, for liquidity gate
     filed_at: Optional[str] = None      # ISO timestamp of the filing (if known)
+    # 4-layer event-evaluation inputs (R4 / event_quality). All Optional so legacy
+    # callers that don't populate them don't break; scorers treat None as neutral.
+    filing_subject: Optional[str] = None        # raw filing subject line (keyword enrichment)
+    price_at_filing_time: Optional[float] = None  # LTP at filing_ts, for Layer-2 reaction check
+    deal_size_inr: Optional[float] = None       # order / deal value INR, drives deal_size_ratio
+    market_cap_inr: Optional[float] = None      # company market cap INR, denominator of ratio
+    earnings_surprise_pct: Optional[float] = None  # PAT/revenue YoY surprise % (results only)
+    event_quality_score: Optional[float] = None   # populated by router after Layer-3 scoring
+    filing_freshness: Optional[str] = None        # populated by router: PRISTINE/FRESH/WARM/STALE
+    # Pre-packed conviction adjustment from event_scanner (freshness + L4 confirmation).
+    # 0 means neutral / no adjustment; positive → boost, negative → penalty.
+    conviction_modifier: int = 0
     # DawnHydraRouter decision metadata — set by router after classification
     route: str = ""                     # "DAWN" or "HYDRA"
     confidence: float = 0.0             # router confidence 0.0-1.0 (rules_passed/6)

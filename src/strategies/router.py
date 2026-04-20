@@ -25,6 +25,8 @@ from zoneinfo import ZoneInfo
 
 from src.strategies.base import WatchlistEntry
 from src.data_ingestion.pre_market_data import PreMarketSignals
+from src.utils.event_quality import passes_quality_gate, score_event_quality
+from src.utils.filing_freshness import FilingFreshness, classify_filing_freshness
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,6 @@ DAWN_CATEGORIES = frozenset({
 _MIN_FILING_URGENCY = 8.5
 _MIN_FILING_IMPACT = 8.0
 _MIN_GAP_ABS = 2.0
-_MAX_HOURS_SINCE_FILING = 16.0
 _MIN_FOLLOW_THROUGH = 0.60
 _COLD_START_FOLLOW_THROUGH = 0.55
 _MIN_AVG_VOLUME_20D = 300_000
@@ -108,20 +109,67 @@ def _coalesce_avg_volume(
     return int(entry.avg_volume_20d or 0)
 
 
-def _hours_since_filing(filed_at: Optional[str]) -> Optional[float]:
-    """Return hours elapsed since filed_at (ISO string). None if unparseable."""
+def _parse_filing_ts(filed_at: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO filed_at string → IST-aware datetime. None if unparseable/missing."""
     if not filed_at:
         return None
     try:
         ts = datetime.fromisoformat(filed_at)
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=IST)
-        now = datetime.now(IST)
-        delta = (now - ts).total_seconds() / 3600.0
-        return max(0.0, delta)
+        return ts
     except (ValueError, TypeError) as e:
         logger.debug(f"[Router] filed_at parse failed: {filed_at!r} ({e})")
         return None
+
+
+def _get_sector_followthrough(
+    pattern_db: Optional[dict], category: str, direction: str
+) -> Optional[float]:
+    """Return sector/category historical follow-through rate (0.0-1.0) or None.
+
+    Supported shapes:
+      - dict (legacy): nested {"routing"|"categories"|"filing_categories":
+        {CATEGORY: {follow_through_rate | hit_rate: 0.xx}}} — delegate.
+      - list (current on-disk shape): flat list of trade fingerprints. No
+        aggregator wired yet; see TODO below.
+
+    TODO (Step 9 follow-up): pattern_db.json is a list of per-trade
+    fingerprints where `triggered=True` entries carry pnl_pct outcomes. As of
+    2026-04-20 only 67 legacy/expired entries exist and 0 are triggered, so
+    hit-rate aggregation would produce no meaningful data. Wire a
+    list-shape aggregator once the triggered-entry count crosses a usable
+    threshold (~20 per (sector, category) bucket). Returning None here is safe:
+    event_quality treats None as neutral (50/100), not a penalty.
+    """
+    if pattern_db is None:
+        return None
+    # Legacy dict-based hit-rate map: delegate when available.
+    if isinstance(pattern_db, dict):
+        return _lookup_follow_through_rate(pattern_db, category, direction)
+    # List-shape (on-disk): cold start → neutral.
+    return None
+
+
+def _get_recent_category_count(
+    entry: WatchlistEntry, category: str, lookback_days: int
+) -> int:
+    """Count recent same-symbol+category filings within the lookback window.
+
+    Step 4 scope: use what's already on the entry (metadata dict). If the
+    caller has stashed a count under entry.metadata['recent_same_category_count'],
+    use it; otherwise return 0. Full premarket-cache scanning is wired in Step 6.
+    """
+    if not category:
+        return 0
+    try:
+        md = getattr(entry, "metadata", None) or {}
+        val = md.get("recent_same_category_count")
+        if isinstance(val, (int, float)) and val >= 0:
+            return int(val)
+    except (AttributeError, TypeError):
+        pass
+    return 0
 
 
 def _lookup_follow_through_rate(
@@ -243,18 +291,90 @@ def route_candidate(
             failed.append("R3")
             notes.append(f"LONG gap={gap_pct:+.2f}%<{_MIN_GAP_ABS}")
 
-    # R4 — Freshness. Stale catalysts don't compress.
-    #     If filed_at unknown, give the benefit of the doubt — pass R4 but note it.
-    hours_since = _hours_since_filing(entry.filed_at)
-    if hours_since is None:
-        passed.append("R4")
-        notes.append("filed_at unknown — R4 assumed fresh")
-    elif hours_since <= _MAX_HOURS_SINCE_FILING:
-        passed.append("R4")
-        notes.append(f"filed {hours_since:.1f}h ago")
+    # R4 — 4-Layer Event Evaluation.
+    #   Layer 1: market-time exposure (NSE session minutes, not wall clock)
+    #   Layer 2: price reaction gate (stock already moved → downgrade)
+    #   Layer 3: event quality score 0-100 (magnitude, deal size, surprise, ...)
+    #   Layer 4: market confirmation — applied downstream in conviction_engine
+    #
+    # A filing PASSES R4 iff freshness ∈ {PRISTINE, FRESH, WARM} AND the
+    # event_quality score clears min_passing_score. STALE freshness or a
+    # weak filing (<min_passing_score) → R4 fails → HYDRA.
+    # If filed_at is unknown we can't run L1/L2 — record R4_SKIPPED and let
+    # downstream conviction scoring apply its own penalty.
+    filing_ts = _parse_filing_ts(entry.filed_at)
+    # Load freshness + quality config once; any exception → safe hardcoded defaults.
+    try:
+        from src.config_loader import (
+            get_event_quality_config,
+            get_filing_freshness_config,
+        )
+        fresh_cfg = get_filing_freshness_config()
+        quality_cfg = get_event_quality_config()
+    except Exception as e:
+        logger.debug(f"[Router] event-evaluation config unavailable ({e}) — using defaults")
+        fresh_cfg = {
+            "fresh_market_minutes_max": 30, "warm_market_minutes_max": 90,
+            "price_reaction_fresh_pct": 1.0, "price_reaction_warm_pct": 2.0,
+        }
+        quality_cfg = {"min_passing_score": 55.0}
+
+    if filing_ts is None:
+        # No timestamp → can't classify freshness. Skip L1/L2, still score L3 quality.
+        passed.append("R4_SKIPPED")
+        notes.append("filed_at unknown — freshness skipped")
+        entry.filing_freshness = None
     else:
-        failed.append("R4")
-        notes.append(f"filed {hours_since:.1f}h ago>{_MAX_HOURS_SINCE_FILING}")
+        price_at_filing = getattr(entry, "price_at_filing_time", None)
+        # price_now: prefer live LTP from premarket signals if available, else None.
+        price_now = None
+        try:
+            price_now = getattr(premarket, "price_now", None) if premarket else None
+        except AttributeError:
+            price_now = None
+        # If we have price_at_filing but not price_now, degrade to L1-only gracefully.
+        if price_at_filing is not None and price_now is None:
+            price_at_filing = None  # triggers L2-skipped path in classifier
+        tier, fresh_reason = classify_filing_freshness(
+            filing_ts=filing_ts,
+            as_of=datetime.now(IST),
+            price_at_filing=price_at_filing,
+            price_now=price_now if price_now is not None else 0.0,
+            config=fresh_cfg,
+        )
+        entry.filing_freshness = tier.value
+        notes.append(f"L1/L2: {fresh_reason}")
+        if tier == FilingFreshness.STALE:
+            failed.append("R4")
+        else:
+            passed.append("R4")
+
+    # Layer 3: event-quality score (runs regardless of whether L1/L2 were skipped).
+    sector_ft = _get_sector_followthrough(pattern_db, category, direction)
+    recent_count = _get_recent_category_count(
+        entry, category, int(quality_cfg.get("repetition_lookback_days", 5))
+    )
+    quality_score, quality_breakdown = score_event_quality(
+        category=category,
+        filing_subject=getattr(entry, "filing_subject", None),
+        deal_size_inr=getattr(entry, "deal_size_inr", None),
+        market_cap_inr=getattr(entry, "market_cap_inr", None),
+        earnings_surprise_pct=getattr(entry, "earnings_surprise_pct", None),
+        sector_followthrough=sector_ft,
+        recent_same_category_count=recent_count,
+        config=quality_cfg,
+    )
+    entry.event_quality_score = quality_score
+    quality_ok, quality_reason = passes_quality_gate(quality_score, quality_cfg)
+    notes.append(f"L3: {quality_reason}")
+    if not quality_ok:
+        # Filing is too weak on fundamentals — fail R4 regardless of freshness
+        # path. Remove any prior R4 / R4_SKIPPED pass and record R4 as failed.
+        for tag in ("R4", "R4_SKIPPED"):
+            if tag in passed:
+                passed.remove(tag)
+        if "R4" not in failed:
+            failed.append("R4")
 
     # R5 — Historical follow-through rate.
     #     Cold start (no pattern_db history) passes as "R5_COLD_START" with a
