@@ -36,6 +36,16 @@ class BacktestRouter:
 class BacktestConvictionScorer:
     """Simplified conviction scorer for historical replay.
 
+    # NOTE: This scorer can only use OHLCV features (gap, volume, route).
+    # It cannot replicate the live conviction engine's catalyst scoring
+    # (Layer C: filing urgency/impact) or LLM scoring.
+    # As a result, the backtest will produce zero trades unless:
+    # (a) a filing-enriched signal_replayer is built (Path A), or
+    # (b) conviction_threshold is lowered for backtest-only mode.
+    # The backtest is currently used for: cost mechanics validation,
+    # slippage modeling, and walk-forward framework testing only.
+    # Real performance validation uses the 30-day dry-run shadow book.
+
     The live ConvictionEngine requires real-time market snapshots; this scorer
     uses only the fields available in a historical WatchlistEntry.
 

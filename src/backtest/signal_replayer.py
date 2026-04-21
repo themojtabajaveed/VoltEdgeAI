@@ -78,6 +78,10 @@ def replay_day(
         get_conviction_threshold,
         get_backtest_target_pct,
         get_backtest_sl_pct,
+        get_per_trade_risk,
+        get_backtest_slippage_config,
+        get_backtest_use_threshold_override,
+        get_backtest_conviction_threshold_override,
     )
 
     date_str = str(candle.get("date", ""))
@@ -94,7 +98,11 @@ def replay_day(
 
     entry.route = route
     conviction_score: ConvictionScore = conviction_engine.score(entry)
-    threshold = get_conviction_threshold()
+    
+    if get_backtest_use_threshold_override():
+        threshold = get_backtest_conviction_threshold_override()
+    else:
+        threshold = get_conviction_threshold()
 
     if conviction_score.total < threshold:
         return {

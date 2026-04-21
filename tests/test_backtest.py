@@ -120,8 +120,9 @@ def test_slippage_stop_worse_than_target():
 
 def test_slippage_values_from_config(monkeypatch):
     from src.backtest import signal_replayer
+    from src import config_loader
     
-    monkeypatch.setattr(signal_replayer, "get_backtest_slippage_config", lambda: {
+    monkeypatch.setattr(config_loader, "get_backtest_slippage_config", lambda: {
         "slippage_entry_bps": 10,
         "slippage_exit_target_bps": 5,
         "slippage_exit_stop_bps": 20,
@@ -157,8 +158,8 @@ def test_replay_day_sl_hit():
 # ── Test 5: conviction gate skip ──────────────────────────────────────────
 
 def test_replay_day_conviction_gate():
-    """conviction=65 < threshold=70 → skipped with skip_reason=CONVICTION_GATE."""
-    result = replay_day("TEST", _candle(), [], _MockRouterDAWN(), _scorer(65.0))
+    """conviction=65 < threshold=70 → skipped    # Default override is 45 based on test environment, passing a score below 45 will trigger a gate skip."""
+    result = replay_day("TEST", _candle(), [], _MockRouterDAWN(), _scorer(20.0))
     assert result["skipped"] is True
     assert result["skip_reason"] == "CONVICTION_GATE"
 
@@ -387,3 +388,28 @@ def test_scorer_strong_signal_passes():
     scorer = BacktestConvictionScorer()
     score = scorer.score(entry)
     assert score.total == 75.0  # 40.0 + 20.0 + 15.0
+
+
+def test_override_threshold_used_when_enabled(monkeypatch):
+    from src.backtest import signal_replayer
+    from src import config_loader
+    
+    monkeypatch.setattr(config_loader, "get_backtest_use_threshold_override", lambda: True)
+    monkeypatch.setattr(config_loader, "get_backtest_conviction_threshold_override", lambda: 45)
+    
+    # Give exactly 45 -> should NOT be skipped
+    candle = _candle(open_p=100, high_p=105, low_p=95, close_p=102)
+    res = signal_replayer.replay_day("TEST", candle, [], _MockRouterDAWN(), _scorer(45.0))
+    assert res["skipped"] is False
+
+def test_live_threshold_used_when_override_disabled(monkeypatch):
+    from src.backtest import signal_replayer
+    from src import config_loader
+    
+    monkeypatch.setattr(config_loader, "get_backtest_use_threshold_override", lambda: False)
+    monkeypatch.setattr(config_loader, "get_conviction_threshold", lambda: 70)
+    
+    # 45 is below live threshold (70) -> should be skipped
+    candle = _candle(open_p=100, high_p=105, low_p=95, close_p=102)
+    res = signal_replayer.replay_day("TEST", candle, [], _MockRouterDAWN(), _scorer(45.0))
+    assert res["skipped"] is True

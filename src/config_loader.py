@@ -108,6 +108,8 @@ _DEFAULTS: Dict[str, Any] = {
         "slippage_exit_target_bps": 5,
         "slippage_exit_stop_bps": 10,
         "slippage_exit_neutral_bps": 3,
+        "conviction_threshold_override": 45,
+        "use_threshold_override": True,
     },
     "stoploss": {
         "daily_loss_halt_multiplier": 3.0,
@@ -518,6 +520,17 @@ def get_backtest_slippage_config() -> Dict[str, Any]:
         "slippage_exit_stop_bps": int(bt.get("slippage_exit_stop_bps", 10)),
         "slippage_exit_neutral_bps": int(bt.get("slippage_exit_neutral_bps", 3)),
     }
+
+
+def get_backtest_use_threshold_override() -> bool:
+    # Use True as default if section is somewhat malformed or partially omitted
+    bt = load_config().get("backtest", {})
+    # If the key isn't in backtest dict during testing without yaml, it drops to default True
+    return bool(bt.get("use_threshold_override", True))
+
+
+def get_backtest_conviction_threshold_override() -> int:
+    return int(load_config().get("backtest", {}).get("conviction_threshold_override", 45))
 
 
 # ── Typed accessors — Phase 8 stoploss ────────────────────────────────────

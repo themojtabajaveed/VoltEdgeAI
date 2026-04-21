@@ -8,15 +8,23 @@
   "symbols_with_data": 205,
   "symbols_cache_only": 0,
   "data_quality_pct": 100.0,
-  "total_days_simulated": 12296,
-  "trades_taken": 0,
-  "trades_skipped_conviction": 12296,
+  "total_days_simulated": 12092,
+  "trades_taken": 6,
+  "trades_skipped_conviction": 12086,
   "trades_skipped_unrouted": 0,
-  "win_rate": 0.0,
-  "avg_pnl_pct": 0.0,
-  "total_pnl_pct": 0,
-  "best_trade": null,
-  "worst_trade": null,
+  "win_rate": 1.0,
+  "avg_pnl_pct": 1.8058,
+  "total_pnl_pct": 10.8345,
+  "best_trade": {
+    "symbol": "SUZLON",
+    "date": "2026-03-02",
+    "pnl_pct": 1.8059
+  },
+  "worst_trade": {
+    "symbol": "AUBANK",
+    "date": "2026-03-02",
+    "pnl_pct": 1.8056
+  },
   "by_route": {
     "DAWN": {
       "trades": 0,
@@ -25,11 +33,11 @@
       "avg_pnl_pct": 0.0
     },
     "HYDRA": {
-      "trades": 0,
-      "wins": 0,
-      "win_rate": 0.0,
-      "avg_pnl_pct": 0.0
+      "trades": 6,
+      "wins": 6,
+      "win_rate": 1.0,
+      "avg_pnl_pct": 1.8057500000000002
     }
   },
-  "router_accuracy": 0.0
+  "router_accuracy": 1.0
 }
