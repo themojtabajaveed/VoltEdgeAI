@@ -393,19 +393,15 @@ OPEN: src/juror/ (full)
 OPEN: src/llm/ → only the vendor file relevant to the bug (gemini.py / grok.py / claude.py)
 SKIP: strategies/, reports/, db/
 
-## R4 4-Layer Event Evaluation (DONE — Steps 1-9)
-OPEN: src/utils/market_calendar.py — market_minutes_of_exposure, get_nse_holidays (year-aware)
-OPEN: src/utils/filing_freshness.py — PRISTINE/FRESH/WARM/STALE classifier
-OPEN: src/utils/event_quality.py — quality scoring + classify_market_confirmation
-OPEN: src/data_ingestion/event_scanner.py — apply_event_evaluation_gate (L1/L2/L3/L4)
-OPEN: src/strategies/router.py — R4 wiring into pre-market routing
-OPEN: src/trading/conviction_engine.py — apply_filing_metadata_adjustment
-OPEN: src/data_ingestion/exchange_filings.py — deal-size regex + enrich_filing
-OPEN: config.yaml — router.filing_freshness, router.event_quality, router.market_confirmation, conviction.filing_metadata
-TESTS: test_r4_freshness, test_event_quality, test_event_scanner, test_conviction_engine, test_exchange_filings, test_market_calendar
-
-## Annual Maintenance
-SCRIPT: scripts/fetch_nse_holidays.py — run once every December
-  Writes data/nse_holidays_{year+1}.json from NSE API.
-  is_market_day() falls back to weekends-only if the file is missing (logs WARNING).
-  Example: `python scripts/fetch_nse_holidays.py 2027`
+## R4 Filing Freshness + Event Quality (DONE)
+OPEN: src/utils/market_calendar.py → is_market_day(), market_minutes_of_exposure(), get_nse_holidays()
+OPEN: src/utils/filing_freshness.py → FilingFreshness enum, classify_filing_freshness()
+OPEN: src/utils/event_quality.py → score_event_quality(), passes_quality_gate(), classify_market_confirmation()
+OPEN: src/strategies/router.py → R4 block (4-layer), _parse_filing_ts(), _get_sector_followthrough()
+OPEN: src/data_ingestion/exchange_filings.py → _parse_deal_size_inr(), enrich_filing(), FilingEvent new fields
+OPEN: src/data_ingestion/event_scanner.py → apply_event_evaluation_gate(), MarketEvent new fields
+OPEN: src/trading/conviction_engine.py → apply_filing_metadata_adjustment()
+ARTIFACTS: data/nse_holidays_{year}.json (run scripts/fetch_nse_holidays.py each December)
+TESTS: tests/test_r4_freshness.py, tests/test_event_quality.py, tests/test_event_scanner.py, tests/test_exchange_filings.py, tests/test_market_calendar.py, tests/test_conviction_engine.py
+KNOWN GAP: pattern_db sector follow-through (Step 9) — 67 legacy entries, 0 active, deferred
+SKIP: everything else
