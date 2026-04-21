@@ -94,6 +94,10 @@ backtest:
   sl_pct: 1.5            # stop loss % (positive number, applied as -sl_pct)
   throttle_seconds: 0.35 # sleep between Kite API calls
   auto_run_weekly: false  # if true, runner.py triggers backtest every Friday
+  slippage_entry_bps: 6
+  slippage_exit_target_bps: 5
+  slippage_exit_stop_bps: 10
+  slippage_exit_neutral_bps: 3
 
 # ── Phase 8: Unified stop-loss system ─────────────────────────────────────
 # ExitEngine reads per-strategy params off Position.strategy_config (set at

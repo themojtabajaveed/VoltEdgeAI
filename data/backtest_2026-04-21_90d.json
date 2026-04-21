@@ -1,0 +1,35 @@
+{
+  "period": {
+    "from_date": "2026-01-21",
+    "to_date": "2026-04-21",
+    "days": 90
+  },
+  "universe_size": 205,
+  "symbols_with_data": 205,
+  "symbols_cache_only": 0,
+  "data_quality_pct": 100.0,
+  "total_days_simulated": 12296,
+  "trades_taken": 0,
+  "trades_skipped_conviction": 12296,
+  "trades_skipped_unrouted": 0,
+  "win_rate": 0.0,
+  "avg_pnl_pct": 0.0,
+  "total_pnl_pct": 0,
+  "best_trade": null,
+  "worst_trade": null,
+  "by_route": {
+    "DAWN": {
+      "trades": 0,
+      "wins": 0,
+      "win_rate": 0.0,
+      "avg_pnl_pct": 0.0
+    },
+    "HYDRA": {
+      "trades": 0,
+      "wins": 0,
+      "win_rate": 0.0,
+      "avg_pnl_pct": 0.0
+    }
+  },
+  "router_accuracy": 0.0
+}

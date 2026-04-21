@@ -104,6 +104,10 @@ _DEFAULTS: Dict[str, Any] = {
         "sl_pct": 1.5,
         "throttle_seconds": 0.35,
         "auto_run_weekly": False,
+        "slippage_entry_bps": 6,
+        "slippage_exit_target_bps": 5,
+        "slippage_exit_stop_bps": 10,
+        "slippage_exit_neutral_bps": 3,
     },
     "stoploss": {
         "daily_loss_halt_multiplier": 3.0,
@@ -504,6 +508,16 @@ def get_backtest_throttle() -> float:
 
 def get_backtest_auto_run_weekly() -> bool:
     return bool(load_config().get("backtest", {}).get("auto_run_weekly", False))
+
+
+def get_backtest_slippage_config() -> Dict[str, Any]:
+    bt = load_config().get("backtest", {})
+    return {
+        "slippage_entry_bps": int(bt.get("slippage_entry_bps", 6)),
+        "slippage_exit_target_bps": int(bt.get("slippage_exit_target_bps", 5)),
+        "slippage_exit_stop_bps": int(bt.get("slippage_exit_stop_bps", 10)),
+        "slippage_exit_neutral_bps": int(bt.get("slippage_exit_neutral_bps", 3)),
+    }
 
 
 # ── Typed accessors — Phase 8 stoploss ────────────────────────────────────

@@ -10,6 +10,8 @@ import logging
 from statistics import mean
 
 from src.strategies.base import ConvictionScore, WatchlistEntry
+from src.trading.trading_costs import compute_round_trip_cost
+from src.config_loader import get_per_trade_risk, get_backtest_slippage_config
 
 logger = logging.getLogger(__name__)
 
@@ -19,20 +21,21 @@ def build_watchlist_entry(
 ) -> WatchlistEntry:
     """Build a WatchlistEntry from a historical daily candle.
 
-    momentum_score  = (close - open) / open  (intraday move, decimal)
+    momentum_score  = (open - prev_close) / prev_close  (pre-market gap, decimal)
     avg_volume_20d  = mean of prev_candles volumes; 0 if fewer than 5 samples
     """
     open_p = float(candle["open"])
-    close_p = float(candle["close"])
-    curr_vol = int(candle.get("volume", 0))
+    
+    prev_close_p = float(prev_candles[-1]["close"]) if prev_candles and "close" in prev_candles[-1] else open_p
+    prev_vol = int(prev_candles[-1].get("volume", 0)) if prev_candles else 0
 
-    momentum = (close_p - open_p) / open_p if open_p != 0.0 else 0.0
+    momentum = (open_p - prev_close_p) / prev_close_p if prev_close_p != 0.0 else 0.0
 
     volumes = [int(c["volume"]) for c in prev_candles if "volume" in c]
     avg_vol = int(mean(volumes)) if len(volumes) >= 5 else 0
 
     if avg_vol > 0:
-        ratio = curr_vol / avg_vol
+        ratio = prev_vol / avg_vol
         vol_signal = "SURGE" if ratio >= 2.0 else "ELEVATED" if ratio >= 1.5 else "NORMAL"
     else:
         vol_signal = "NORMAL"
@@ -89,6 +92,7 @@ def replay_day(
             "skipped": True,
         }
 
+    entry.route = route
     conviction_score: ConvictionScore = conviction_engine.score(entry)
     threshold = get_conviction_threshold()
 
@@ -118,7 +122,28 @@ def replay_day(
     else:
         result, exit_price = "NEUTRAL", close_p
 
-    pnl_pct = round((exit_price - open_p) / open_p * 100.0, 4)
+    qty = max(1, int(get_per_trade_risk() / open_p))
+    cost_inr = compute_round_trip_cost(
+        qty=qty,
+        entry_price=open_p,
+        exit_price=exit_price,
+        is_intraday=True,
+    )
+    cost_pct = (cost_inr / (qty * open_p)) * 100.0
+
+    slip_cfg = get_backtest_slippage_config()
+    entry_slip_pct = slip_cfg["slippage_entry_bps"] / 100.0
+    if result == "TARGET_HIT":
+        exit_slip_pct = slip_cfg["slippage_exit_target_bps"] / 100.0
+    elif result == "SL_HIT":
+        exit_slip_pct = slip_cfg["slippage_exit_stop_bps"] / 100.0
+    else:
+        exit_slip_pct = slip_cfg["slippage_exit_neutral_bps"] / 100.0
+    
+    total_slip_pct = entry_slip_pct + exit_slip_pct
+
+    gross_pnl_pct = (exit_price - open_p) / open_p * 100.0
+    pnl_pct = round(gross_pnl_pct - cost_pct - total_slip_pct, 4)
 
     return {
         "symbol": symbol, "date": date_str,
@@ -129,6 +154,9 @@ def replay_day(
         "target_price": round(target_price, 4),
         "sl_price": round(sl_price, 4),
         "exit_price": round(exit_price, 4),
+        "gross_pnl_pct": round(gross_pnl_pct, 4),
+        "cost_pct": round(cost_pct, 4),
+        "slip_pct": round(total_slip_pct, 4),
         "pnl_pct": pnl_pct,
     }
 

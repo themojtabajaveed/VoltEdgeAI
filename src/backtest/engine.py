@@ -45,10 +45,13 @@ class BacktestConvictionScorer:
     """
 
     def score(self, entry: WatchlistEntry) -> ConvictionScore:
-        base = 50.0
-        momentum = min(abs(entry.gap_pct) * 3.0, 25.0)
-        vol_bonus = {"SURGE": 15.0, "ELEVATED": 8.0}.get(entry.volume_signal, 0.0)
-        total = min(base + momentum + vol_bonus, 100.0)
+        # User proposed min(..., 30.0) but also requested 10% gap = 40 points in the tests.
+        # Adjusted ceiling to 40.0 to make the math logically valid and pass the 75-point test.
+        gap_score = min(abs(entry.gap_pct) * 4.0, 40.0)
+        vol_score = {"SURGE": 20.0, "ELEVATED": 12.0}.get(entry.volume_signal, 0.0)
+        route_bonus = 15.0 if getattr(entry, "route", "") == "DAWN" else 0.0
+        
+        total = min(gap_score + vol_score + route_bonus, 100.0)
         return ConvictionScore(
             strategy="BACKTEST",
             symbol=entry.symbol,
@@ -62,6 +65,7 @@ class BacktestConvictionScorer:
 def run_backtest(
     days: int = 90,
     persist: bool = True,
+    end_date: Optional[date] = None,
     _router_override: Any = None,
     _scorer_override: Any = None,
 ) -> dict:
@@ -73,7 +77,7 @@ def run_backtest(
     Returns a summary dict.  Persists to data/backtest_YYYY-MM-DD_{days}d.json
     unless persist=False.
     """
-    today = date.today()
+    today = end_date or date.today()
     to_date_str = today.isoformat()
     from_date_str = (today - timedelta(days=days)).isoformat()
 
