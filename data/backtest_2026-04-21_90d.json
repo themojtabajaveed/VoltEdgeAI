@@ -4,26 +4,26 @@
     "to_date": "2026-04-21",
     "days": 90
   },
-  "universe_size": 205,
-  "symbols_with_data": 205,
-  "symbols_cache_only": 0,
-  "data_quality_pct": 100.0,
-  "total_days_simulated": 12092,
-  "trades_taken": 6,
-  "trades_skipped_conviction": 12086,
+  "universe_size": 204,
+  "symbols_with_data": 203,
+  "symbols_cache_only": 1,
+  "data_quality_pct": 99.51,
+  "total_days_simulated": 11977,
+  "trades_taken": 304,
+  "trades_skipped_conviction": 11673,
   "trades_skipped_unrouted": 0,
-  "win_rate": 1.0,
-  "avg_pnl_pct": 1.8058,
-  "total_pnl_pct": 10.8345,
+  "win_rate": 0.4638,
+  "avg_pnl_pct": 0.0197,
+  "total_pnl_pct": 5.9785,
   "best_trade": {
-    "symbol": "SUZLON",
-    "date": "2026-03-02",
+    "symbol": "ADANIENT",
+    "date": "2026-04-08",
     "pnl_pct": 1.8059
   },
   "worst_trade": {
-    "symbol": "AUBANK",
-    "date": "2026-03-02",
-    "pnl_pct": 1.8056
+    "symbol": "SOLARINDS",
+    "date": "2026-03-05",
+    "pnl_pct": -1.7491
   },
   "by_route": {
     "DAWN": {
@@ -33,11 +33,11 @@
       "avg_pnl_pct": 0.0
     },
     "HYDRA": {
-      "trades": 6,
-      "wins": 6,
-      "win_rate": 1.0,
-      "avg_pnl_pct": 1.8057500000000002
+      "trades": 304,
+      "wins": 141,
+      "win_rate": 0.46381578947368424,
+      "avg_pnl_pct": 0.019666118421052623
     }
   },
-  "router_accuracy": 1.0
+  "router_accuracy": 0.5263
 }
