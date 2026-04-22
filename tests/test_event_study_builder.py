@@ -495,3 +495,405 @@ def test_build_one_updates_intraday_on_duplicate_insert(mock_get):
     row = cursor.fetchone()
     assert row["intraday_bars_json"] is not None
     assert row["intraday_bars_json"] != "[]"
+
+
+# ── Tests 21-42 (Step 4: TA indicators) ──────────────────────────────────────
+
+import ta as _ta_lib_test  # used for expected-value computation in tests
+
+
+def make_ta_daily_df(
+    n_bars: int,
+    t0_date: date,
+    *,
+    t0_open: float = 119.5,
+    t0_high: float = 125.0,
+    t0_low: float = 115.0,
+    t0_close: float = 120.0,
+    t0_volume: int = 500_000,
+    t1_close: float = 100.0,
+    t1_open: float = 99.5,
+    t1_high: float = 105.0,
+    t1_low: float = 95.0,
+    t1_volume: int = 200_000,
+) -> pd.DataFrame:
+    """Build daily OHLCV df (timestamp as index) ending on t0_date.
+    Last bar = T0, second-to-last = T-1; earlier bars trend slowly."""
+    dates: list = []
+    d = t0_date
+    while len(dates) < n_bars:
+        if d.weekday() < 5:
+            dates.append(d)
+        d -= timedelta(days=1)
+    dates.reverse()
+
+    records = []
+    for i, dt in enumerate(dates):
+        if dt == t0_date:
+            records.append({
+                "open": t0_open, "high": t0_high, "low": t0_low,
+                "close": t0_close, "volume": t0_volume,
+            })
+        elif i == len(dates) - 2:
+            records.append({
+                "open": t1_open, "high": t1_high, "low": t1_low,
+                "close": t1_close, "volume": t1_volume,
+            })
+        else:
+            p = 90.0 + i * 0.4
+            records.append({
+                "open": p - 0.3, "high": p + 3.0, "low": p - 3.0,
+                "close": p, "volume": 200_000,
+            })
+
+    idx = pd.DatetimeIndex([pd.Timestamp(d) for d in dates], name="timestamp")
+    return pd.DataFrame(records, index=idx)
+
+
+# ── 21: schema ────────────────────────────────────────────────────────────────
+
+def test_schema_has_ta_columns():
+    builder = EventStudyBuilder(":memory:")
+    cursor = builder.conn.cursor()
+    cursor.execute("PRAGMA table_info(event_study)")
+    cols = {row[1] for row in cursor.fetchall()}
+    for expected in [
+        "rsi_7_pre", "rsi_14_pre",
+        "vol_spike_5d", "vol_spike_20d",
+        "vwap_delta_t0", "atr_rel_range", "gap_pct",
+        "sector_rel_return", "market_rel_return", "sector_alpha",
+    ]:
+        assert expected in cols, f"Missing column: {expected}"
+
+
+# ── 22-24: _compute_vwap_from_bars ───────────────────────────────────────────
+
+def test_compute_vwap_from_bars_correct():
+    builder = EventStudyBuilder(":memory:")
+    # (100*1000 + 102*2000 + 104*1000) / 4000 = 408000/4000 = 102.0
+    bars_json = '[{"close":100,"volume":1000},{"close":102,"volume":2000},{"close":104,"volume":1000}]'
+    assert builder._compute_vwap_from_bars(bars_json) == 102.0
+
+
+def test_compute_vwap_zero_volume_returns_none():
+    builder = EventStudyBuilder(":memory:")
+    bars_json = '[{"close":100,"volume":0},{"close":102,"volume":0}]'
+    assert builder._compute_vwap_from_bars(bars_json) is None
+
+
+def test_compute_vwap_empty_json_returns_none():
+    builder = EventStudyBuilder(":memory:")
+    assert builder._compute_vwap_from_bars("[]") is None
+    assert builder._compute_vwap_from_bars(None) is None
+    assert builder._compute_vwap_from_bars("invalid_json") is None
+
+
+# ── 25-26: gap_pct ────────────────────────────────────────────────────────────
+
+def test_gap_pct_positive():
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 17)
+    df = make_ta_daily_df(30, t0, t0_open=105.0, t1_close=100.0)
+    result = builder._compute_ta_indicators("TCS", t0, df, None, pd.DataFrame(), pd.DataFrame())
+    assert result["gap_pct"] == 5.0
+
+
+def test_gap_pct_negative():
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 17)
+    df = make_ta_daily_df(30, t0, t0_open=95.0, t1_close=100.0)
+    result = builder._compute_ta_indicators("TCS", t0, df, None, pd.DataFrame(), pd.DataFrame())
+    assert result["gap_pct"] == -5.0
+
+
+# ── 27-29: volume spike ───────────────────────────────────────────────────────
+
+def _make_vol_df(t0_date: date, volumes: list) -> pd.DataFrame:
+    """Build a minimal daily df whose volumes are exactly the given list (last = T0)."""
+    n = len(volumes)
+    dates: list = []
+    d = t0_date
+    while len(dates) < n:
+        if d.weekday() < 5:
+            dates.append(d)
+        d -= timedelta(days=1)
+    dates.reverse()
+    p = 100.0
+    records = [{"open": p, "high": p+1, "low": p-1, "close": p, "volume": v} for v in volumes]
+    idx = pd.DatetimeIndex([pd.Timestamp(d) for d in dates], name="timestamp")
+    return pd.DataFrame(records, index=idx)
+
+
+def test_vol_spike_5d_correct():
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 17)
+    vols = [200_000] * 25 + [200_000] * 5 + [1_000_000]  # last = T0
+    df = _make_vol_df(t0, vols)
+    result = builder._compute_ta_indicators("TCS", t0, df, None, pd.DataFrame(), pd.DataFrame())
+    assert result["vol_spike_5d"] == 5.0
+
+
+def test_vol_spike_excludes_t0():
+    """T0 must not be included in the pre-T0 average window."""
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 17)
+    # 7 bars: first 5 = 100K, T-1 = 200K, T0 = 900K
+    vols = [100_000] * 5 + [200_000, 900_000]
+    df = _make_vol_df(t0, vols)
+    result = builder._compute_ta_indicators("TCS", t0, df, None, pd.DataFrame(), pd.DataFrame())
+    # pre_t0 tail(5): [100K, 100K, 100K, 100K, 200K] → mean = 120K
+    # vol_spike_5d = 900_000 / 120_000 = 7.5
+    assert result["vol_spike_5d"] == 7.5
+    # If T0 were included: tail(5) = [100K, 100K, 100K, 200K, 900K] → mean = 280K → spike ≠ 7.5
+    assert result["vol_spike_5d"] != round(900_000 / 280_000, 4)
+
+
+def test_vol_spike_zero_avg_returns_none():
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 17)
+    vols = [0] * 25 + [1_000_000]
+    df = _make_vol_df(t0, vols)
+    result = builder._compute_ta_indicators("TCS", t0, df, None, pd.DataFrame(), pd.DataFrame())
+    assert result["vol_spike_5d"] is None
+    assert result["vol_spike_20d"] is None
+
+
+# ── 30-31: ATR relative range ─────────────────────────────────────────────────
+
+def test_atr_rel_range_correct():
+    """atr_rel_range = (T0_high - T0_low) / ATR(14) at T-1."""
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 17)
+    df = make_ta_daily_df(30, t0, t0_high=125.0, t0_low=115.0)
+    # Compute expected ATR at T-1 using the real ta library
+    atr_series = _ta_lib_test.volatility.AverageTrueRange(
+        df["high"].astype(float), df["low"].astype(float), df["close"].astype(float), window=14
+    ).average_true_range()
+    t0_iloc = len(df) - 1
+    t1_iloc = len(df) - 2
+    atr_t1 = float(atr_series.iloc[t1_iloc])
+    expected = round((125.0 - 115.0) / atr_t1, 4)
+
+    result = builder._compute_ta_indicators("TCS", t0, df, None, pd.DataFrame(), pd.DataFrame())
+    assert result["atr_rel_range"] == expected
+
+
+def test_atr_rel_range_zero_atr_returns_none():
+    """Zero ATR at T-1 must not cause ZeroDivisionError."""
+    from unittest.mock import patch, MagicMock
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 17)
+    df = make_ta_daily_df(30, t0)
+
+    mock_atr_instance = MagicMock()
+    mock_atr_instance.average_true_range.return_value = pd.Series([0.0] * len(df))
+    with patch(
+        "src.event_study.event_study_builder._ta_lib.volatility.AverageTrueRange",
+        return_value=mock_atr_instance,
+    ):
+        result = builder._compute_ta_indicators(
+            "TCS", t0, df, None, pd.DataFrame(), pd.DataFrame()
+        )
+    assert result["atr_rel_range"] is None
+
+
+# ── 32-33: VWAP delta ─────────────────────────────────────────────────────────
+
+def test_vwap_delta_uses_intraday_bars_when_available():
+    """Intraday bars with VWAP=101 → delta = (103-101)/101*100 = 1.9802."""
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 17)
+    df = make_ta_daily_df(30, t0, t0_close=103.0)
+    bars_json = '[{"close":101.0,"volume":1000},{"close":101.0,"volume":1000}]'
+    result = builder._compute_ta_indicators("TCS", t0, df, bars_json, pd.DataFrame(), pd.DataFrame())
+    expected = round((103.0 - 101.0) / 101.0 * 100, 4)
+    assert result["vwap_delta_t0"] == expected
+
+
+def test_vwap_delta_fallback_to_hlc3():
+    """Empty intraday → HLC/3 fallback. T0 H=110, L=90, C=105 → hlc3=101.6667."""
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 17)
+    df = make_ta_daily_df(30, t0, t0_high=110.0, t0_low=90.0, t0_close=105.0)
+    result = builder._compute_ta_indicators("TCS", t0, df, "[]", pd.DataFrame(), pd.DataFrame())
+    hlc3 = (110.0 + 90.0 + 105.0) / 3
+    expected = round((105.0 - hlc3) / hlc3 * 100, 4)
+    assert abs(result["vwap_delta_t0"] - expected) < 0.0001
+
+
+# ── 34-35: RSI ────────────────────────────────────────────────────────────────
+
+def test_rsi_14_pre_is_at_t_minus_1():
+    """rsi_14_pre must reflect T-1, not T0 (big T0 jump makes them differ materially)."""
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 17)
+    # closes[-2]=100 (T-1 drop), closes[-1]=120 (T0 surge) → large RSI divergence
+    df = make_ta_daily_df(30, t0, t0_close=120.0, t1_close=100.0)
+    close_s = df["close"].astype(float)
+    rsi14 = _ta_lib_test.momentum.RSIIndicator(close_s, window=14).rsi()
+    t1_iloc = len(df) - 2
+    t0_iloc = len(df) - 1
+    expected_t1 = round(float(rsi14.iloc[t1_iloc]), 4)
+    unexpected_t0 = round(float(rsi14.iloc[t0_iloc]), 4)
+
+    result = builder._compute_ta_indicators("TCS", t0, df, None, pd.DataFrame(), pd.DataFrame())
+    assert result["rsi_14_pre"] == expected_t1
+    assert result["rsi_14_pre"] != unexpected_t0
+
+
+def test_rsi_nan_warmup_returns_none():
+    """10-bar DataFrame → RSI(14) all NaN → rsi_14_pre is None."""
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 17)
+    df = make_ta_daily_df(10, t0)
+    result = builder._compute_ta_indicators("TCS", t0, df, None, pd.DataFrame(), pd.DataFrame())
+    assert result["rsi_14_pre"] is None  # insufficient data for RSI(14)
+
+
+# ── 36-38: benchmark returns ──────────────────────────────────────────────────
+
+def _make_bench_df(t1_close: float, t0_close: float, t0_date: date) -> pd.DataFrame:
+    """2-row daily df: T-1 and T0, both on weekdays."""
+    t1_date = t0_date - timedelta(days=1)
+    while t1_date.weekday() >= 5:
+        t1_date -= timedelta(days=1)
+    idx = pd.DatetimeIndex([pd.Timestamp(t1_date), pd.Timestamp(t0_date)], name="timestamp")
+    return pd.DataFrame([
+        {"open": t1_close, "high": t1_close + 1, "low": t1_close - 1, "close": t1_close, "volume": 100_000},
+        {"open": t0_close, "high": t0_close + 1, "low": t0_close - 1, "close": t0_close, "volume": 100_000},
+    ], index=idx)
+
+
+def test_sector_rel_return_correct():
+    """Stock +5%, sector +2% → sector_rel_return = 3.0."""
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 17)
+    stock_df  = make_ta_daily_df(30, t0, t0_close=105.0, t1_close=100.0)
+    sector_df = _make_bench_df(100.0, 102.0, t0)
+    result = builder._compute_ta_indicators(
+        "TCS", t0, stock_df, None, sector_df, pd.DataFrame()
+    )
+    assert result["sector_rel_return"] == 3.0
+
+
+def test_market_rel_return_correct():
+    """Stock +5%, Nifty +1.5% → market_rel_return = 3.5."""
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 17)
+    stock_df  = make_ta_daily_df(30, t0, t0_close=105.0, t1_close=100.0)
+    nifty_df  = _make_bench_df(100.0, 101.5, t0)
+    result = builder._compute_ta_indicators(
+        "TCS", t0, stock_df, None, pd.DataFrame(), nifty_df
+    )
+    assert result["market_rel_return"] == 3.5
+
+
+def test_sector_alpha_correct():
+    """Sector +2%, Nifty +1.5% → sector_alpha = 0.5."""
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 17)
+    stock_df  = make_ta_daily_df(30, t0, t0_close=105.0, t1_close=100.0)
+    sector_df = _make_bench_df(100.0, 102.0, t0)
+    nifty_df  = _make_bench_df(100.0, 101.5, t0)
+    result = builder._compute_ta_indicators(
+        "TCS", t0, stock_df, None, sector_df, nifty_df
+    )
+    assert result["sector_alpha"] == 0.5
+
+
+# ── 39: sector None when mapping fails ───────────────────────────────────────
+
+def test_sector_rel_none_when_sector_mapping_fails():
+    """Empty sector_df → sector_rel_return and sector_alpha are None;
+    market_rel_return is still computed if nifty_df is valid."""
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 17)
+    stock_df = make_ta_daily_df(30, t0, t0_close=105.0, t1_close=100.0)
+    nifty_df = _make_bench_df(100.0, 101.5, t0)
+    # Pass empty sector_df (simulates _get_sector_symbol returning None)
+    result = builder._compute_ta_indicators(
+        "TCS", t0, stock_df, None, pd.DataFrame(), nifty_df
+    )
+    assert result["sector_rel_return"] is None
+    assert result["sector_alpha"] is None
+    assert result["market_rel_return"] == 3.5  # still computed
+
+
+# ── 40: Nifty 50 cached, not re-fetched per filing ───────────────────────────
+
+@patch("src.event_study.event_study_builder.get_ohlcv")
+def test_nifty_cache_not_refetched_per_filing(mock_get):
+    """build_all() with 3 TCS filings → exactly 1 NIFTY 50 call and 1 NIFTY IT call."""
+    builder = EventStudyBuilder(":memory:")
+    for i in range(1, 4):
+        create_dummy_filing(builder, i, "TCS", f"2026-04-15T{9+i:02d}:00:00+05:30")
+    mock_get.return_value = pd.DataFrame()
+
+    count = builder.build_all()
+    assert count == 3
+
+    def _first_arg(c) -> str:
+        # handle both positional and keyword call styles
+        if c.args:
+            return c.args[0]
+        return c.kwargs.get("symbol", "")
+
+    nifty50_calls = sum(
+        1 for c in mock_get.call_args_list if _first_arg(c) == "NIFTY 50"
+    )
+    nifty_it_calls = sum(
+        1 for c in mock_get.call_args_list if _first_arg(c) == "NIFTY IT"
+    )
+    assert nifty50_calls == 1
+    assert nifty_it_calls == 1
+
+
+# ── 41: single indicator failure does not abort ───────────────────────────────
+
+def test_single_indicator_failure_does_not_abort():
+    """RSI exception must leave rsi_* None but not kill gap_pct or vol_spike_5d."""
+    from unittest.mock import patch
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 17)
+    vols = [200_000] * 29 + [1_000_000]
+    df = _make_vol_df(t0, vols)
+    # Re-build df with proper OHLC columns (prices = 100, needed for gap_pct)
+    df = make_ta_daily_df(30, t0, t0_open=105.0, t1_close=100.0, t0_volume=1_000_000, t1_volume=200_000)
+
+    with patch(
+        "src.event_study.event_study_builder._ta_lib.momentum.RSIIndicator",
+        side_effect=Exception("mock RSI failure"),
+    ):
+        result = builder._compute_ta_indicators(
+            "TCS", t0, df, None, pd.DataFrame(), pd.DataFrame()
+        )
+
+    assert isinstance(result, dict)
+    assert result["rsi_7_pre"] is None
+    assert result["rsi_14_pre"] is None
+    assert result["gap_pct"] is not None          # still computed
+    assert result["vol_spike_5d"] is not None     # still computed
+
+
+# ── 42: build_ta_only backfills NULL rsi ─────────────────────────────────────
+
+@patch("src.event_study.event_study_builder.get_ohlcv")
+def test_build_ta_only_backfills_null_rsi(mock_get):
+    """build_ta_only() updates rows where rsi_14_pre IS NULL."""
+    builder = EventStudyBuilder(":memory:")
+    t0 = date(2026, 4, 15)
+    filed_at = "2026-04-15T10:00:00+05:30"
+    create_dummy_event_study_row(builder, 1, 1, "TCS",  filed_at)
+    create_dummy_event_study_row(builder, 2, 2, "INFY", filed_at)
+
+    mock_get.return_value = make_ta_daily_df(30, t0)
+
+    count = builder.build_ta_only()
+    assert count == 2
+
+    cursor = builder.conn.cursor()
+    cursor.execute("SELECT rsi_14_pre FROM event_study ORDER BY id")
+    rows = cursor.fetchall()
+    assert len(rows) == 2
+    for row in rows:
+        assert row["rsi_14_pre"] is not None

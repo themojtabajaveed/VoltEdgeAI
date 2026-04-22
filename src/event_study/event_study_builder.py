@@ -7,13 +7,40 @@ from typing import Optional, Dict, Any, List
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+
+# pandas_ta requires Python >=3.12; using ta==0.11.0 for RSI/ATR (Python 3.11 compat)
+try:
+    import ta as _ta_lib
+    _TA_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _ta_lib = None  # type: ignore
+    _TA_AVAILABLE = False
+
 from src.data_ingestion.market_history import get_ohlcv
 from src.utils.market_calendar import is_market_day
+from src.trading.sector_guard import get_sector
 
 logger = logging.getLogger(__name__)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 _IST_ZI = ZoneInfo("Asia/Kolkata")
+
+# Nifty 50 symbol for get_ohlcv historical data calls
+_NIFTY50_SYMBOL = "NIFTY 50"
+
+# Sector name (from sector_guard.SECTOR_MAP) → Nifty sector index symbol
+_SECTOR_TO_NIFTY_INDEX: Dict[str, str] = {
+    "IT":       "NIFTY IT",
+    "BANKING":  "NIFTY BANK",
+    "PHARMA":   "NIFTY PHARMA",
+    "AUTO":     "NIFTY AUTO",
+    "ENERGY":   "NIFTY ENERGY",
+    "METALS":   "NIFTY METAL",
+    "FMCG":     "NIFTY FMCG CONSUMPTION",
+    "INFRA":    "NIFTY INFRA",
+    "NBFC":     "NIFTY FIN SERVICE",
+    "CONSUMER": "NIFTY CONSUMER DURABLES",
+}
 
 
 class EventStudyBuilder:
@@ -58,7 +85,8 @@ class EventStudyBuilder:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_es_filed_at ON event_study(filed_at)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_es_event_type ON event_study(event_type)")
 
-        new_columns = [
+        # Step 3: intraday anchor + dual-anchor return columns
+        for col_name, col_type in [
             ("intraday_anchor_open",  "REAL"),
             ("intraday_anchor_vwap5", "REAL"),
             ("ret_t0_15min_open",     "REAL"),
@@ -67,12 +95,11 @@ class EventStudyBuilder:
             ("ret_t0_30min_vwap",     "REAL"),
             ("ret_t0_1h_open",        "REAL"),
             ("ret_t0_1h_vwap",        "REAL"),
-        ]
-        for col_name, col_type in new_columns:
+        ]:
             try:
                 cursor.execute(f"ALTER TABLE event_study ADD COLUMN {col_name} {col_type}")
             except sqlite3.OperationalError:
-                pass  # Column already exists
+                pass  # column already exists
 
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_es_ret_1h_open ON event_study(ret_t0_1h_open)"
@@ -80,9 +107,50 @@ class EventStudyBuilder:
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_es_ret_1h_vwap ON event_study(ret_t0_1h_vwap)"
         )
+
+        # Step 4: TA indicator columns
+        for col in [
+            "rsi_7_pre REAL",
+            "rsi_14_pre REAL",
+            "vol_spike_5d REAL",
+            "vol_spike_20d REAL",
+            "vwap_delta_t0 REAL",
+            "atr_rel_range REAL",
+            "gap_pct REAL",
+            "sector_rel_return REAL",
+            "market_rel_return REAL",
+            "sector_alpha REAL",
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE event_study ADD COLUMN {col}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_es_rsi14     ON event_study(rsi_14_pre)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_es_gap_pct   ON event_study(gap_pct)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_es_vol_spike ON event_study(vol_spike_20d)")
         self.conn.commit()
 
+    # ── Core helpers ──────────────────────────────────────────────────────────
+
     def build_all(self) -> int:
+        # Pre-fetch Nifty 50 daily data once for the whole session
+        today = date.today()
+        nifty_start = datetime.combine(
+            today - timedelta(days=90), datetime_time(9, 0)
+        ).replace(tzinfo=IST)
+        nifty_end = datetime.combine(today, datetime_time(16, 0)).replace(tzinfo=IST)
+        try:
+            nifty_cache: pd.DataFrame = get_ohlcv(
+                _NIFTY50_SYMBOL, 0, "day", nifty_start, nifty_end
+            )
+            time.sleep(0.5)
+        except Exception as e:
+            logger.warning("[EventStudyBuilder] Nifty 50 pre-fetch failed: %s", e)
+            nifty_cache = pd.DataFrame()
+
+        sector_cache: Dict[str, pd.DataFrame] = {}
+
         cursor = self.conn.cursor()
         try:
             cursor.execute(
@@ -96,7 +164,9 @@ class EventStudyBuilder:
         inserted_count = 0
         for row in rows:
             filing_dict = dict(row)
-            if self._build_one(filing_dict):
+            if self._build_one(
+                filing_dict, nifty_cache=nifty_cache, sector_cache=sector_cache
+            ):
                 inserted_count += 1
         return inserted_count
 
@@ -106,7 +176,6 @@ class EventStudyBuilder:
             while not is_market_day(current_date):
                 current_date += timedelta(days=1)
             return current_date
-
         step = 1 if n > 0 else -1
         days_to_move = abs(n)
         while days_to_move > 0:
@@ -115,22 +184,27 @@ class EventStudyBuilder:
                 days_to_move -= 1
         return current_date
 
-    def _calc_return(self, base: Optional[float], target: Optional[float]) -> Optional[float]:
+    def _calc_return(
+        self, base: Optional[float], target: Optional[float]
+    ) -> Optional[float]:
         if base is None or target is None:
             return None
         if base == 0.0:
             return None
         return round((target - base) / base * 100, 4)
 
-    def _calc_vwap5(self, df: pd.DataFrame, window_start: datetime) -> Optional[float]:
+    def _calc_vwap5(
+        self, df: pd.DataFrame, window_start: datetime
+    ) -> Optional[float]:
         vwap_cutoff = window_start + timedelta(minutes=5)
         ts = df["timestamp"]
-        # Normalize both sides to tz-naive for robust mixed-tz comparison
         if ts.dt.tz is not None:
             ts_cmp = ts.dt.tz_localize(None)
         else:
             ts_cmp = ts
-        cutoff_cmp = vwap_cutoff.replace(tzinfo=None) if vwap_cutoff.tzinfo else vwap_cutoff
+        cutoff_cmp = (
+            vwap_cutoff.replace(tzinfo=None) if vwap_cutoff.tzinfo else vwap_cutoff
+        )
         vwap_bars = df[ts_cmp <= cutoff_cmp]
         if vwap_bars.empty:
             return float(df.iloc[0]["open"]) if not df.empty else None
@@ -139,6 +213,323 @@ class EventStudyBuilder:
             return float(df.iloc[0]["open"]) if not df.empty else None
         vwap = (vwap_bars["close"] * vwap_bars["volume"]).sum() / total_vol
         return round(float(vwap), 4)
+
+    # ── Step 4: TA indicator methods ──────────────────────────────────────────
+
+    def _compute_vwap_from_bars(self, bars_json: Optional[str]) -> Optional[float]:
+        """VWAP from intraday_bars_json (close × volume weighted average)."""
+        if not bars_json:
+            return None
+        try:
+            bars = json.loads(bars_json)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not bars:
+            return None
+        total_vol = sum(b.get("volume", 0) for b in bars)
+        if total_vol == 0:
+            return None
+        vwap = sum(b["close"] * b["volume"] for b in bars) / total_vol
+        return round(float(vwap), 4)
+
+    def _get_sector_symbol(self, symbol: str, event_type: str = "") -> Optional[str]:
+        """Map stock symbol → Nifty sector index symbol via sector_guard.get_sector()."""
+        try:
+            sector = get_sector(symbol, event_type)
+            return _SECTOR_TO_NIFTY_INDEX.get(sector)
+        except Exception as e:
+            logger.warning(
+                "[EventStudyBuilder] Sector mapping failed for %s: %s", symbol, e
+            )
+            return None
+
+    def _compute_ta_indicators(
+        self,
+        symbol: str,
+        t0_date: date,
+        daily_df: pd.DataFrame,
+        intraday_bars_json: Optional[str],
+        sector_df: pd.DataFrame,
+        nifty_df: pd.DataFrame,
+    ) -> dict:
+        """Compute all 10 TA indicators. Each indicator is isolated — one failure
+        sets that indicator to None without aborting the rest."""
+        EMPTY_TA: dict = {
+            "rsi_7_pre": None, "rsi_14_pre": None,
+            "vol_spike_5d": None, "vol_spike_20d": None,
+            "vwap_delta_t0": None, "atr_rel_range": None,
+            "gap_pct": None, "sector_rel_return": None,
+            "market_rel_return": None, "sector_alpha": None,
+        }
+
+        if daily_df is None or daily_df.empty:
+            return EMPTY_TA
+
+        result = dict(EMPTY_TA)
+
+        # Normalise and sort daily_df ascending by date
+        daily_df = daily_df.sort_index()
+        idx_as_dates = [
+            ts.date() if hasattr(ts, "date") else pd.Timestamp(ts).date()
+            for ts in pd.to_datetime(daily_df.index)
+        ]
+
+        # Locate T0 row
+        t0_locs = [i for i, d in enumerate(idx_as_dates) if d == t0_date]
+        if not t0_locs:
+            return EMPTY_TA
+        t0_iloc = t0_locs[-1]
+
+        # T-1 is the row immediately before T0 in the sorted daily_df
+        t1_iloc = t0_iloc - 1
+        if t1_iloc < 0:
+            return EMPTY_TA
+
+        t1_date_actual = idx_as_dates[t1_iloc]
+        pre_t0_df = daily_df.iloc[:t0_iloc]  # all rows strictly before T0
+
+        # 1. RSI ──────────────────────────────────────────────────────────────
+        try:
+            if not _TA_AVAILABLE or _ta_lib is None:
+                raise ImportError("ta library not available")
+            close_series = daily_df["close"].astype(float)
+            rsi_7_series  = _ta_lib.momentum.RSIIndicator(close_series, window=7).rsi()
+            rsi_14_series = _ta_lib.momentum.RSIIndicator(close_series, window=14).rsi()
+            v7  = rsi_7_series.iloc[t1_iloc]
+            v14 = rsi_14_series.iloc[t1_iloc]
+            result["rsi_7_pre"]  = None if pd.isna(v7)  else round(float(v7),  4)
+            result["rsi_14_pre"] = None if pd.isna(v14) else round(float(v14), 4)
+        except Exception as e:
+            logger.warning("[EventStudyBuilder] RSI failed for %s: %s", symbol, e)
+
+        # 2. Volume spike ──────────────────────────────────────────────────────
+        try:
+            t0_volume    = float(daily_df.iloc[t0_iloc]["volume"])
+            vol_5d_mean  = pre_t0_df["volume"].astype(float).tail(5).mean()
+            vol_20d_mean = pre_t0_df["volume"].astype(float).tail(20).mean()
+            result["vol_spike_5d"] = (
+                round(t0_volume / vol_5d_mean,  4)
+                if vol_5d_mean > 0 and not pd.isna(vol_5d_mean) else None
+            )
+            result["vol_spike_20d"] = (
+                round(t0_volume / vol_20d_mean, 4)
+                if vol_20d_mean > 0 and not pd.isna(vol_20d_mean) else None
+            )
+        except Exception as e:
+            logger.warning("[EventStudyBuilder] Vol spike failed for %s: %s", symbol, e)
+
+        # 3. VWAP delta ────────────────────────────────────────────────────────
+        try:
+            true_vwap = self._compute_vwap_from_bars(intraday_bars_json)
+            t0_row = daily_df.iloc[t0_iloc]
+            if true_vwap is None:
+                # Fallback: typical price (HLC/3) from T0 daily bar
+                true_vwap = float(
+                    (float(t0_row["high"]) + float(t0_row["low"]) + float(t0_row["close"])) / 3
+                )
+            t0_close = float(t0_row["close"])
+            if true_vwap > 0:
+                result["vwap_delta_t0"] = round(
+                    (t0_close - true_vwap) / true_vwap * 100, 4
+                )
+        except Exception as e:
+            logger.warning("[EventStudyBuilder] VWAP delta failed for %s: %s", symbol, e)
+
+        # 4. ATR relative range ────────────────────────────────────────────────
+        try:
+            if not _TA_AVAILABLE or _ta_lib is None:
+                raise ImportError("ta library not available")
+            atr_series = _ta_lib.volatility.AverageTrueRange(
+                daily_df["high"].astype(float),
+                daily_df["low"].astype(float),
+                daily_df["close"].astype(float),
+                window=14,
+            ).average_true_range()
+            atr_t1 = atr_series.iloc[t1_iloc]
+            if not pd.isna(atr_t1) and float(atr_t1) > 0:
+                t0_row = daily_df.iloc[t0_iloc]
+                result["atr_rel_range"] = round(
+                    (float(t0_row["high"]) - float(t0_row["low"])) / float(atr_t1), 4
+                )
+        except Exception as e:
+            logger.warning("[EventStudyBuilder] ATR failed for %s: %s", symbol, e)
+
+        # 5. Gap percent ───────────────────────────────────────────────────────
+        try:
+            t0_open  = float(daily_df.iloc[t0_iloc]["open"])
+            t1_close = float(daily_df.iloc[t1_iloc]["close"])
+            if t1_close > 0:
+                result["gap_pct"] = round(
+                    (t0_open - t1_close) / t1_close * 100, 4
+                )
+        except Exception as e:
+            logger.warning("[EventStudyBuilder] Gap pct failed for %s: %s", symbol, e)
+
+        # 6. Benchmark relative returns ────────────────────────────────────────
+        try:
+            t0_close_s = float(daily_df.iloc[t0_iloc]["close"])
+            t1_close_s = float(daily_df.iloc[t1_iloc]["close"])
+            t0_stock_return: Optional[float] = (
+                (t0_close_s - t1_close_s) / t1_close_s * 100
+                if t1_close_s > 0 else None
+            )
+
+            def _bench_return(bdf: pd.DataFrame) -> Optional[float]:
+                if bdf is None or bdf.empty:
+                    return None
+                bdf_s = bdf.sort_index()
+                b_dates = [
+                    ts.date() if hasattr(ts, "date") else pd.Timestamp(ts).date()
+                    for ts in pd.to_datetime(bdf_s.index)
+                ]
+                b_t0 = [i for i, d in enumerate(b_dates) if d == t0_date]
+                b_t1 = [i for i, d in enumerate(b_dates) if d == t1_date_actual]
+                if not b_t0 or not b_t1:
+                    return None
+                b_t0_c = float(bdf_s.iloc[b_t0[-1]]["close"])
+                b_t1_c = float(bdf_s.iloc[b_t1[-1]]["close"])
+                return (b_t0_c - b_t1_c) / b_t1_c * 100 if b_t1_c > 0 else None
+
+            t0_sector_return = _bench_return(sector_df)
+            t0_nifty_return  = _bench_return(nifty_df)
+
+            if t0_stock_return is not None and t0_sector_return is not None:
+                result["sector_rel_return"] = round(
+                    t0_stock_return - t0_sector_return, 4
+                )
+            if t0_stock_return is not None and t0_nifty_return is not None:
+                result["market_rel_return"] = round(
+                    t0_stock_return - t0_nifty_return, 4
+                )
+            if t0_sector_return is not None and t0_nifty_return is not None:
+                result["sector_alpha"] = round(
+                    t0_sector_return - t0_nifty_return, 4
+                )
+        except Exception as e:
+            logger.warning(
+                "[EventStudyBuilder] Benchmark returns failed for %s: %s", symbol, e
+            )
+
+        return result
+
+    def build_ta_only(self) -> int:
+        """Backfill TA indicators for event_study rows where rsi_14_pre IS NULL."""
+        today = date.today()
+        nifty_start = datetime.combine(
+            today - timedelta(days=90), datetime_time(9, 0)
+        ).replace(tzinfo=IST)
+        nifty_end = datetime.combine(today, datetime_time(16, 0)).replace(tzinfo=IST)
+        try:
+            nifty_cache: pd.DataFrame = get_ohlcv(
+                _NIFTY50_SYMBOL, 0, "day", nifty_start, nifty_end
+            )
+            time.sleep(0.5)
+        except Exception as e:
+            logger.warning(
+                "[EventStudyBuilder] Nifty 50 pre-fetch failed in build_ta_only: %s", e
+            )
+            nifty_cache = pd.DataFrame()
+
+        sector_cache: Dict[str, pd.DataFrame] = {}
+
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT es.id, es.filing_id, es.filed_at, es.event_type,
+                   es.intraday_bars_json, fa.symbol
+            FROM event_study es
+            JOIN filings_archive fa ON fa.id = es.filing_id
+            WHERE es.rsi_14_pre IS NULL
+        """)
+        rows = cursor.fetchall()
+        count = 0
+
+        for row in rows:
+            row_dict = dict(row)
+            try:
+                filed_at_str = row_dict["filed_at"]
+                if filed_at_str.endswith("Z"):
+                    filing_dt: datetime = datetime.fromisoformat(
+                        filed_at_str[:-1]
+                    ).replace(tzinfo=timezone.utc)
+                else:
+                    filing_dt = datetime.fromisoformat(filed_at_str)
+                    if filing_dt.tzinfo is None:
+                        filing_dt = filing_dt.replace(tzinfo=IST)
+
+                filing_ist  = filing_dt.astimezone(_IST_ZI)
+                filing_time = filing_ist.time()
+                filing_date = filing_ist.date()
+
+                if filing_time < datetime_time(15, 30) and is_market_day(filing_date):
+                    t0_date = filing_date
+                else:
+                    t0_date = filing_date + timedelta(days=1)
+                    for _ in range(7):
+                        if is_market_day(t0_date):
+                            break
+                        t0_date += timedelta(days=1)
+
+                symbol     = row_dict["symbol"]
+                event_type = row_dict.get("event_type") or ""
+
+                daily_start = datetime.combine(
+                    t0_date - timedelta(days=85), datetime_time(9, 0)
+                ).replace(tzinfo=IST)
+                daily_end = datetime.combine(
+                    t0_date, datetime_time(16, 0)
+                ).replace(tzinfo=IST)
+                daily_df = get_ohlcv(symbol, 0, "day", daily_start, daily_end)
+                time.sleep(0.5)
+
+                sector_symbol = self._get_sector_symbol(symbol, event_type)
+                sector_df = pd.DataFrame()
+                if sector_symbol:
+                    if sector_symbol not in sector_cache:
+                        try:
+                            sector_cache[sector_symbol] = get_ohlcv(
+                                sector_symbol, 0, "day", daily_start, daily_end
+                            )
+                            time.sleep(0.5)
+                        except Exception as se:
+                            logger.warning(
+                                "[EventStudyBuilder] Sector fetch failed %s: %s",
+                                sector_symbol, se,
+                            )
+                            sector_cache[sector_symbol] = pd.DataFrame()
+                    sector_df = sector_cache[sector_symbol]
+
+                ta_data = self._compute_ta_indicators(
+                    symbol, t0_date, daily_df,
+                    row_dict.get("intraday_bars_json"),
+                    sector_df, nifty_cache,
+                )
+                self.conn.execute("""
+                    UPDATE event_study SET
+                        rsi_7_pre=?,        rsi_14_pre=?,
+                        vol_spike_5d=?,     vol_spike_20d=?,
+                        vwap_delta_t0=?,    atr_rel_range=?,
+                        gap_pct=?,          sector_rel_return=?,
+                        market_rel_return=?, sector_alpha=?
+                    WHERE id=?
+                """, (
+                    ta_data["rsi_7_pre"],        ta_data["rsi_14_pre"],
+                    ta_data["vol_spike_5d"],      ta_data["vol_spike_20d"],
+                    ta_data["vwap_delta_t0"],     ta_data["atr_rel_range"],
+                    ta_data["gap_pct"],           ta_data["sector_rel_return"],
+                    ta_data["market_rel_return"], ta_data["sector_alpha"],
+                    row_dict["id"],
+                ))
+                count += 1
+            except Exception as e:
+                logger.error(
+                    "[EventStudyBuilder] build_ta_only failed id=%s: %s",
+                    row_dict.get("id"), e,
+                )
+
+        self.conn.commit()
+        return count
+
+    # ── Step 3: intraday window ───────────────────────────────────────────────
 
     def _build_intraday_window(
         self, symbol: str, filing_dt: datetime, t0_date: date
@@ -161,13 +552,11 @@ class EventStudyBuilder:
         filing_time = filing_ist.time()
 
         if filing_time < MARKET_OPEN:
-            # Case A: Pre-market — full day window on t0_date
             ws = datetime(t0_date.year, t0_date.month, t0_date.day, 9, 15, tzinfo=_IST_ZI)
             we = datetime(t0_date.year, t0_date.month, t0_date.day, 15, 30, tzinfo=_IST_ZI)
             reaction_windows: List[tuple] = [(t0_date, ws, we)]
 
         elif filing_time <= MARKET_CLOSE:
-            # Case B: During market — centered ±2h/+4h clamped to market hours
             ws = max(
                 filing_ist - timedelta(hours=2),
                 datetime(t0_date.year, t0_date.month, t0_date.day, 9, 15, tzinfo=_IST_ZI),
@@ -176,15 +565,12 @@ class EventStudyBuilder:
                 filing_ist + timedelta(hours=4),
                 datetime(t0_date.year, t0_date.month, t0_date.day, 15, 30, tzinfo=_IST_ZI),
             )
-            # Guard: non-trading-day filings during "market hours" produce we < ws
             if we <= ws:
                 ws = datetime(t0_date.year, t0_date.month, t0_date.day, 9, 15, tzinfo=_IST_ZI)
                 we = datetime(t0_date.year, t0_date.month, t0_date.day, 15, 30, tzinfo=_IST_ZI)
             reaction_windows = [(t0_date, ws, we)]
 
         else:
-            # Case C: Post-market — fetch t0_date (T+1) AND t0_date+1 trading day (T+2)
-            # t0_date is already the first reaction day (next trading day after filing)
             t_next = self._get_nth_trading_day(t0_date, 1)
             reaction_windows = [
                 (
@@ -206,7 +592,6 @@ class EventStudyBuilder:
                 raw_df = get_ohlcv(symbol, 0, "15minute", ws, we)
                 time.sleep(0.5)
                 if not raw_df.empty:
-                    # get_ohlcv returns timestamp as index; reset to column
                     raw_df.index.name = raw_df.index.name or "timestamp"
                     df_reset = raw_df.reset_index()
                     if "index" in df_reset.columns and "timestamp" not in df_reset.columns:
@@ -214,7 +599,8 @@ class EventStudyBuilder:
                     all_dfs.append(df_reset)
             except Exception as e:
                 logger.warning(
-                    "[EventStudyBuilder] intraday fetch failed %s %s: %s", symbol, rdate, e
+                    "[EventStudyBuilder] intraday fetch failed %s %s: %s",
+                    symbol, rdate, e,
                 )
 
         if not all_dfs:
@@ -225,7 +611,6 @@ class EventStudyBuilder:
         if len(combined) < 2:
             return EMPTY_RESULT
 
-        # Ensure timestamps are tz-aware for arithmetic
         if combined["timestamp"].dt.tz is None:
             combined["timestamp"] = combined["timestamp"].dt.tz_localize("Asia/Kolkata")
 
@@ -243,7 +628,7 @@ class EventStudyBuilder:
             target_ts = first_bar_ts + timedelta(minutes=offset_min)
             deltas = (combined["timestamp"] - target_ts).abs()
             idx = deltas.idxmin()
-            if deltas[idx].total_seconds() > 1800:  # 30-min gap threshold
+            if deltas[idx].total_seconds() > 1800:
                 return None
             return self._calc_return(anchor, float(combined.loc[idx, "close"]))
 
@@ -334,7 +719,17 @@ class EventStudyBuilder:
         self.conn.commit()
         return count
 
-    def _build_one(self, filing_row: Dict[str, Any]) -> bool:
+    def _build_one(
+        self,
+        filing_row: Dict[str, Any],
+        nifty_cache: Optional[pd.DataFrame] = None,
+        sector_cache: Optional[Dict[str, pd.DataFrame]] = None,
+    ) -> bool:
+        if sector_cache is None:
+            sector_cache = {}
+        if nifty_cache is None:
+            nifty_cache = pd.DataFrame()
+
         try:
             filed_at_str = filing_row["filed_at"]
             if filed_at_str.endswith("Z"):
@@ -432,7 +827,7 @@ class EventStudyBuilder:
             cursor.execute("UPDATE filings_archive SET processed=1 WHERE id=?", (filing_row["id"],))
             self.conn.commit()
 
-            # Fetch intraday window and update — idempotent, runs even if INSERT was ignored
+            # Intraday window — idempotent, runs even on duplicate INSERT
             intraday = self._build_intraday_window(filing_row["symbol"], filing_dt, t0_date)
             self.conn.execute("""
                 UPDATE event_study SET
@@ -448,6 +843,66 @@ class EventStudyBuilder:
                 intraday["ret_t0_15min_open"],     intraday["ret_t0_15min_vwap"],
                 intraday["ret_t0_30min_open"],     intraday["ret_t0_30min_vwap"],
                 intraday["ret_t0_1h_open"],        intraday["ret_t0_1h_vwap"],
+                filing_row["id"],
+            ))
+            self.conn.commit()
+
+            # TA indicators ───────────────────────────────────────────────────
+            symbol     = filing_row["symbol"]
+            event_type = filing_row.get("event_type") or ""
+
+            ta_daily_start = datetime.combine(
+                t0_date - timedelta(days=85), datetime_time(9, 0)
+            ).replace(tzinfo=IST)
+            ta_daily_end = datetime.combine(
+                t0_date, datetime_time(16, 0)
+            ).replace(tzinfo=IST)
+            ta_daily_df = get_ohlcv(symbol, 0, "day", ta_daily_start, ta_daily_end)
+            time.sleep(0.5)
+
+            sector_symbol = self._get_sector_symbol(symbol, event_type)
+            sector_df = pd.DataFrame()
+            if sector_symbol:
+                if sector_symbol not in sector_cache:
+                    try:
+                        sector_cache[sector_symbol] = get_ohlcv(
+                            sector_symbol, 0, "day", ta_daily_start, ta_daily_end
+                        )
+                        time.sleep(0.5)
+                    except Exception as se:
+                        logger.warning(
+                            "[EventStudyBuilder] Sector fetch failed %s: %s",
+                            sector_symbol, se,
+                        )
+                        sector_cache[sector_symbol] = pd.DataFrame()
+                sector_df = sector_cache[sector_symbol]
+
+            # Retrieve stored intraday_bars_json for VWAP computation
+            cur = self.conn.execute(
+                "SELECT intraday_bars_json FROM event_study WHERE filing_id=?",
+                (filing_row["id"],),
+            )
+            irow = cur.fetchone()
+            stored_intraday_json = irow[0] if irow else None
+
+            ta_data = self._compute_ta_indicators(
+                symbol, t0_date, ta_daily_df,
+                stored_intraday_json, sector_df, nifty_cache,
+            )
+            self.conn.execute("""
+                UPDATE event_study SET
+                    rsi_7_pre=?,        rsi_14_pre=?,
+                    vol_spike_5d=?,     vol_spike_20d=?,
+                    vwap_delta_t0=?,    atr_rel_range=?,
+                    gap_pct=?,          sector_rel_return=?,
+                    market_rel_return=?, sector_alpha=?
+                WHERE filing_id=?
+            """, (
+                ta_data["rsi_7_pre"],        ta_data["rsi_14_pre"],
+                ta_data["vol_spike_5d"],      ta_data["vol_spike_20d"],
+                ta_data["vwap_delta_t0"],     ta_data["atr_rel_range"],
+                ta_data["gap_pct"],           ta_data["sector_rel_return"],
+                ta_data["market_rel_return"], ta_data["sector_alpha"],
                 filing_row["id"],
             ))
             self.conn.commit()
