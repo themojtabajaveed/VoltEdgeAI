@@ -47,9 +47,24 @@ class EventStudyBuilder:
     def __init__(self, db_path: str = "data/history.db", kite_client: Optional[Any] = None):
         self.db_path = db_path
         self.kite_client = kite_client
+        self._token_map: dict = {}
+        try:
+            from src.data_ingestion.instruments import load_instruments_csv, build_symbol_token_map
+            _df = load_instruments_csv()
+            self._token_map = build_symbol_token_map(_df)
+            logger.info("[EventStudyBuilder] Loaded %d instrument tokens.", len(self._token_map))
+        except Exception as e:
+            logger.warning(
+                "[EventStudyBuilder] Could not load instrument token map: %s"
+                " — all tokens will be 0.", e
+            )
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._ensure_schema()
+
+    def _get_token(self, symbol: str) -> int:
+        """Return Kite instrument_token for symbol, or 0 if not found."""
+        return int(self._token_map.get(symbol, 0))
 
     def _ensure_schema(self) -> None:
         cursor = self.conn.cursor()
@@ -143,7 +158,7 @@ class EventStudyBuilder:
         nifty_end = datetime.combine(today, datetime_time(16, 0)).replace(tzinfo=IST)
         try:
             nifty_cache: pd.DataFrame = get_ohlcv(
-                _NIFTY50_SYMBOL, 0, "day", nifty_start, nifty_end,
+                _NIFTY50_SYMBOL, self._get_token(_NIFTY50_SYMBOL), "day", nifty_start, nifty_end,
                 kite_client=self.kite_client,
             )
             time.sleep(0.5)
@@ -423,7 +438,7 @@ class EventStudyBuilder:
         nifty_end = datetime.combine(today, datetime_time(16, 0)).replace(tzinfo=IST)
         try:
             nifty_cache: pd.DataFrame = get_ohlcv(
-                _NIFTY50_SYMBOL, 0, "day", nifty_start, nifty_end,
+                _NIFTY50_SYMBOL, self._get_token(_NIFTY50_SYMBOL), "day", nifty_start, nifty_end,
                 kite_client=self.kite_client,
             )
             time.sleep(0.5)
@@ -481,7 +496,7 @@ class EventStudyBuilder:
                 daily_end = datetime.combine(
                     t0_date, datetime_time(16, 0)
                 ).replace(tzinfo=IST)
-                daily_df = get_ohlcv(symbol, 0, "day", daily_start, daily_end, kite_client=self.kite_client)
+                daily_df = get_ohlcv(symbol, self._get_token(symbol), "day", daily_start, daily_end, kite_client=self.kite_client)
                 time.sleep(0.5)
 
                 sector_symbol = self._get_sector_symbol(symbol, event_type)
@@ -490,7 +505,7 @@ class EventStudyBuilder:
                     if sector_symbol not in sector_cache:
                         try:
                             sector_cache[sector_symbol] = get_ohlcv(
-                                sector_symbol, 0, "day", daily_start, daily_end,
+                                sector_symbol, self._get_token(sector_symbol), "day", daily_start, daily_end,
                                 kite_client=self.kite_client,
                             )
                             time.sleep(0.5)
@@ -593,7 +608,7 @@ class EventStudyBuilder:
         first_window_start = reaction_windows[0][1]
         for (rdate, ws, we) in reaction_windows:
             try:
-                raw_df = get_ohlcv(symbol, 0, "15minute", ws, we, kite_client=self.kite_client)
+                raw_df = get_ohlcv(symbol, self._get_token(symbol), "15minute", ws, we, kite_client=self.kite_client)
                 time.sleep(0.5)
                 if not raw_df.empty:
                     raw_df.index.name = raw_df.index.name or "timestamp"
@@ -767,7 +782,7 @@ class EventStudyBuilder:
 
             df = get_ohlcv(
                 symbol=filing_row["symbol"],
-                instrument_token=0,
+                instrument_token=self._get_token(filing_row["symbol"]),
                 interval="day",
                 start=start_dt,
                 end=end_dt,
@@ -862,7 +877,7 @@ class EventStudyBuilder:
             ta_daily_end = datetime.combine(
                 t0_date, datetime_time(16, 0)
             ).replace(tzinfo=IST)
-            ta_daily_df = get_ohlcv(symbol, 0, "day", ta_daily_start, ta_daily_end, kite_client=self.kite_client)
+            ta_daily_df = get_ohlcv(symbol, self._get_token(symbol), "day", ta_daily_start, ta_daily_end, kite_client=self.kite_client)
             time.sleep(0.5)
 
             sector_symbol = self._get_sector_symbol(symbol, event_type)
@@ -871,7 +886,7 @@ class EventStudyBuilder:
                 if sector_symbol not in sector_cache:
                     try:
                         sector_cache[sector_symbol] = get_ohlcv(
-                            sector_symbol, 0, "day", ta_daily_start, ta_daily_end,
+                            sector_symbol, self._get_token(sector_symbol), "day", ta_daily_start, ta_daily_end,
                             kite_client=self.kite_client,
                         )
                         time.sleep(0.5)
