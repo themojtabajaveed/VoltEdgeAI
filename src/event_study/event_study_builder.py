@@ -43,6 +43,32 @@ _SECTOR_TO_NIFTY_INDEX: Dict[str, str] = {
 }
 
 
+def _ensure_ist(dt: Any) -> Any:
+    """Return dt as a tz-aware IST datetime regardless of input type.
+
+    Handles plain datetime (naive/aware) and pandas Timestamp (naive/aware).
+    Never raises on valid datetime-like input.
+    """
+    if dt is None:
+        return None
+    if getattr(dt, "tzinfo", None) is not None:
+        return dt.astimezone(_IST_ZI)
+    # pandas Timestamp that is tz-naive — use tz_localize
+    if hasattr(dt, "tz_localize"):
+        return dt.tz_localize("Asia/Kolkata")
+    # plain datetime that is tz-naive
+    if isinstance(dt, datetime):
+        return dt.replace(tzinfo=_IST_ZI)
+    return dt
+
+
+def _localize_series(series: pd.Series) -> pd.Series:
+    """Localize a datetime Series to IST — safe for both tz-naive and tz-aware."""
+    if series.dt.tz is None:
+        return series.dt.tz_localize("Asia/Kolkata")
+    return series.dt.tz_convert("Asia/Kolkata")
+
+
 class EventStudyBuilder:
     def __init__(self, db_path: str = "data/history.db", kite_client: Optional[Any] = None):
         self.db_path = db_path
@@ -153,7 +179,7 @@ class EventStudyBuilder:
         # Pre-fetch Nifty 50 daily data once for the whole session
         today = date.today()
         nifty_start = datetime.combine(
-            today - timedelta(days=90), datetime_time(9, 0)
+            today - timedelta(days=59), datetime_time(9, 0)
         ).replace(tzinfo=IST)
         nifty_end = datetime.combine(today, datetime_time(16, 0)).replace(tzinfo=IST)
         try:
@@ -433,7 +459,7 @@ class EventStudyBuilder:
         """Backfill TA indicators for event_study rows where rsi_14_pre IS NULL."""
         today = date.today()
         nifty_start = datetime.combine(
-            today - timedelta(days=90), datetime_time(9, 0)
+            today - timedelta(days=59), datetime_time(9, 0)
         ).replace(tzinfo=IST)
         nifty_end = datetime.combine(today, datetime_time(16, 0)).replace(tzinfo=IST)
         try:
@@ -491,7 +517,7 @@ class EventStudyBuilder:
                 event_type = row_dict.get("event_type") or ""
 
                 daily_start = datetime.combine(
-                    t0_date - timedelta(days=85), datetime_time(9, 0)
+                    t0_date - timedelta(days=59), datetime_time(9, 0)
                 ).replace(tzinfo=IST)
                 daily_end = datetime.combine(
                     t0_date, datetime_time(16, 0)
@@ -630,16 +656,13 @@ class EventStudyBuilder:
         if len(combined) < 2:
             return EMPTY_RESULT
 
-        if combined["timestamp"].dt.tz is None:
-            combined["timestamp"] = combined["timestamp"].dt.tz_localize("Asia/Kolkata")
+        combined["timestamp"] = _localize_series(combined["timestamp"])
 
         first_bar    = combined.iloc[0]
         anchor_open  = float(first_bar["open"])
         anchor_vwap5 = self._calc_vwap5(all_dfs[0], first_window_start)
 
-        first_bar_ts = first_bar["timestamp"]
-        if first_bar_ts.tzinfo is None:
-            first_bar_ts = first_bar_ts.tz_localize("Asia/Kolkata")
+        first_bar_ts = _ensure_ist(first_bar["timestamp"])
 
         def _get_return(anchor: Optional[float], offset_min: int) -> Optional[float]:
             if anchor is None:
@@ -872,7 +895,7 @@ class EventStudyBuilder:
             event_type = filing_row.get("event_type") or ""
 
             ta_daily_start = datetime.combine(
-                t0_date - timedelta(days=85), datetime_time(9, 0)
+                t0_date - timedelta(days=59), datetime_time(9, 0)
             ).replace(tzinfo=IST)
             ta_daily_end = datetime.combine(
                 t0_date, datetime_time(16, 0)

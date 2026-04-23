@@ -74,13 +74,13 @@ if __name__ == "__main__":
             WHERE price_t0_close IS NULL
         )
     """)
-    _cur = _stale_conn.execute("""
+    cur2 = _stale_conn.execute("""
         DELETE FROM event_study WHERE price_t0_close IS NULL
     """)
-    _deleted_count = _cur.rowcount
+    deleted = cur2.rowcount
     _stale_conn.commit()
     _stale_conn.close()
-    logger.info("[Startup] Cleared %d empty event_study rows from previous run.", _deleted_count)
+    logger.info("[Startup] Cleared %d empty event_study rows — filings_archive.processed reset for re-processing.", deleted)
 
     # ── Step 1: Filing Archive ──────────────────────────────────
     logger.info("[Step 1] FilingArchiver.incremental_update()")
