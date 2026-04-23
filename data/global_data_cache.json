@@ -1,13 +1,13 @@
 {
-  "spy_change": 0.25,
-  "qqq_change": 0.48,
-  "crude_change": 3.59,
-  "eur_usd_change": -0.2,
-  "usd_inr_change": -0.1731041214481847,
-  "fii_net_cr": 382.36,
-  "dii_net_cr": -3427.75,
-  "vix_level": 18.09,
+  "spy_change": 1.01,
+  "qqq_change": 1.67,
+  "crude_change": 5.22,
+  "eur_usd_change": -0.29,
+  "usd_inr_change": 0.3252469210481547,
+  "fii_net_cr": -2078.36,
+  "dii_net_cr": -1048.17,
+  "vix_level": 18.3,
   "pcr": null,
-  "fii_dii_date": "2026-04-17",
-  "_cached_at": 1776396908.8227236
+  "fii_dii_date": "2026-04-23",
+  "_cached_at": 1776915319.8855982
 }

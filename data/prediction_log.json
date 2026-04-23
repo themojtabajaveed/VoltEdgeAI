@@ -53,6 +53,58 @@
       "date": "2026-03-31",
       "score": null,
       "actual_change_pct": null
+    },
+    {
+      "date": "2026-04-22",
+      "symbol": "RELINFRA",
+      "predicted_direction": "bearish",
+      "key_level": "80-85",
+      "reason": "Actions taken or orders passed by the company",
+      "score": null,
+      "actual_change_pct": null,
+      "grade_score": 0.0,
+      "price_zone_grade": "N/A",
+      "status": "\u26aa No data",
+      "eod_close": null
+    },
+    {
+      "date": "2026-04-22",
+      "symbol": "NESTLEIND",
+      "predicted_direction": "bullish",
+      "key_level": "1360-1380",
+      "reason": "Nestle India shares rise ahead of Q4 FY26 results",
+      "score": -1,
+      "actual_change_pct": 0.35,
+      "grade_score": 0.0,
+      "price_zone_grade": "\u2b06\ufe0f ABOVE ZONE",
+      "status": "\u274c Wrong",
+      "eod_close": 1395.8
+    },
+    {
+      "date": "2026-04-22",
+      "symbol": "GROWW",
+      "predicted_direction": "bullish",
+      "key_level": "210-214",
+      "reason": "Q4 Results declaration this week",
+      "score": 0,
+      "actual_change_pct": 1.43,
+      "grade_score": 0.75,
+      "price_zone_grade": "\u2b06\ufe0f ABOVE ZONE",
+      "status": "\u2705 Direction correct",
+      "eod_close": 217.9
+    },
+    {
+      "date": "2026-04-23",
+      "symbol": "BHARTIARTL",
+      "predicted_direction": "bullish",
+      "key_level": "1845-1865",
+      "reason": "A specific event described as 'Action(s) taken or orders passed' in the Telecommunication - Services sector, with a clear 'BUY' direction and high urgency (urgency=9), indicating a positive regulatory or policy development.",
+      "score": 0,
+      "actual_change_pct": 1.06,
+      "grade_score": 0.75,
+      "price_zone_grade": "\u2b07\ufe0f BELOW ZONE",
+      "status": "\u2705 Direction correct",
+      "eod_close": 1841.2
     }
   ],
   "system_lessons": [

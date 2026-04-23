@@ -1,4 +1,18 @@
 {
+  "2026-04-23": [
+    "[LEARN-DAWN] DAWN ran but produced no tradable signals today",
+    "[LEARN-CONV] 7 signals, 0 triggered. Highest: IDEAFORGE at 70. Threshold=55 would activate 7.",
+    "[LEARN-BRIEF] Prediction accuracy: 0/1. Notable misses: none.",
+    "[LEARN-REGIME] Market phase: SELECTIVE. SELECTIVE regime held through session.",
+    "[LEARN-DETECT] Top mover detection: 0/10. Missed: ONESOURCE, DRREDDY, UNIONBANK."
+  ],
+  "2026-04-22": [
+    "[LEARN-DAWN] DAWN ran but produced no tradable signals today",
+    "[LEARN-CONV] 9 signals, 0 triggered. Highest: RELTD at 70. Threshold=55 would activate 8.",
+    "[LEARN-BRIEF] Prediction accuracy: 0/2. Notable misses: NESTLEIND.",
+    "[LEARN-REGIME] Market phase: SELECTIVE. SELECTIVE regime held through session.",
+    "[LEARN-DETECT] Top mover detection: 0/10. Missed: HEXT, DATAPATTNS, TATAELXSI."
+  ],
   "2026-04-11": [
     "[LEARN-DAWN] DAWN did not generate signals today \u2014 check pre-market scanner",
     "[LEARN-CONV] 14 signals, 0 triggered. Highest: SUNPHARMA at 67. Threshold=55 would activate 13.",

@@ -1,4 +1,36 @@
 {
-  "generated_at": "2026-04-17T18:22:00.437139",
-  "candidates": []
+  "generated_at": "2026-04-23T02:47:44.562441",
+  "candidates": [
+    {
+      "symbol": "UNIMECH",
+      "direction": "BUY",
+      "event_summary": "Unimech Aerospace and Manufacturing Limited signs definitive agreements to acquire Hobel Bellows to accelerate capability expansion and drive long-term value",
+      "urgency": 9.0,
+      "conviction": null,
+      "added_at": "2026-04-23 02:47:44.561849",
+      "last_checked": null,
+      "metadata": {},
+      "catalyst_strength": "HIGH",
+      "gap_pct": 0.0,
+      "volume_signal": "NORMAL",
+      "sector_momentum": "NEUTRAL",
+      "technical_setup": "BREAKOUT",
+      "fii_flow": "NEUTRAL",
+      "filing_category": "",
+      "filing_urgency": 0.0,
+      "avg_volume_20d": 0,
+      "filed_at": "2026-04-23T02:45:13.374861+05:30",
+      "filing_subject": "Press Release",
+      "price_at_filing_time": 998.3,
+      "deal_size_inr": null,
+      "market_cap_inr": null,
+      "earnings_surprise_pct": null,
+      "event_quality_score": null,
+      "filing_freshness": null,
+      "conviction_modifier": 0,
+      "route": "",
+      "confidence": 0.0,
+      "routed_at": null
+    }
+  ]
 }
