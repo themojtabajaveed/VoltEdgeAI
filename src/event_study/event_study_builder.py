@@ -44,8 +44,9 @@ _SECTOR_TO_NIFTY_INDEX: Dict[str, str] = {
 
 
 class EventStudyBuilder:
-    def __init__(self, db_path: str = "data/history.db"):
+    def __init__(self, db_path: str = "data/history.db", kite_client: Optional[Any] = None):
         self.db_path = db_path
+        self.kite_client = kite_client
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self._ensure_schema()
@@ -142,7 +143,8 @@ class EventStudyBuilder:
         nifty_end = datetime.combine(today, datetime_time(16, 0)).replace(tzinfo=IST)
         try:
             nifty_cache: pd.DataFrame = get_ohlcv(
-                _NIFTY50_SYMBOL, 0, "day", nifty_start, nifty_end
+                _NIFTY50_SYMBOL, 0, "day", nifty_start, nifty_end,
+                kite_client=self.kite_client,
             )
             time.sleep(0.5)
         except Exception as e:
@@ -421,7 +423,8 @@ class EventStudyBuilder:
         nifty_end = datetime.combine(today, datetime_time(16, 0)).replace(tzinfo=IST)
         try:
             nifty_cache: pd.DataFrame = get_ohlcv(
-                _NIFTY50_SYMBOL, 0, "day", nifty_start, nifty_end
+                _NIFTY50_SYMBOL, 0, "day", nifty_start, nifty_end,
+                kite_client=self.kite_client,
             )
             time.sleep(0.5)
         except Exception as e:
@@ -478,7 +481,7 @@ class EventStudyBuilder:
                 daily_end = datetime.combine(
                     t0_date, datetime_time(16, 0)
                 ).replace(tzinfo=IST)
-                daily_df = get_ohlcv(symbol, 0, "day", daily_start, daily_end)
+                daily_df = get_ohlcv(symbol, 0, "day", daily_start, daily_end, kite_client=self.kite_client)
                 time.sleep(0.5)
 
                 sector_symbol = self._get_sector_symbol(symbol, event_type)
@@ -487,7 +490,8 @@ class EventStudyBuilder:
                     if sector_symbol not in sector_cache:
                         try:
                             sector_cache[sector_symbol] = get_ohlcv(
-                                sector_symbol, 0, "day", daily_start, daily_end
+                                sector_symbol, 0, "day", daily_start, daily_end,
+                                kite_client=self.kite_client,
                             )
                             time.sleep(0.5)
                         except Exception as se:
@@ -589,7 +593,7 @@ class EventStudyBuilder:
         first_window_start = reaction_windows[0][1]
         for (rdate, ws, we) in reaction_windows:
             try:
-                raw_df = get_ohlcv(symbol, 0, "15minute", ws, we)
+                raw_df = get_ohlcv(symbol, 0, "15minute", ws, we, kite_client=self.kite_client)
                 time.sleep(0.5)
                 if not raw_df.empty:
                     raw_df.index.name = raw_df.index.name or "timestamp"
@@ -767,6 +771,7 @@ class EventStudyBuilder:
                 interval="day",
                 start=start_dt,
                 end=end_dt,
+                kite_client=self.kite_client,
             )
             time.sleep(0.5)
 
@@ -857,7 +862,7 @@ class EventStudyBuilder:
             ta_daily_end = datetime.combine(
                 t0_date, datetime_time(16, 0)
             ).replace(tzinfo=IST)
-            ta_daily_df = get_ohlcv(symbol, 0, "day", ta_daily_start, ta_daily_end)
+            ta_daily_df = get_ohlcv(symbol, 0, "day", ta_daily_start, ta_daily_end, kite_client=self.kite_client)
             time.sleep(0.5)
 
             sector_symbol = self._get_sector_symbol(symbol, event_type)
@@ -866,7 +871,8 @@ class EventStudyBuilder:
                 if sector_symbol not in sector_cache:
                     try:
                         sector_cache[sector_symbol] = get_ohlcv(
-                            sector_symbol, 0, "day", ta_daily_start, ta_daily_end
+                            sector_symbol, 0, "day", ta_daily_start, ta_daily_end,
+                            kite_client=self.kite_client,
                         )
                         time.sleep(0.5)
                     except Exception as se:

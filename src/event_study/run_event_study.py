@@ -20,7 +20,11 @@ Kite auth errors (token expired / 401):
 """
 
 if __name__ == "__main__":
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=".env", override=False)
+
     import logging
+    import os
     import time
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -41,6 +45,43 @@ if __name__ == "__main__":
     logger.info("Run time: %s", start_time.isoformat())
     logger.info("=" * 60)
 
+    # ── Startup: verify env vars ──────────────────────────────────
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    kite_token = os.getenv("ZERODHA_ACCESS_TOKEN", "")
+    if not groq_key:
+        logger.warning("[Startup] GROQ_API_KEY not set — filings will use UNKNOWN event_type")
+    if not kite_token:
+        logger.error("[Startup] ZERODHA_ACCESS_TOKEN not set — price data will be empty")
+        raise SystemExit(1)
+
+    # ── Startup: initialize KiteConnect ──────────────────────────
+    from kiteconnect import KiteConnect
+    api_key = os.getenv("ZERODHA_API_KEY", "")
+    if not api_key:
+        logger.error("[Startup] ZERODHA_API_KEY not set — cannot initialize KiteConnect")
+        raise SystemExit(1)
+    kite = KiteConnect(api_key=api_key)
+    kite.set_access_token(kite_token)
+    logger.info("[Startup] KiteConnect initialized with access token.")
+
+    # ── Startup: clear stale empty event_study rows ───────────────
+    import sqlite3
+    _stale_conn = sqlite3.connect("data/history.db")
+    _stale_conn.execute("""
+        UPDATE filings_archive SET processed=0
+        WHERE id IN (
+            SELECT filing_id FROM event_study
+            WHERE price_t0_close IS NULL
+        )
+    """)
+    _cur = _stale_conn.execute("""
+        DELETE FROM event_study WHERE price_t0_close IS NULL
+    """)
+    _deleted_count = _cur.rowcount
+    _stale_conn.commit()
+    _stale_conn.close()
+    logger.info("[Startup] Cleared %d empty event_study rows from previous run.", _deleted_count)
+
     # ── Step 1: Filing Archive ──────────────────────────────────
     logger.info("[Step 1] FilingArchiver.incremental_update()")
     try:
@@ -58,7 +99,7 @@ if __name__ == "__main__":
     builder = None
     try:
         from src.event_study.event_study_builder import EventStudyBuilder
-        builder = EventStudyBuilder()
+        builder = EventStudyBuilder(kite_client=kite)
         rows_built = builder.build_all()
         logger.info("[Step 2-4] DONE — %d event study rows built.", rows_built)
     except Exception as e:
