@@ -84,7 +84,7 @@ class EventStudyBuilder:
                 "[EventStudyBuilder] Could not load instrument token map: %s"
                 " — all tokens will be 0.", e
             )
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
         self.conn.row_factory = sqlite3.Row
         self._ensure_schema()
 
@@ -564,6 +564,7 @@ class EventStudyBuilder:
                     ta_data["market_rel_return"], ta_data["sector_alpha"],
                     row_dict["id"],
                 ))
+                self.conn.commit()
                 count += 1
             except Exception as e:
                 logger.error(

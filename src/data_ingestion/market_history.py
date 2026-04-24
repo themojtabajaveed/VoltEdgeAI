@@ -19,7 +19,7 @@ class HistoryStore:
         self._init_db()
 
     def _init_db(self):
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=30) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS ohlcv (
                     symbol TEXT,
@@ -41,7 +41,7 @@ class HistoryStore:
             WHERE symbol = ? AND interval = ? AND timestamp >= ? AND timestamp <= ?
             ORDER BY timestamp ASC
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=30) as conn:
             df = pd.read_sql_query(
                 query, 
                 conn, 
@@ -72,7 +72,7 @@ class HistoryStore:
             INSERT OR IGNORE INTO ohlcv (symbol, interval, timestamp, open, high, low, close, volume)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with sqlite3.connect(self.db_path, timeout=30) as conn:
             conn.executemany(query, records)
             
 class KiteHistoryFetcher:
@@ -121,8 +121,8 @@ def get_ohlcv(symbol: str, instrument_token: int, interval: str, start: datetime
         first_cache = df_cached.index[0].tz_localize(None) if df_cached.index[0].tzinfo else df_cached.index[0]
         last_cache = df_cached.index[-1].tz_localize(None) if df_cached.index[-1].tzinfo else df_cached.index[-1]
         
-        start_naive = start.tz_localize(None) if start.tzinfo else start
-        end_naive = end.tz_localize(None) if end.tzinfo else end
+        start_naive = pd.Timestamp(start).tz_localize(None) if start.tzinfo else start
+        end_naive = pd.Timestamp(end).tz_localize(None) if end.tzinfo else end
         
         if first_cache <= start_naive and last_cache >= (end_naive - timedelta(days=1)):
             logger.info(f"Loaded {len(df_cached)} {interval} bars for {symbol} cleanly from SQLite Cache.")
