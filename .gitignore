@@ -31,3 +31,11 @@ VoltEdgeAI-daily-reports/
 logs/
 voltedgeai.db
 .env
+
+# Runtime data — never commit these
+data/exports/
+data/premarket_cache_*.json
+data/hydra_shadows_*.json
+cache/
+logs/
+data/event_study_*.json
