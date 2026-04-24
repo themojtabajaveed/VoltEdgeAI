@@ -172,6 +172,22 @@ _DEFAULTS: Dict[str, Any] = {
             },
         },
     },
+    "event_study": {
+        "db_path": "data/history.db",
+        "default_lookback_days": 90,
+        "bse_api_rate_limit_seconds": 2.0,
+        "min_gap_pct_for_dawn_filter": 1.0,
+        "min_volume_spike_ratio": 1.5,
+        "max_rsi_for_dawn_filter": 75.0,
+        "results_export_path": "data/",
+        "priority_categories": [
+            "Board Meeting",
+            "Mergers/Acquisitions/Restructuring",
+            "Orders",
+            "Financial Results",
+            "Dividend",
+        ],
+    },
 }
 
 
@@ -425,6 +441,27 @@ def get_event_quality_config() -> Dict[str, Any]:
     """Return the router.event_quality sub-block as a plain dict (fresh copy)."""
     block = load_config().get("router", {}).get("event_quality", {})
     defaults = _DEFAULTS["router"]["event_quality"]
+    out = dict(defaults)
+    if isinstance(block, dict):
+        out.update(block)
+    return out
+
+
+def get_event_study_config() -> Dict[str, Any]:
+    """Return the event_study config block as a plain dict (fresh copy).
+    
+    Keys:
+        db_path                    : str   path to SQLite DB
+        default_lookback_days      : int   how many calendar days to backfill
+        bse_api_rate_limit_seconds : float sleep between BSE API calls
+        min_gap_pct_for_dawn_filter: float min gap% for DAWN filter in study
+        min_volume_spike_ratio     : float min vol spike ratio for DAWN filter
+        max_rsi_for_dawn_filter    : float max RSI for DAWN filter
+        results_export_path        : str   directory for JSON/CSV exports
+        priority_categories        : list  BSE categories to highlight in report
+    """
+    block = load_config().get("event_study", {})
+    defaults = _DEFAULTS["event_study"]
     out = dict(defaults)
     if isinstance(block, dict):
         out.update(block)

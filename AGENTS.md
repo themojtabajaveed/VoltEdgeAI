@@ -405,3 +405,36 @@ ARTIFACTS: data/nse_holidays_{year}.json (run scripts/fetch_nse_holidays.py each
 TESTS: tests/test_r4_freshness.py, tests/test_event_quality.py, tests/test_event_scanner.py, tests/test_exchange_filings.py, tests/test_market_calendar.py, tests/test_conviction_engine.py
 KNOWN GAP: pattern_db sector follow-through (Step 9) — 67 legacy entries, 0 active, deferred
 SKIP: everything else
+
+## Event Study Pipeline (Priority 1) — COMPLETED ✅
+
+### What it does
+End-to-end pipeline that:
+1. Archives BSE corporate action filings via `FilingArchiver` → `filing_archive` table
+2. Promotes confirmed filings to `filings_archive` via `promote_to_filings_archive()`
+3. Builds event windows (T-10 to T+10) using `EventStudyBuilder` → `event_study` table
+4. Exports results to CSV/XLSX via `EventStudyExporter`
+5. Runs sequentially via `python -m src.eventstudy.run_event_study` (no CLI flags — hardcoded runner)
+
+### Key files
+- `src/eventstudy/filing_archiver.py` — BSE scraping + DB insert
+- `src/eventstudy/event_study_builder.py` — OHLCV window construction
+- `src/eventstudy/event_study_exporter.py` — CSV/XLSX export
+- `src/eventstudy/run_event_study.py` — sequential pipeline runner
+- `config/config.yaml` → `event_study:` section for all tuning params
+
+### Test coverage
+- Group 1: FilingArchiver unit tests
+- Group 2: Symbol mapping tests
+- Group 3: BSE backfill tests
+- Group 4: EventStudyBuilder tests
+- Group 5: Bridge/promote tests
+Run with: `pytest tests/test_event_study*.py -v`
+
+### Known limitations (dev machine)
+- No OHLCV cache locally → 0 events with price data in DAWN validation
+- `tzlocalize` error in EventStudyBuilder on tz-naive datetimes — fix pending (Prompt 1.9 candidate)
+- Groq rate-limit warnings on VM — non-blocking
+
+### Status
+Structurally complete and tested (324 tests passing). Needs live Kite token on GCP VM for real DAWN verdict.

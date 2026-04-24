@@ -166,3 +166,18 @@ stoploss:
       partial_2_pct: 0.25
       time_stop_ist: "15:20"
       rr_target: 2.5
+
+event_study:
+  db_path: "data/history.db"
+  default_lookback_days: 90
+  bse_api_rate_limit_seconds: 2.0
+  min_gap_pct_for_dawn_filter: 1.0
+  min_volume_spike_ratio: 1.5
+  max_rsi_for_dawn_filter: 75.0
+  results_export_path: "data/"
+  priority_categories:
+    - "Board Meeting"
+    - "Mergers/Acquisitions/Restructuring"
+    - "Orders"
+    - "Financial Results"
+    - "Dividend"

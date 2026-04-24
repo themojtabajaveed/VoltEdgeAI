@@ -16,6 +16,14 @@ voltedgeai.db
 logs/
 *.log
 
+# Runtime / generated data — do NOT commit
+data/exports/
+data/premarket_cache_*.json
+cache/
+*.sqlite3-journal
+logs/*.log
+reports/event_study_*.csv
+reports/event_study_*.xlsx
 # Compiled Python
 __pycache__/
 *.py[cod]
