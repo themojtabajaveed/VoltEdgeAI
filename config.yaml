@@ -171,10 +171,9 @@ event_study:
   db_path: "data/history.db"
   default_lookback_days: 90
   bse_api_rate_limit_seconds: 2.0
-  min_gap_pct_for_dawn_filter: 1.0
-  min_volume_spike_ratio: 1.5
-  max_rsi_for_dawn_filter: 75.0
-  results_export_path: "data/"
+  # priority_categories — kept for Phase 4 Step 10 (Groq token-saving filter).
+  # The remaining DAWN-filter / export-path keys were never wired into code
+  # and were removed in Phase 5 of the 2026-04-25 audit.
   priority_categories:
     - "Board Meeting"
     - "Mergers/Acquisitions/Restructuring"

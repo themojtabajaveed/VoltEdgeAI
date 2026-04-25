@@ -82,6 +82,14 @@ if __name__ == "__main__":
     _stale_conn.close()
     logger.info("[Startup] Cleared %d empty event_study rows — filings_archive.processed reset for re-processing.", deleted)
 
+    # Step 12: counters are initialised here so the final summary line is
+    # well-defined even if a downstream step fails.
+    filings_added = 0
+    rows_built = 0
+    intraday_filled = 0
+    ta_filled = 0
+    exported_count = 0
+
     # ── Step 1: Filing Archive ──────────────────────────────────
     logger.info("[Step 1] FilingArchiver.incremental_update()")
     try:
@@ -130,7 +138,8 @@ if __name__ == "__main__":
         if not result:
             logger.warning("[Step 5] No processed rows to export yet.")
         else:
-            logger.info("[Step 5] DONE — %d events exported.", result["total_events"])
+            exported_count = result.get("total_events", 0)
+            logger.info("[Step 5] DONE — %d events exported.", exported_count)
             logger.info("  JSON:          %s", result["json"])
             logger.info("  CSV master:    %s", result["csv_master"])
             logger.info("  CSV daily:     %s", result["csv_daily"])
@@ -139,8 +148,28 @@ if __name__ == "__main__":
         logger.error("[Step 5] FAILED — %s", e)
 
     # ── Summary ─────────────────────────────────────────────────
+    # Step 12: Single-line operator summary. `skipped` counts filings whose
+    # symbol could not be resolved to a Kite token (processed=-1 sentinel
+    # introduced in Step 6); these are retry-eligible on a future run.
+    skipped_count = 0
+    try:
+        _sum_conn = sqlite3.connect("data/history.db")
+        row = _sum_conn.execute(
+            "SELECT COUNT(*) FROM filings_archive WHERE processed=-1"
+        ).fetchone()
+        skipped_count = row[0] if row else 0
+        _sum_conn.close()
+    except sqlite3.Error as e:
+        logger.warning("[Summary] Could not read skipped count: %s", e)
+
     end_time = datetime.now(IST)
     elapsed = (end_time - start_time).total_seconds()
     logger.info("=" * 60)
+    logger.info(
+        "[event_study] filings_added=%d rows_built=%d skipped=%d "
+        "intraday_filled=%d ta_filled=%d exported=%d elapsed=%.1fs",
+        filings_added, rows_built, skipped_count,
+        intraday_filled, ta_filled, exported_count, elapsed,
+    )
     logger.info("Event Study Pipeline COMPLETE in %.1fs", elapsed)
     logger.info("=" * 60)

@@ -348,7 +348,7 @@ def _fetch_bse_filings(cutoff: datetime) -> List[FilingEvent]:
             return []
         payload = resp.text.strip()
         if not payload or payload == "{}":
-            logger.info(
+            logger.warning(
                 "[ExchFilings] BSE returned empty response — likely geo-restricted "
                 "or no filings in window; NSE is the active source"
             )

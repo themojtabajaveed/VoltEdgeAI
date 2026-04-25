@@ -387,9 +387,8 @@ class EventStudyExporter:
         
         out_path = os.path.join(self.output_dir, "event_study_90d.json")
         with open(out_path, "w", encoding="utf-8") as f:
-            json.dumps(final_dict, indent=2, ensure_ascii=False)
             f.write(json.dumps(final_dict, indent=2, ensure_ascii=False))
-            
+
         return out_path
 
     def _export_csvs(self, tagged_rows: List[dict]) -> dict:

@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import json
 import logging
@@ -74,6 +75,7 @@ class EventStudyBuilder:
         self.db_path = db_path
         self.kite_client = kite_client
         self._token_map: dict = {}
+        self._token_miss_warned: set = set()
         try:
             from src.data_ingestion.instruments import load_instruments_csv, build_symbol_token_map
             _df = load_instruments_csv()
@@ -89,8 +91,55 @@ class EventStudyBuilder:
         self._ensure_schema()
 
     def _get_token(self, symbol: str) -> int:
-        """Return Kite instrument_token for symbol, or 0 if not found."""
-        return int(self._token_map.get(symbol, 0))
+        """Return Kite instrument_token for symbol, or 0 if not found.
+
+        Emits one WARNING per symbol per process when the lookup misses; the
+        warning identifies symbols that are absent from the NSE+EQ slice of
+        zerodha_instruments.csv (e.g. delisted or non-equity).
+        """
+        token = int(self._token_map.get(symbol, 0))
+        if token == 0 and symbol not in self._token_miss_warned:
+            logger.warning(
+                "[EventStudyBuilder] No Kite instrument_token for %r — "
+                "absent from NSE+EQ map (delisted, non-equity, or unmapped index)",
+                symbol,
+            )
+            self._token_miss_warned.add(symbol)
+        return token
+
+    def _persist_resolution_failure(self, symbol: str, reason: str) -> None:
+        """Append a symbol-resolution failure to symbol_resolution_failures.json.
+
+        Written next to the SQLite db (or in 'data/' if db_path has no dirname).
+        File is a JSON array of {symbol, timestamp, reason} records.
+        Errors here are logged but never raised — failure to persist must not
+        prevent the pipeline from continuing to the next filing.
+        """
+        db_dir = os.path.dirname(self.db_path) or "data"
+        failures_path = os.path.join(db_dir, "symbol_resolution_failures.json")
+        record = {
+            "symbol": symbol,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "reason": reason,
+        }
+        try:
+            existing: List[Dict[str, Any]] = []
+            if os.path.exists(failures_path):
+                try:
+                    with open(failures_path, "r", encoding="utf-8") as fh:
+                        loaded = json.load(fh)
+                    if isinstance(loaded, list):
+                        existing = loaded
+                except (json.JSONDecodeError, OSError):
+                    existing = []
+            existing.append(record)
+            with open(failures_path, "w", encoding="utf-8") as fh:
+                json.dump(existing, fh, indent=2)
+        except OSError as e:
+            logger.error(
+                "[EventStudyBuilder] Failed to persist resolution failure for %s: %s",
+                symbol, e,
+            )
 
     def _ensure_schema(self) -> None:
         cursor = self.conn.cursor()
@@ -773,6 +822,27 @@ class EventStudyBuilder:
         if nifty_cache is None:
             nifty_cache = pd.DataFrame()
 
+        # Step 6: Skip filings whose symbol cannot be resolved to a Kite token.
+        # Mark processed=-1 (failed-but-retry-eligible) so a future run picks
+        # them up automatically when the token map repairs (e.g. relist or
+        # CSV refresh). Do NOT INSERT a partial row into event_study.
+        symbol = filing_row["symbol"]
+        token = self._get_token(symbol)
+        if token == 0:
+            try:
+                self.conn.execute(
+                    "UPDATE filings_archive SET processed=-1 WHERE id=?",
+                    (filing_row["id"],),
+                )
+                self.conn.commit()
+            except sqlite3.Error as e:
+                logger.error(
+                    "[EventStudyBuilder] Failed to mark processed=-1 for %s id=%s: %s",
+                    symbol, filing_row.get("id"), e,
+                )
+            self._persist_resolution_failure(symbol, "kite_token_zero")
+            return False
+
         try:
             filed_at_str = filing_row["filed_at"]
             if filed_at_str.endswith("Z"):
@@ -801,18 +871,29 @@ class EventStudyBuilder:
             t_plus3  = self._get_nth_trading_day(t0_date, 3)
             t_plus5  = self._get_nth_trading_day(t0_date, 5)
 
-            start_dt = datetime.combine(t_minus5, datetime_time(9, 0)).replace(tzinfo=IST)
-            end_dt   = datetime.combine(t_plus5,  datetime_time(16, 0)).replace(tzinfo=IST)
+            # Step 8: Coalesce the two daily Kite fetches (was T-5..T+5 + T-59..T0)
+            # into a single T-59..T+5 fetch. Slice in memory for the event-study
+            # window (T-5..T+5); reuse the full window for TA indicators.
+            start_dt = datetime.combine(
+                t0_date - timedelta(days=59), datetime_time(9, 0)
+            ).replace(tzinfo=IST)
+            end_dt = datetime.combine(t_plus5, datetime_time(16, 0)).replace(tzinfo=IST)
 
-            df = get_ohlcv(
-                symbol=filing_row["symbol"],
-                instrument_token=self._get_token(filing_row["symbol"]),
+            full_df = get_ohlcv(
+                symbol=symbol,
+                instrument_token=token,
                 interval="day",
                 start=start_dt,
                 end=end_dt,
                 kite_client=self.kite_client,
             )
             time.sleep(0.5)
+
+            if not full_df.empty:
+                full_dates = pd.to_datetime(full_df.index).date
+                df = full_df[(full_dates >= t_minus5) & (full_dates <= t_plus5)]
+            else:
+                df = full_df
 
             def get_price(target_date: date) -> Optional[float]:
                 if df.empty:
@@ -853,6 +934,9 @@ class EventStudyBuilder:
                     daily_bars.append(bar)
             daily_bars_json = json.dumps(daily_bars)
 
+            # Step 7: Defer processed=1 until ALL column families are written.
+            # The INSERT below is idempotent (UNIQUE filing_id); processed flag
+            # moves to a single atomic UPDATE at the end of the method.
             cursor = self.conn.cursor()
             cursor.execute("""
                 INSERT OR IGNORE INTO event_study (
@@ -868,7 +952,6 @@ class EventStudyBuilder:
                 price_t_minus_1, price_t0_close, price_t1_close, price_t3_close,
                 price_t5_close, daily_bars_json,
             ))
-            cursor.execute("UPDATE filings_archive SET processed=1 WHERE id=?", (filing_row["id"],))
             self.conn.commit()
 
             # Intraday window — idempotent, runs even on duplicate INSERT
@@ -892,17 +975,13 @@ class EventStudyBuilder:
             self.conn.commit()
 
             # TA indicators ───────────────────────────────────────────────────
-            symbol     = filing_row["symbol"]
             event_type = filing_row.get("event_type") or ""
 
-            ta_daily_start = datetime.combine(
-                t0_date - timedelta(days=59), datetime_time(9, 0)
-            ).replace(tzinfo=IST)
-            ta_daily_end = datetime.combine(
-                t0_date, datetime_time(16, 0)
-            ).replace(tzinfo=IST)
-            ta_daily_df = get_ohlcv(symbol, self._get_token(symbol), "day", ta_daily_start, ta_daily_end, kite_client=self.kite_client)
-            time.sleep(0.5)
+            # Step 8: Reuse the coalesced T-59..T+5 daily DataFrame instead
+            # of issuing a second daily fetch.
+            ta_daily_start = start_dt
+            ta_daily_end = end_dt
+            ta_daily_df = full_df
 
             sector_symbol = self._get_sector_symbol(symbol, event_type)
             sector_df = pd.DataFrame()
@@ -950,6 +1029,14 @@ class EventStudyBuilder:
                 ta_data["market_rel_return"], ta_data["sector_alpha"],
                 filing_row["id"],
             ))
+
+            # Step 7: Atomic processed=1 — set ONLY after all column families
+            # (price + intraday + TA) have been written. Any earlier crash
+            # leaves processed=0, so the next run re-picks the row.
+            self.conn.execute(
+                "UPDATE filings_archive SET processed=1 WHERE id=?",
+                (filing_row["id"],),
+            )
             self.conn.commit()
 
             return True

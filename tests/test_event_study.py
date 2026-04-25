@@ -1,10 +1,14 @@
 import pytest
 import sqlite3
 import unittest.mock as mock
-from datetime import date
+import json
+import os
+import inspect
+from datetime import date, datetime, timedelta, timezone
 from src.event_study.filing_archiver import FilingArchiver
 import pandas as pd
 from src.event_study.event_study_builder import EventStudyBuilder
+from src.event_study.event_study_exporter import EventStudyExporter
 
 
 def _make_archiver(tmp_path) -> FilingArchiver:
@@ -573,3 +577,409 @@ class TestPromoteToFilingsArchive:
         ).fetchone()[0]
         assert count == 1
         con.close()
+
+
+# ── Test helpers shared by exporter/builder tests ────────────────────────────
+
+def _init_event_study_db(tmp_path) -> str:
+    """Create both filings_archive + event_study tables in a tmp DB."""
+    db_path = str(tmp_path / "test.db")
+    a = FilingArchiver(db_path=db_path)
+    a.close()
+    b = EventStudyBuilder(db_path=db_path)
+    b.conn.close()
+    return db_path
+
+
+def _insert_filing_row(db_path: str, *, symbol: str = "RELIANCE",
+                       event_type: str = "ORDER_WIN",
+                       filed_at: str = "2026-04-15T10:00:00+05:30",
+                       headline: str = "Test filing",
+                       processed: int = 0) -> int:
+    """Insert one filings_archive row, return its id."""
+    conn = sqlite3.connect(db_path)
+    cur = conn.execute("""
+        INSERT INTO filings_archive
+        (symbol, headline, headline_hash, filed_at, category, event_type,
+         quality_score, freshness_tag, processed)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (symbol, headline, headline[:50], filed_at, "Orders", event_type,
+          75.0, "FRESH", processed))
+    filing_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return filing_id
+
+
+def _insert_event_row(db_path: str, *, filing_id: int, symbol: str = "RELIANCE",
+                     event_type: str = "ORDER_WIN",
+                     filed_at: str = "2026-04-15T10:00:00+05:30",
+                     ret_t5_day: float = 5.0,
+                     price_t0_close: float = 105.0,
+                     vol_spike_20d: float = 2.0,
+                     rsi_14_pre: float = 65.0,
+                     gap_pct: float = 1.5) -> None:
+    """Insert one event_study row keyed to filing_id."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        INSERT INTO event_study
+        (filing_id, symbol, filed_at, event_type, quality_score,
+         price_t0_close, ret_t0_day, ret_t1_day, ret_t5_day,
+         daily_bars_json, intraday_bars_json,
+         rsi_14_pre, vol_spike_20d, gap_pct, atr_rel_range,
+         sector_rel_return, sector_alpha)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (filing_id, symbol, filed_at, event_type, 75.0,
+          price_t0_close, 1.2, 2.1, ret_t5_day,
+          "[]", "[]",
+          rsi_14_pre, vol_spike_20d, gap_pct, 1.2,
+          0.5, 0.3))
+    conn.commit()
+    conn.close()
+
+
+def _make_daily_df(end_date: date, n_days: int = 70,
+                   base_close: float = 100.0,
+                   gap_pct: float = 0.0,
+                   vol_spike: float = 1.0) -> pd.DataFrame:
+    """Build a deterministic OHLCV DataFrame ending at end_date.
+
+    Uses the actual length of the generated business-day index — when end_date
+    is a weekend/holiday pandas may produce slightly fewer than n_days entries.
+    """
+    dates = pd.date_range(end=pd.Timestamp(end_date), periods=n_days, freq="B")
+    actual_n = len(dates)
+    closes = [base_close + 0.1 * i for i in range(actual_n)]
+    opens = list(closes)
+    if gap_pct != 0.0 and actual_n >= 2:
+        opens[-1] = closes[-2] * (1 + gap_pct / 100.0)
+    volumes = [100000] * actual_n
+    if vol_spike != 1.0 and actual_n >= 1:
+        volumes[-1] = int(100000 * vol_spike)
+    return pd.DataFrame({
+        "open":   opens,
+        "high":   [c + 1.0 for c in closes],
+        "low":    [c - 1.0 for c in closes],
+        "close":  closes,
+        "volume": volumes,
+    }, index=dates)
+
+
+def _make_intraday_df(t0_date: date, n_bars: int = 25) -> pd.DataFrame:
+    """Build a 15-min intraday OHLCV DataFrame for t0_date."""
+    start = pd.Timestamp(datetime.combine(t0_date, datetime.min.time())) + pd.Timedelta(hours=9, minutes=15)
+    timestamps = pd.date_range(start=start, periods=n_bars, freq="15min")
+    closes = [100.0 + 0.05 * i for i in range(n_bars)]
+    return pd.DataFrame({
+        "open":   closes,
+        "high":   [c + 0.1 for c in closes],
+        "low":    [c - 0.1 for c in closes],
+        "close":  closes,
+        "volume": [10000] * n_bars,
+    }, index=timestamps)
+
+
+# ── Group 6: EventStudyExporter ──────────────────────────────────────────────
+
+class TestEventStudyExporter:
+    """Group 6 — EventStudyExporter end-to-end JSON export."""
+
+    def test_export_empty_db_returns_empty_dict(self, tmp_path):
+        """Empty event_study → export_all returns {} without crashing."""
+        db_path = _init_event_study_db(tmp_path)
+        exp = EventStudyExporter(db_path=db_path, output_dir=str(tmp_path / "exports"))
+        result = exp.export_all()
+        assert result == {}
+
+    def test_export_single_row_round_trip(self, tmp_path):
+        """One event_study row → JSON file round-trips with 1 event."""
+        db_path = _init_event_study_db(tmp_path)
+        fid = _insert_filing_row(db_path, symbol="RELIANCE", processed=1)
+        _insert_event_row(db_path, filing_id=fid, symbol="RELIANCE")
+
+        exp = EventStudyExporter(db_path=db_path, output_dir=str(tmp_path / "exports"))
+        result = exp.export_all()
+
+        assert result["total_events"] == 1
+        with open(result["json"]) as f:
+            parsed = json.load(f)
+        assert parsed["metadata"]["total_events"] == 1
+        assert "ORDER_WIN" in parsed["event_clusters"]
+        assert len(parsed["event_clusters"]["ORDER_WIN"]["events"]) == 1
+        assert parsed["event_clusters"]["ORDER_WIN"]["events"][0]["symbol"] == "RELIANCE"
+
+    def test_export_multi_row_clusters_by_event_type(self, tmp_path):
+        """Multiple rows cluster by event_type with correct counts."""
+        db_path = _init_event_study_db(tmp_path)
+        for i, (sym, et) in enumerate([("RELIANCE", "ORDER_WIN"),
+                                        ("TCS",      "EARNINGS"),
+                                        ("INFY",     "ORDER_WIN")], start=1):
+            fid = _insert_filing_row(db_path, symbol=sym, event_type=et,
+                                     headline=f"Headline {i}", processed=1)
+            _insert_event_row(db_path, filing_id=fid, symbol=sym, event_type=et)
+
+        exp = EventStudyExporter(db_path=db_path, output_dir=str(tmp_path / "exports"))
+        result = exp.export_all()
+        assert result["total_events"] == 3
+
+        with open(result["json"]) as f:
+            parsed = json.load(f)
+        assert len(parsed["event_clusters"]["ORDER_WIN"]["events"]) == 2
+        assert len(parsed["event_clusters"]["EARNINGS"]["events"]) == 1
+
+    def test_export_writes_csv_files(self, tmp_path):
+        """All 3 CSV files are written and openable."""
+        db_path = _init_event_study_db(tmp_path)
+        fid = _insert_filing_row(db_path, processed=1)
+        _insert_event_row(db_path, filing_id=fid)
+
+        exp = EventStudyExporter(db_path=db_path, output_dir=str(tmp_path / "exports"))
+        result = exp.export_all()
+
+        for key in ("csv_master", "csv_daily", "csv_intraday"):
+            assert os.path.exists(result[key]), f"{key} not written"
+
+    def test_export_json_single_dumps_call_regression(self):
+        """Regression: _export_json must call json.dumps(final_dict) exactly once."""
+        src = inspect.getsource(EventStudyExporter._export_json)
+        assert src.count("json.dumps(final_dict") == 1, (
+            "Expected exactly one json.dumps(final_dict) — the orphan double-call bug "
+            "has been re-introduced"
+        )
+
+
+# ── Group 7: EventStudyBuilder end-to-end with mocked Kite ───────────────────
+
+class TestEventStudyBuilderE2E:
+    """Group 7 — _build_one behavior under valid + invalid token paths."""
+
+    def test_invalid_token_marks_processed_minus_one(self, tmp_path):
+        """A filing for a symbol with token=0 must NOT be inserted; processed=-1."""
+        db_path = _init_event_study_db(tmp_path)
+        fid = _insert_filing_row(db_path, symbol="RMC", processed=0)
+
+        builder = EventStudyBuilder(db_path=db_path)
+        builder._token_map = {}  # every lookup yields 0
+
+        rows = builder.build_all()
+        cur = builder.conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM event_study WHERE filing_id=?", (fid,))
+        es_count = cur.fetchone()[0]
+        cur.execute("SELECT processed FROM filings_archive WHERE id=?", (fid,))
+        processed = cur.fetchone()[0]
+        builder.conn.close()
+
+        assert rows == 0, "build_all should report 0 rows built"
+        assert es_count == 0, "no event_study row should exist for invalid-token filing"
+        assert processed == -1, f"filings_archive.processed must be -1, got {processed}"
+
+    def test_invalid_token_skipped_on_rerun(self, tmp_path):
+        """A processed=-1 row is NOT picked up by build_all on subsequent runs."""
+        db_path = _init_event_study_db(tmp_path)
+        fid = _insert_filing_row(db_path, symbol="RMC", processed=0)
+
+        builder = EventStudyBuilder(db_path=db_path)
+        builder._token_map = {}
+
+        builder.build_all()  # marks processed=-1
+        # Reset the warned-set so a second pass would re-warn if it ran
+        builder._token_miss_warned = set()
+        rows_second = builder.build_all()
+        builder.conn.close()
+
+        assert rows_second == 0
+        # The symbol-resolution warning fired at most once (deduped) in the first pass
+
+    def test_invalid_token_writes_failures_json(self, tmp_path):
+        """Invalid-token failure is persisted to symbol_resolution_failures.json."""
+        db_path = _init_event_study_db(tmp_path)
+        _insert_filing_row(db_path, symbol="RMC", processed=0)
+
+        builder = EventStudyBuilder(db_path=db_path)
+        builder._token_map = {}
+        builder.build_all()
+        builder.conn.close()
+
+        failures_path = str(tmp_path / "symbol_resolution_failures.json")
+        assert os.path.exists(failures_path), "failures JSON not written"
+        with open(failures_path) as f:
+            failures = json.load(f)
+        symbols = [r["symbol"] for r in failures]
+        assert "RMC" in symbols
+        assert all("timestamp" in r and "reason" in r for r in failures)
+
+    def test_atomic_processed_one_on_partial_failure(self, tmp_path, monkeypatch):
+        """If the daily fetch raises mid-build, processed must remain 0 so
+        the row is re-picked on the next run. (Step 7 atomicity: processed=1
+        is the LAST DB write, after the TA UPDATE — any earlier failure
+        rolls back.)"""
+        db_path = _init_event_study_db(tmp_path)
+        fid = _insert_filing_row(db_path, symbol="RELIANCE", processed=0,
+                                 filed_at="2026-04-15T10:00:00+05:30")
+
+        builder = EventStudyBuilder(db_path=db_path)
+        builder._token_map = {"RELIANCE": 738561, "NIFTY 50": 256265,
+                              "NIFTY BANK": 260105, "NIFTY IT": 11536}
+
+        # Daily fetch raises on Reliance → outer try catches → rollback,
+        # processed stays 0. Intraday-only failures are recovered by
+        # build_intraday_only(), so they are NOT a partial-failure scenario.
+        def failing_daily(symbol, instrument_token, interval, start, end, **kwargs):
+            if interval == "day" and symbol == "RELIANCE":
+                raise RuntimeError("Simulated daily fetch failure")
+            if interval == "15minute":
+                return _make_intraday_df(t0_date=date(2026, 4, 15))
+            return _make_daily_df(end_date=end.date() if hasattr(end, "date") else date.today())
+
+        monkeypatch.setattr(
+            "src.event_study.event_study_builder.get_ohlcv", failing_daily
+        )
+
+        builder.build_all()
+        cur = builder.conn.cursor()
+        cur.execute("SELECT processed FROM filings_archive WHERE id=?", (fid,))
+        processed = cur.fetchone()[0]
+        builder.conn.close()
+
+        assert processed != 1, (
+            f"processed must NOT be 1 after partial failure (got {processed}) — "
+            "Step 7 atomicity broken"
+        )
+
+    def test_processed_one_is_after_ta_update_in_source(self):
+        """Step 7 structural regression: the processed=1 UPDATE must be
+        positioned AFTER the TA UPDATE in _build_one source — not right
+        after INSERT. Re-introducing the early UPDATE re-introduces the
+        idempotency gap."""
+        src = inspect.getsource(EventStudyBuilder._build_one)
+        ta_update_marker = "rsi_7_pre=?,        rsi_14_pre=?"
+        processed_one_marker = "UPDATE filings_archive SET processed=1"
+        ta_pos = src.find(ta_update_marker)
+        proc_pos = src.find(processed_one_marker)
+        assert ta_pos != -1, "TA UPDATE not found in _build_one"
+        assert proc_pos != -1, "processed=1 UPDATE not found in _build_one"
+        assert proc_pos > ta_pos, (
+            "processed=1 UPDATE must come AFTER the TA UPDATE — "
+            "Step 7 atomicity ordering broken"
+        )
+
+    def test_successful_build_sets_processed_one(self, tmp_path, monkeypatch):
+        """All-paths-succeed run sets processed=1 and inserts an event_study row."""
+        db_path = _init_event_study_db(tmp_path)
+        fid = _insert_filing_row(db_path, symbol="RELIANCE", processed=0,
+                                 filed_at="2026-04-15T10:00:00+05:30")
+
+        builder = EventStudyBuilder(db_path=db_path)
+        builder._token_map = {"RELIANCE": 738561, "NIFTY 50": 256265,
+                              "NIFTY BANK": 260105, "NIFTY IT": 11536}
+
+        def ok_ohlcv(symbol, instrument_token, interval, start, end, **kwargs):
+            if interval == "15minute":
+                ref = end.date() if hasattr(end, "date") else date.today()
+                return _make_intraday_df(t0_date=ref, n_bars=20)
+            ref = end.date() if hasattr(end, "date") else date.today()
+            return _make_daily_df(end_date=ref, n_days=70)
+
+        monkeypatch.setattr(
+            "src.event_study.event_study_builder.get_ohlcv", ok_ohlcv
+        )
+
+        rows = builder.build_all()
+        cur = builder.conn.cursor()
+        cur.execute("SELECT processed FROM filings_archive WHERE id=?", (fid,))
+        processed = cur.fetchone()[0]
+        cur.execute("SELECT price_t0_close FROM event_study WHERE filing_id=?", (fid,))
+        es_row = cur.fetchone()
+        builder.conn.close()
+
+        assert rows == 1
+        assert processed == 1
+        assert es_row is not None
+        assert es_row[0] is not None, "price_t0_close should be populated"
+
+
+# ── Group 8: TA indicator golden-value tests ─────────────────────────────────
+
+class TestTAIndicators:
+    """Group 8 — _compute_ta_indicators numerical correctness on known fixtures."""
+
+    @pytest.fixture
+    def builder(self, tmp_path):
+        b = EventStudyBuilder(db_path=str(tmp_path / "test.db"))
+        yield b
+        b.conn.close()
+
+    def _last_business_day(self) -> date:
+        d = date(2026, 4, 1)  # Wednesday — guaranteed business day
+        return d
+
+    def test_gap_pct_known_value(self, builder):
+        """gap_pct = (T0_open - T-1_close) / T-1_close * 100."""
+        t0 = self._last_business_day()
+        df = _make_daily_df(end_date=t0, n_days=30, base_close=100.0, gap_pct=5.0)
+        result = builder._compute_ta_indicators(
+            symbol="TEST", t0_date=t0, daily_df=df,
+            intraday_bars_json=None, sector_df=pd.DataFrame(), nifty_df=pd.DataFrame()
+        )
+        # T-1 close ~ 100.0 + 0.1*28 = 102.8; T0 open = 102.8 * 1.05 = 107.94
+        # gap = (107.94 - 102.8) / 102.8 * 100 = 5.0%
+        assert result["gap_pct"] is not None
+        assert result["gap_pct"] == pytest.approx(5.0, abs=0.01)
+
+    def test_vol_spike_known_value(self, builder):
+        """vol_spike_5d = T0_volume / mean(prior 5 days volume)."""
+        t0 = self._last_business_day()
+        df = _make_daily_df(end_date=t0, n_days=30, base_close=100.0, vol_spike=3.0)
+        result = builder._compute_ta_indicators(
+            symbol="TEST", t0_date=t0, daily_df=df,
+            intraday_bars_json=None, sector_df=pd.DataFrame(), nifty_df=pd.DataFrame()
+        )
+        # Prior 5 volumes = 100000 each; T0 volume = 300000
+        assert result["vol_spike_5d"] == pytest.approx(3.0, abs=1e-6)
+        assert result["vol_spike_20d"] == pytest.approx(3.0, abs=1e-6)
+
+    def test_rsi_in_valid_range_uptrend(self, builder):
+        """RSI on monotonic uptrend should be > 50 and ≤ 100."""
+        t0 = self._last_business_day()
+        df = _make_daily_df(end_date=t0, n_days=40, base_close=100.0)
+        result = builder._compute_ta_indicators(
+            symbol="TEST", t0_date=t0, daily_df=df,
+            intraday_bars_json=None, sector_df=pd.DataFrame(), nifty_df=pd.DataFrame()
+        )
+        assert result["rsi_14_pre"] is not None
+        assert 50.0 < result["rsi_14_pre"] <= 100.0
+        assert result["rsi_7_pre"] is not None
+        assert 0.0 <= result["rsi_7_pre"] <= 100.0
+
+    def test_atr_positive(self, builder):
+        """ATR-based atr_rel_range must be positive on non-flat data."""
+        t0 = self._last_business_day()
+        df = _make_daily_df(end_date=t0, n_days=40, base_close=100.0)
+        result = builder._compute_ta_indicators(
+            symbol="TEST", t0_date=t0, daily_df=df,
+            intraday_bars_json=None, sector_df=pd.DataFrame(), nifty_df=pd.DataFrame()
+        )
+        assert result["atr_rel_range"] is not None
+        assert result["atr_rel_range"] > 0
+
+    def test_empty_dataframe_returns_all_none(self, builder):
+        """An empty daily_df yields all-None TA dict (no crash)."""
+        t0 = date(2026, 4, 1)
+        result = builder._compute_ta_indicators(
+            symbol="TEST", t0_date=t0, daily_df=pd.DataFrame(),
+            intraday_bars_json=None, sector_df=pd.DataFrame(), nifty_df=pd.DataFrame()
+        )
+        for k, v in result.items():
+            assert v is None, f"{k} should be None on empty df, got {v}"
+
+    def test_t0_not_in_dataframe_returns_all_none(self, builder):
+        """If t0_date is missing from daily_df index, all TA is None."""
+        t0 = date(2026, 4, 1)
+        # df ending at a different date
+        df = _make_daily_df(end_date=date(2026, 3, 1), n_days=30)
+        result = builder._compute_ta_indicators(
+            symbol="TEST", t0_date=t0, daily_df=df,
+            intraday_bars_json=None, sector_df=pd.DataFrame(), nifty_df=pd.DataFrame()
+        )
+        for k, v in result.items():
+            assert v is None, f"{k} should be None when T0 missing, got {v}"
