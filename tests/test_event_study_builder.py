@@ -153,6 +153,9 @@ def test_future_price_is_null(mock_get):
 @patch("src.event_study.event_study_builder.get_ohlcv")
 def test_build_marks_processed(mock_get):
     builder = EventStudyBuilder(":memory:")
+    # Step 6: builder skips symbols absent from the token map. Inject test
+    # tokens so the build path is exercised instead of the skip-and-mark path.
+    builder._token_map.update({"RIL": 100001, "INFY": 408065})
     create_dummy_filing(builder, 1, "RIL",  "2026-04-15T10:00:00+05:30")
     create_dummy_filing(builder, 2, "INFY", "2026-04-16T10:00:00+05:30")
 
@@ -167,6 +170,7 @@ def test_build_marks_processed(mock_get):
 @patch("src.event_study.event_study_builder.get_ohlcv")
 def test_duplicate_filing_is_skipped(mock_get):
     builder = EventStudyBuilder(":memory:")
+    builder._token_map.update({"HDFC": 100002})
     create_dummy_filing(builder, 1, "HDFC", "2026-04-15T10:00:00+05:30")
     mock_get.return_value = pd.DataFrame()
 
@@ -468,6 +472,7 @@ def test_build_intraday_only_backfills_nulls(mock_get):
 def test_build_one_updates_intraday_on_duplicate_insert(mock_get):
     """Second _build_one call hits INSERT OR IGNORE but UPDATE still runs."""
     builder = EventStudyBuilder(":memory:")
+    builder._token_map.update({"RIL": 100001})
     create_dummy_filing(builder, 1, "RIL", "2026-04-15T10:00:00+05:30")
 
     four_bars = make_index_df([

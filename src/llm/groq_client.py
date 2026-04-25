@@ -8,10 +8,19 @@ Used for:
   - Rapid event urgency classification (1-10)
   - Pattern matching
   - Quick TA interpretation
+
+Step 9: Dual-key rotation + 429 backoff
+  - Reads GROQ_API_KEY (primary) and GROQ_API_KEY_2 (secondary) from env.
+  - Round-robin key selection per request.
+  - On 429: immediately try next key; on second 429: exponential backoff
+    (1s → 2s → 4s) with max 3 backoff rounds; on exhaustion raises to caller.
+  - Thread-safe via threading.Lock (used by ThreadPoolExecutor in batch path).
 """
 import os
 import json
 import logging
+import threading
+import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -19,20 +28,157 @@ logger = logging.getLogger(__name__)
 _GROQ_MODEL = "llama-3.3-70b-versatile"
 
 
-def _get_client():
-    """Lazy-init the Groq client."""
-    try:
-        from groq import Groq
-    except ImportError:
-        logger.error("groq package not installed. Run: pip install groq")
-        return None
+class _GroqKeyRotator:
+    """Thread-safe round-robin key selector with 429 backoff.
 
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        logger.error("GROQ_API_KEY not set in environment")
-        return None
+    Owns the Groq client instances for all available API keys. The public
+    method `call()` wraps a single Groq completion request with the full
+    rotation + backoff policy described in the module docstring.
+    """
 
-    return Groq(api_key=api_key)
+    _MAX_BACKOFF_ROUNDS = 3
+    _BACKOFF_SECONDS = [1.0, 2.0, 4.0]
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._keys: list[str] = []
+        self._clients: list = []
+        self._current_idx: int = 0
+        self._initialized = False
+
+    def _lazy_init(self) -> None:
+        """Load keys and build Groq clients on first use (lazy so import-time env
+        vars are respected even if dotenv is loaded after module import)."""
+        if self._initialized:
+            return
+        try:
+            from groq import Groq
+        except ImportError:
+            logger.error("[GroqKeyRotator] groq package not installed. Run: pip install groq")
+            self._initialized = True
+            return
+
+        for env_var in ("GROQ_API_KEY", "GROQ_API_KEY_2"):
+            key = os.getenv(env_var, "").strip()
+            if key:
+                self._keys.append(key)
+                self._clients.append(Groq(api_key=key))
+
+        n = len(self._keys)
+        if n == 0:
+            logger.error("[GroqKeyRotator] No GROQ_API_KEY found in environment")
+        elif n == 1:
+            logger.info("[GroqKeyRotator] Single Groq API key loaded (no rotation)")
+        else:
+            logger.info("[GroqKeyRotator] %d Groq API keys loaded — round-robin rotation enabled", n)
+
+        self._initialized = True
+
+    def _next_idx(self, after: int) -> int:
+        """Return the index of the next key after `after` (wraps around)."""
+        return (after + 1) % len(self._keys)
+
+    def call(self, messages: list[dict], **kwargs) -> object:
+        """Issue one Groq completion with rotation + backoff.
+
+        Args:
+            messages: OpenAI-compatible messages list.
+            **kwargs: Forwarded to client.chat.completions.create().
+
+        Returns:
+            Groq ChatCompletion response.
+
+        Raises:
+            Exception: If all retry/backoff rounds exhausted, or on non-429 error.
+        """
+        with self._lock:
+            self._lazy_init()
+            if not self._clients:
+                raise RuntimeError("No Groq clients available — check GROQ_API_KEY env var")
+            # Select the current key (round-robin: advance after each call)
+            idx = self._current_idx
+            self._current_idx = self._next_idx(idx)
+
+        n_keys = len(self._clients)
+
+        # Protocol (spec §Step-9):
+        #   Attempt 1 — selected key (no sleep)
+        #   429 → immediately try next key (no sleep)
+        #   If next key also 429 → exponential backoff: 1s, 2s, 4s (up to
+        #   _MAX_BACKOFF_ROUNDS rounds), alternating keys each round.
+        #   After all rounds exhausted → raise the last 429 to the caller.
+
+        def _try_once(key_idx: int) -> object:
+            """Issue one API call; raises on any error."""
+            return self._clients[key_idx].chat.completions.create(
+                model=_GROQ_MODEL, messages=messages, **kwargs,
+            )
+
+        last_exc: Optional[Exception] = None
+        current = idx
+
+        # Attempt 1 — primary key
+        try:
+            return _try_once(current)
+        except Exception as exc:
+            if not self._is_429(exc):
+                raise
+            last_exc = exc
+            next_key = self._next_idx(current)
+            logger.warning(
+                "[GroqKeyRotator] 429 on key index %d — switching to key index %d immediately",
+                current, next_key,
+            )
+            current = next_key
+
+        # Attempt 2 — alternate key (no sleep: "immediately try key N+1")
+        try:
+            return _try_once(current)
+        except Exception as exc:
+            if not self._is_429(exc):
+                raise
+            last_exc = exc
+
+        # Attempts 3..N — exponential backoff rounds
+        for backoff_round in range(self._MAX_BACKOFF_ROUNDS):
+            delay = self._BACKOFF_SECONDS[
+                min(backoff_round, len(self._BACKOFF_SECONDS) - 1)
+            ]
+            logger.warning(
+                "[GroqKeyRotator] Both keys returned 429 — backoff %.1fs (round %d/%d)",
+                delay, backoff_round + 1, self._MAX_BACKOFF_ROUNDS,
+            )
+            time.sleep(delay)
+            current = self._next_idx(current)
+            try:
+                return _try_once(current)
+            except Exception as exc:
+                if not self._is_429(exc):
+                    raise
+                last_exc = exc
+
+        logger.warning(
+            "[GroqKeyRotator] All %d retry rounds exhausted — raising 429 to caller",
+            self._MAX_BACKOFF_ROUNDS,
+        )
+        raise last_exc  # type: ignore[misc]
+
+    @staticmethod
+    def _is_429(exc: Exception) -> bool:
+        """Return True if exc is an HTTP 429 (rate-limit) error."""
+        # groq-python raises groq.RateLimitError; also check status_code attr
+        # and string for resilience against version differences.
+        exc_type = type(exc).__name__
+        if exc_type in ("RateLimitError",):
+            return True
+        status = getattr(exc, "status_code", None)
+        if status == 429:
+            return True
+        return "429" in str(exc) or "rate limit" in str(exc).lower()
+
+
+# Module-level singleton — instantiated once, shared by all callers.
+_rotator = _GroqKeyRotator()
 
 
 def classify_event(
@@ -60,11 +206,6 @@ def classify_event(
             "material": true/false  (will this move the stock >1%?)
         }
     """
-    client = _get_client()
-    if client is None:
-        return {"urgency": 0, "direction": "NEUTRAL", "event_type": "UNKNOWN",
-                "summary": "Groq unavailable", "material": False}
-
     body_truncated = (body or "")[:500]
 
     prompt = f"""Classify this Indian stock market corporate event for trading urgency.
@@ -93,8 +234,7 @@ Return ONLY valid JSON:
 {{"urgency": <1-10>, "direction": "<BUY|SHORT|NEUTRAL>", "event_type": "<type>", "summary": "<1 sentence>", "material": <true|false>}}"""
 
     try:
-        response = client.chat.completions.create(
-            model=_GROQ_MODEL,
+        response = _rotator.call(
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=200,
@@ -108,11 +248,12 @@ Return ONLY valid JSON:
             json_str = raw.split("```")[1].split("```")[0].strip()
 
         result = json.loads(json_str)
-        logger.debug(f"[Groq] {symbol}: urgency={result.get('urgency', 0)}, type={result.get('event_type', '?')}")
+        logger.debug("[Groq] %s: urgency=%s, type=%s",
+                     symbol, result.get("urgency", 0), result.get("event_type", "?"))
         return result
 
     except Exception as e:
-        logger.error(f"[Groq] Event classification failed for {symbol}: {e}")
+        logger.error("[Groq] Event classification failed for %s: %s", symbol, e)
         return {"urgency": 0, "direction": "NEUTRAL", "event_type": "ERROR",
                 "summary": f"Classification error: {e}", "material": False}
 
@@ -145,7 +286,7 @@ def classify_events_batch(events: list[dict]) -> list[dict]:
             )
             return {**event, **classification}
         except Exception as e:
-            logger.error(f"[Groq/batch] Failed to classify {event.get('symbol')}: {e}")
+            logger.error("[Groq/batch] Failed to classify %s: %s", event.get("symbol"), e)
             return {
                 **event,
                 "urgency": 0,
@@ -168,7 +309,7 @@ def classify_events_batch(events: list[dict]) -> list[dict]:
             results[idx] = future.result()
 
     logger.debug(
-        f"[Groq/batch] classified {len(events)} events in parallel "
-        f"(max_workers={max_workers})"
+        "[Groq/batch] classified %d events in parallel (max_workers=%d)",
+        len(events), max_workers,
     )
     return results

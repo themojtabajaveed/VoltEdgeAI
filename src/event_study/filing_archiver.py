@@ -74,6 +74,25 @@ class FilingArchiver:
             len(self._name_to_symbol),
             len(self._nifty200),
         )
+        # Step 10: load priority_categories from config — filings whose category
+        # matches one of these strings (case-insensitive) are sent to Groq.
+        # All others get a default low-confidence classification, saving tokens.
+        try:
+            from src.config_loader import get_event_study_config
+            _cfg = get_event_study_config()
+            self._priority_categories: list[str] = [
+                c.lower() for c in _cfg.get("priority_categories", [])
+            ]
+        except Exception as e:
+            logger.warning(
+                "FilingArchiver: could not load priority_categories from config: %s"
+                " — all filings will be sent to Groq", e
+            )
+            self._priority_categories = []
+        logger.info(
+            "FilingArchiver: %d priority categories loaded for Groq filter",
+            len(self._priority_categories),
+        )
 
     def _load_nifty200(self) -> set:
         """Load Nifty200 trading symbols from data/nifty200_symbols.json."""
@@ -299,10 +318,28 @@ class FilingArchiver:
                 new_filings.append(f)
         return new_filings
 
+    def _is_priority(self, filing: "FilingEvent") -> bool:
+        """Return True if the filing's category matches any priority_category.
+
+        Matching is a case-insensitive substring check:  a filing with category
+        "Board Meeting - Results" matches the priority entry "board meeting".
+        When priority_categories is empty (config absent), every filing is
+        considered priority (original behavior preserved).
+        """
+        if not self._priority_categories:
+            return True
+        cat_lower = (filing.category or "").lower()
+        return any(pc in cat_lower for pc in self._priority_categories)
+
     def _classify_batch(self, filings: List[FilingEvent]) -> List[dict]:
         """Classify filings via Groq in sub-batches of self.batch_size.
 
-        Sleeps 2s between batches to stay within Groq rate limits.
+        Step 10: Filings whose category does NOT match priority_categories are
+        assigned a default low-confidence classification without calling Groq,
+        saving ~500 tokens per skipped filing. Priority filings are still sent
+        to Groq in the usual sub-batched, parallel manner.
+
+        Sleeps 2s between Groq sub-batches to stay within rate limits.
         On any Groq failure the entire sub-batch falls back to safe defaults.
         """
         _SAFE_DEFAULT: dict = {
@@ -312,10 +349,39 @@ class FilingArchiver:
             "summary": "",
             "material": False,
         }
+        _LOW_PRIORITY_DEFAULT: dict = {
+            "urgency": 1,
+            "direction": "NEUTRAL",
+            "event_type": "Other",
+            "summary": "Non-priority category — skipped Groq classification",
+            "material": False,
+            "llm_label_confidence": 0.0,
+        }
 
-        all_results: List[dict] = []
-        for i in range(0, len(filings), self.batch_size):
-            batch = filings[i : i + self.batch_size]
+        # Step 10: split filings into priority (→ Groq) and non-priority (→ default)
+        priority_indices: List[int] = []
+        priority_filings: List[FilingEvent] = []
+        for idx, f in enumerate(filings):
+            if self._is_priority(f):
+                priority_indices.append(idx)
+                priority_filings.append(f)
+
+        n_total = len(filings)
+        n_priority = len(priority_filings)
+        n_skipped = n_total - n_priority
+        logger.debug(
+            "[FilingArchiver] _classify_batch: %d total, %d → Groq, %d → default "
+            "(estimated ~%d Groq tokens saved)",
+            n_total, n_priority, n_skipped, n_skipped * 500,
+        )
+
+        # Initialise results with non-priority defaults; overwrite Groq results below
+        results: List[dict] = [dict(_LOW_PRIORITY_DEFAULT) for _ in filings]
+
+        # Classify only the priority subset
+        groq_results: List[dict] = []
+        for i in range(0, len(priority_filings), self.batch_size):
+            batch = priority_filings[i : i + self.batch_size]
             payload = [
                 {
                     "symbol": f.symbol,
@@ -327,17 +393,22 @@ class FilingArchiver:
             ]
             try:
                 from src.llm.groq_client import classify_events_batch
-                results = classify_events_batch(payload)
-                all_results.extend(results)
+                batch_results = classify_events_batch(payload)
+                groq_results.extend(batch_results)
             except Exception as e:
                 logger.error("[FilingArchiver] Groq classify_events_batch failed: %s", e)
                 for _ in batch:
-                    all_results.append(dict(_SAFE_DEFAULT))
+                    groq_results.append(dict(_SAFE_DEFAULT))
 
-            if i + self.batch_size < len(filings):
+            if i + self.batch_size < len(priority_filings):
                 time.sleep(2.0)
 
-        return all_results
+        # Map Groq results back to the original indices
+        for groq_idx, orig_idx in enumerate(priority_indices):
+            if groq_idx < len(groq_results):
+                results[orig_idx] = groq_results[groq_idx]
+
+        return results
 
     def _store_batch(self, filings: List[FilingEvent], classifications: List[dict]) -> int:
         """Persist (filing, classification) pairs to filings_archive.
