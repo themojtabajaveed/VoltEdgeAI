@@ -119,7 +119,7 @@ class ActiveSignal:
     direction: str              # "BUY" or "SHORT"
     strategy: str               # "HYDRA", "VIPER", "V2_DISCOVERY", "VIPER-COIL"
     layer_c_score: float        # Catalyst quality (0–100, FROZEN)
-    layer_e_score: float = 50.0 # Pattern match (cold start at 50)
+    layer_e_score: float = 60.0 # Pattern match (cold start raised 50→60 to unblock fills)
     event_summary: str = ""
     created_at: Optional[datetime] = None
     last_evaluated_at: Optional[datetime] = None
@@ -541,7 +541,7 @@ class ConvictionEngine:
             signal.layer_e_score = layer_e
         except Exception as e:
             logger.warning(f"[ConvEng] Layer E computation failed for {signal.symbol}: {e}")
-            # Keep default 50.0
+            # Keep default 60.0 (ActiveSignal.layer_e_score warm cold-start)
 
         self._watchboard[key] = signal
 

@@ -168,7 +168,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     # ── Phase 4: load config.yaml and override runtime params ──────────
     from src.config_loader import (
         get_conviction_threshold, get_max_open_positions, get_max_trades,
-        get_per_trade_risk, validate_config,
+        get_per_trade_risk, validate_config, get_v2_discovery_enabled,
     )
     try:
         validate_config()
@@ -345,6 +345,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     last_squareoff_date      = None    # Phase 7: 15:15 live EOD square-off
     runner_start_time        = datetime.now(IST).time()  # Phase I: cascade prevention
     last_candle_cache_write  = None    # TimesFM: periodic 5-min candle refresh
+    _v2_warn_date            = None    # Fix 2: one-per-day warning when V2 execution disabled
     scanner_long_symbols:  list = []
 
     # ── Phase K: Dragon Architecture — HYDRA + VIPER Strategies ──
@@ -1634,6 +1635,15 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                 for ds in watchlist:
                                     print(f"  {ds.symbol} [{ds.direction}] Score={ds.total_score:.1f} Sources={ds.sources}")
                                 
+                                _v2_exec_enabled = get_v2_discovery_enabled()
+                                if not _v2_exec_enabled and _v2_warn_date != now.date():
+                                    _v2_warn_date = now.date()
+                                    logging.warning(
+                                        "[runner] V2 Discovery execution disabled "
+                                        "(v2_discovery_enabled=false in config) — "
+                                        "analysis runs but trades are blocked"
+                                    )
+
                                 for ds in watchlist:
                                     sym = ds.symbol
                                     if sym in daily_traded_symbols:
@@ -1805,7 +1815,9 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                     elif deal_sig == "INSTITUTIONAL_BUY" and ds.direction == "LONG":
                                         print(f"  🏦 {sym}: Institutional BUY confirmed — extra conviction")
                                     
-                                    # Execute trade
+                                    # Execute trade (blocked when v2_discovery_enabled=false)
+                                    if not _v2_exec_enabled:
+                                        continue
                                     if ds.direction == "LONG":
                                         sym_stats = SymbolStats(symbol=sym, last_price=ltp, avg_daily_turnover_rupees=ds.volume * ltp if ds.volume > 0 else 5_000_000.0)
                                         if not allow_new_long(sym_stats, market_regime, risk_cfg):

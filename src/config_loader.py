@@ -24,7 +24,9 @@ _DEFAULTS: Dict[str, Any] = {
         "max_trades_per_day": 5,
         "per_trade_risk_inr": 100000,
         "max_open_positions": 5,
-        "conviction_threshold": 70,
+        "conviction_threshold": 62,
+        "live_conviction_threshold": 70,
+        "v2_discovery_enabled": False,
         "live_order_tag": "VOLTEDGE_AUTO",
         "eod_squareoff_time_ist": "15:15",
         "live_startup_countdown": 10,
@@ -250,6 +252,17 @@ def validate_config(cfg: Optional[Dict[str, Any]] = None) -> bool:
             f"execution.conviction_threshold={ct!r} invalid — must be int in [50, 100]"
         )
 
+    lct = _require(cfg, "execution", "live_conviction_threshold")
+    if lct is not None:
+        if not isinstance(lct, int) or isinstance(lct, bool) or not (62 <= lct <= 100):
+            raise ValueError(
+                f"execution.live_conviction_threshold={lct!r} invalid — must be int in [62, 100]"
+            )
+        if lct < ct:
+            raise ValueError(
+                f"execution.live_conviction_threshold={lct} must be >= conviction_threshold={ct}"
+            )
+
     mt = _require(cfg, "execution", "max_trades_per_day")
     if not isinstance(mt, int) or isinstance(mt, bool) or not (1 <= mt <= 20):
         raise ValueError(
@@ -386,7 +399,18 @@ def get_router_dawn_confidence_min() -> float:
 # ── Typed accessors — execution ────────────────────────────────────────────
 
 def get_conviction_threshold() -> int:
-    return int(load_config().get("execution", {}).get("conviction_threshold", 70))
+    """Paper-trade gate threshold (lowered from 70 → 62 to generate dry-run fills)."""
+    return int(load_config().get("execution", {}).get("conviction_threshold", 62))
+
+
+def get_live_conviction_threshold() -> int:
+    """Hard gate for live order execution — must never be lowered below 70."""
+    return int(load_config().get("execution", {}).get("live_conviction_threshold", 70))
+
+
+def get_v2_discovery_enabled() -> bool:
+    """Whether V2 Discovery execution path is active. Defaults to False (disabled)."""
+    return bool(load_config().get("execution", {}).get("v2_discovery_enabled", False))
 
 
 def get_max_trades() -> int:

@@ -54,10 +54,10 @@ def test_select_dawn_candidates_filters_to_routed_symbols():
     assert syms == {"ABC"}, f"Expected only ABC, got {syms}"
 
 
-def test_conviction_threshold_is_70():
-    """Phase 3C: threshold raised to 70."""
+def test_conviction_threshold_is_62():
+    """Fix 1: threshold lowered to 62 for dry-run fills (live gate stays at 70 via live_conviction_threshold)."""
     from src.trading import conviction_engine
-    assert conviction_engine.CONVICTION_THRESHOLD == 70.0
+    assert conviction_engine.CONVICTION_THRESHOLD == 62.0
 
 
 def test_hydra_shadow_roundtrip_persistence():

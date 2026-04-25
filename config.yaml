@@ -3,7 +3,9 @@ execution:
   max_trades_per_day: 5
   per_trade_risk_inr: 100000
   max_open_positions: 5
-  conviction_threshold: 70
+  conviction_threshold: 62        # paper-trade gate (lowered from 70 to generate fills)
+  live_conviction_threshold: 70   # hard gate for live orders — never lower than 70
+  v2_discovery_enabled: false     # disable unvalidated V2 Discovery execution path
   live_order_tag: "VOLTEDGE_AUTO"
   eod_squareoff_time_ist: "15:15"
   live_startup_countdown: 10

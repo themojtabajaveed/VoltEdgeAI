@@ -12,7 +12,8 @@ execution:
   max_trades_per_day: 5
   per_trade_risk_inr: 100000
   max_open_positions: 5
-  conviction_threshold: 70
+  conviction_threshold: 62
+  live_conviction_threshold: 70
 
 router:
   dawn_confidence_min: 0.85
@@ -79,8 +80,8 @@ def test_load_config_has_all_eight_sections(full_cfg):
         assert section in cfg, f"missing section: {section}"
 
 
-def test_get_conviction_threshold_is_70(full_cfg):
-    assert config_loader.get_conviction_threshold() == 70
+def test_get_conviction_threshold_is_62(full_cfg):
+    assert config_loader.get_conviction_threshold() == 62
 
 
 def test_get_dry_run_is_true(full_cfg):
@@ -140,7 +141,7 @@ def test_load_config_missing_file_uses_defaults(tmp_path, monkeypatch):
     monkeypatch.setenv("VOLTEDGE_CONFIG", str(tmp_path / "does_not_exist.yaml"))
     config_loader.load_config(force_reload=True)
     cfg = config_loader.load_config()
-    assert cfg["execution"]["conviction_threshold"] == 70
+    assert cfg["execution"]["conviction_threshold"] == 62
     assert cfg["router"]["router_enabled"] is True
     config_loader.load_config(force_reload=True)
 

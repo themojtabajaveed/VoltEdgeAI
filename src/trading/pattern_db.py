@@ -273,7 +273,7 @@ class PatternDB:
         Excludes LEGACY_UNCATEGORIZED and NO_DATA_EXPIRED from scoring.
 
         Returns success_rate * 100, clamped to [20, 80].
-        Returns 50 if fewer than MIN_MATCHES_FOR_SCORE definitive matches.
+        Returns 60 if fewer than MIN_MATCHES_FOR_SCORE definitive matches (warm cold-start).
         """
         fp_dict = asdict(fingerprint)
         fp_fields = list(fp_dict.keys())
@@ -295,7 +295,7 @@ class PatternDB:
         ]
 
         if len(definitive) < MIN_MATCHES_FOR_SCORE:
-            return 50.0  # Cold start — insufficient definitive data
+            return 60.0  # Warm cold-start — matches ActiveSignal.layer_e_score default
 
         positive = sum(1 for m in definitive if m.get("outcome") in POSITIVE_OUTCOMES)
         negative = sum(1 for m in definitive if m.get("outcome") in NEGATIVE_OUTCOMES)
