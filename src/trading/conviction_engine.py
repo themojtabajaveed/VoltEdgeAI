@@ -796,7 +796,19 @@ class ConvictionEngine:
                     )
                 else:
                     # Expired signal: evaluate actual price movement
-                    entry_price = float(signal.metadata.get("entry_price", 0) or 0)
+                    # Fallback chain: explicit entry → detection LTP → EOD price → 0
+                    _raw_entry = (
+                        signal.metadata.get("entry_price")
+                        or signal.metadata.get("detection_price")
+                        or price_map.get(signal.symbol)
+                        or 0
+                    )
+                    entry_price = float(_raw_entry) if _raw_entry else 0.0
+                    if entry_price == 0.0:
+                        logger.warning(
+                            f"[PatternDB] {signal.symbol} — no price resolved,"
+                            " outcome will be NO_DATA_EXPIRED"
+                        )
                     current_price = price_map.get(signal.symbol, 0)
 
                     if entry_price > 0 and current_price > 0:
@@ -908,6 +920,54 @@ class ConvictionEngine:
         except Exception as e:
             logger.error(f"[ConvEng] Failed to persist watchboard: {e}")
         return path
+
+    def record_shadow_outcome(
+        self,
+        symbol: str,
+        direction: str,
+        pnl_pct: float,
+        entry_price: float,
+        exit_price: float,
+    ) -> None:
+        """
+        Record a closed dry-run (shadow) trade outcome to PatternDB.
+        Called by ShadowBook.on_exit() after each paper position closes.
+        """
+        today_str = datetime.now(IST).strftime("%Y-%m-%d")
+        vix = self._prev_snapshot.vix if self._prev_snapshot else 15.0
+        phase_value = self._phase_state.current_phase.value
+        key = f"{symbol}_{direction}"
+        signal = self._watchboard.get(key)
+        strategy = signal.strategy if signal else "SHADOW"
+        try:
+            if signal:
+                fp = build_fingerprint(signal, phase_value=phase_value, vix=vix)
+            else:
+                fp = PatternFingerprint(
+                    strategy=strategy,
+                    direction=direction,
+                    phase_at_trigger=phase_value,
+                    sector="UNKNOWN",
+                    catalyst_type="unknown",
+                    time_bucket=classify_time_bucket(datetime.now(IST)),
+                    vix_regime=classify_vix_regime(vix),
+                )
+            outcome_str = "WIN" if pnl_pct > 0 else "LOSS"
+            outcome = PatternOutcome(
+                fingerprint=fp,
+                triggered=True,
+                pnl_pct=round(pnl_pct, 2),
+                max_favorable=0.0,
+                max_adverse=0.0,
+                outcome=outcome_str,
+                date=today_str,
+            )
+            self._pattern_db.record_outcome(outcome)
+            logger.info(
+                f"[PatternDB] shadow outcome recorded: {symbol} {outcome_str} pnl={pnl_pct:.2f}%"
+            )
+        except Exception as e:
+            logger.warning(f"[PatternDB] record_shadow_outcome failed for {symbol}: {e}")
 
     def reset_daily(self) -> None:
         """Clear all state for new trading day."""
