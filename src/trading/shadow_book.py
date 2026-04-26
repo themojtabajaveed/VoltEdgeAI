@@ -61,6 +61,12 @@ class ShadowBook:
                 with open(self._path) as f:
                     data = json.load(f)
                 self._closed = data.get("closed", [])
+                open_dict = data.get("open", {})
+                if open_dict:
+                    self._book = PositionBook.from_dict(open_dict)
+                    logger.info(
+                        f"[SHADOW] Restored {len(open_dict)} open shadow position(s) from {self._path}"
+                    )
         except Exception as e:
             logger.warning(f"[SHADOW] load failed for {self._path}: {e}")
 
