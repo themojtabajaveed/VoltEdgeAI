@@ -42,12 +42,17 @@ class ShadowBook:
     All mutations are written through to sl_shadow_YYYY-MM-DD.json.
     """
 
-    def __init__(self, shadow_date: Optional[date] = None) -> None:
+    def __init__(
+        self,
+        shadow_date: Optional[date] = None,
+        conviction_engine_ref: Optional[Any] = None,
+    ) -> None:
         self._date = shadow_date or date.today()
         self._book = PositionBook()
         self._closed: List[Dict[str, Any]] = []
         self._path = _shadow_path(self._date)
         self._lock = threading.Lock()
+        self._conviction_engine = conviction_engine_ref
         self._load()
 
     def _load(self) -> None:
@@ -138,6 +143,17 @@ class ShadowBook:
             self._closed.append(record)
             self._book.on_sell_fill(symbol, qty, exit_price)
             self._persist()
+            if self._conviction_engine is not None:
+                try:
+                    self._conviction_engine.record_shadow_outcome(
+                        symbol=symbol,
+                        direction="BUY",
+                        pnl_pct=pnl_pct,
+                        entry_price=entry_price,
+                        exit_price=exit_price,
+                    )
+                except Exception as _pdb_e:
+                    logger.warning(f"[shadow] PatternDB record failed: {_pdb_e}")
 
     def get_closed(self) -> List[Dict[str, Any]]:
         with self._lock:
