@@ -118,8 +118,8 @@ def get_ohlcv(symbol: str, instrument_token: int, interval: str, start: datetime
     # Advanced gap-filling logic could go here; for V1 we fall back to a full fetch if cache bounds are wildly missed.
     if df_cached is not None and not df_cached.empty:
         # Strip exact timezones for boundary comparisons
-        first_cache = df_cached.index[0].tz_localize(None) if df_cached.index[0].tzinfo else df_cached.index[0]
-        last_cache = df_cached.index[-1].tz_localize(None) if df_cached.index[-1].tzinfo else df_cached.index[-1]
+        first_cache = pd.Timestamp(df_cached.index[0]).tz_localize(None) if df_cached.index[0].tzinfo else df_cached.index[0]
+        last_cache = pd.Timestamp(df_cached.index[-1]).tz_localize(None) if df_cached.index[-1].tzinfo else df_cached.index[-1]
         
         start_naive = pd.Timestamp(start).tz_localize(None) if start.tzinfo else start
         end_naive = pd.Timestamp(end).tz_localize(None) if end.tzinfo else end
