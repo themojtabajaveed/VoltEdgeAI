@@ -96,11 +96,11 @@ backtest:
   sl_pct: 1.5            # stop loss % (positive number, applied as -sl_pct)
   throttle_seconds: 0.35 # sleep between Kite API calls
   auto_run_weekly: false  # if true, runner.py triggers backtest every Friday
-  slippage_entry_bps: 6
-  slippage_exit_target_bps: 5
-  slippage_exit_stop_bps: 10
-  slippage_exit_neutral_bps: 3
-  conviction_threshold_override: 45
+  slippage_entry_bps: 30          # was 6  — realistic entry on gap open
+  slippage_exit_target_bps: 25   # was 5  — orderly exit at target
+  slippage_exit_stop_bps: 50     # was 10 — wider on stop (panic flow)
+  slippage_exit_neutral_bps: 15  # was 3  — EOD close, moderate
+  conviction_threshold_override: 62  # was 45 — match live conviction gate
   use_threshold_override: true
 
 # ── Phase 8: Unified stop-loss system ─────────────────────────────────────
