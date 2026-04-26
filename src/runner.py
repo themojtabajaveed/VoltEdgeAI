@@ -304,7 +304,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     # Phase 8h: shadow book for dry-run SL effectiveness validation
     try:
         from src.trading.shadow_book import ShadowBook
-        shadow_book: Optional["ShadowBook"] = ShadowBook()
+        shadow_book: Optional["ShadowBook"] = ShadowBook(conviction_engine_ref=conviction_engine)
         logging.info("[SHADOW] Shadow PositionBook initialised for dry-run validation")
     except Exception as _sb_e:
         shadow_book = None
@@ -371,6 +371,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
 
     # ── Mid-session bearish discovery (SHORT-4) ──
     last_neg_pulse_date = None
+    last_heartbeat_date = None  # C4: 11:00 IST signals watchdog
 
     # ── SHORT-6/7: Ban list + T2T refresh ──
     last_ban_refresh_date = None
@@ -850,6 +851,43 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         logging.error(f"VIPER re-scan #{viper_rescan_index + 1} failed: {viper_e}")
                     last_viper_scan_time = now
                     viper_rescan_index += 1
+
+                # 0c-ii. 11:00 IST — signals watchdog (fires once per market day)
+                if _market_open_today and _should_fire_scheduled_job(dt_time(11, 0), runner_start_time, current_time):
+                    if last_heartbeat_date != current_date:
+                        try:
+                            active_signals = conviction_engine.get_active_signals()
+                            n_watchboard = len(active_signals)
+                            signals_file = os.path.join(
+                                "logs", "conviction_signals",
+                                f"{current_date.isoformat()}_signals.json",
+                            )
+                            file_empty = True
+                            try:
+                                with open(signals_file) as _sf:
+                                    file_empty = not json.load(_sf)
+                            except Exception:
+                                file_empty = True  # file absent counts as empty
+
+                            if n_watchboard == 0 and file_empty:
+                                logging.warning(
+                                    "[heartbeat] WARNING: 11:00 IST and zero signals on watchboard"
+                                    " AND no signals in today's file. System may be stalled."
+                                )
+                                print(
+                                    f"  ⚠️  [heartbeat] WARNING: zero signals at 11:00 IST — system may be stalled"
+                                )
+                            else:
+                                max_conv = max(
+                                    (s.last_conviction for s in active_signals), default=0.0
+                                )
+                                logging.info(
+                                    f"[heartbeat] 11:00 IST OK — {n_watchboard} signals on watchboard,"
+                                    f" max_conviction={max_conv:.1f}"
+                                )
+                        except Exception as _hb_e:
+                            logging.warning(f"[heartbeat] watchdog failed: {_hb_e}")
+                        last_heartbeat_date = current_date
 
                 # 0d. 12:00 IST — Mid-session negative news pulse (SHORT-4)
                 if (_market_open_today
@@ -2191,6 +2229,13 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                 conviction_engine.record_eod_outcomes(trade_records, price_map=eod_price_map)
                             except Exception as eod_e:
                                 logging.error(f"Pattern DB EOD recording failed: {eod_e}")
+
+                            # C3: daily shadow_book_summary heartbeat
+                            try:
+                                from src.reports.shadow_book_summary import generate_shadow_summary
+                                generate_shadow_summary()
+                            except Exception as _ss_err:
+                                logging.warning(f"[shadow_summary] failed: {_ss_err}")
 
                             viper_health_str = getattr(viper, 'scan_health_summary', '')
                             generate_post_market_report(
