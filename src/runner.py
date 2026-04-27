@@ -652,7 +652,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             fetch_all_premarket_data, get_scan_universe,
                         )
                         if hydra.watchlist:
-                            _router_cache = fetch_all_premarket_data(get_scan_universe())
+                            _router_cache = fetch_all_premarket_data(get_scan_universe(), force_refresh=True)
                             import json as _json, pathlib as _pathlib
                             _pdb_path = _pathlib.Path("data/pattern_db.json")
                             try:
