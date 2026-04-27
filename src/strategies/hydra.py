@@ -394,6 +394,8 @@ class HydraStrategy(StrategyHead):
                 deal_size_inr=event.deal_size_inr,
                 market_cap_inr=event.market_cap_inr,
                 filed_at=(event.filed_at_dt.isoformat() if event.filed_at_dt else None),
+                filing_category=(event.event_type or getattr(event, "category", "") or "").upper(),
+                filing_urgency=float(getattr(event, "urgency", 0.0) or 0.0),
             ))
 
         if entries:
