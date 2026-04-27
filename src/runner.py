@@ -1206,6 +1206,8 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                     if ltp <= 0:
                                         continue
 
+                                    prev_close = ltp  # safe default; C7 overwrites with OHLC close
+
                                     # ── C7: Circuit limit check before DAWN entry ────────────────────
                                     try:
                                         nse_sym = f"NSE:{sym}"
@@ -1219,6 +1221,67 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                             continue
                                     except Exception:
                                         pass
+                                    # ──────────────────────────────────────────────────────────────────
+
+                                    # ── C3: Layer-4 market-confirmation gate ─────────────────────────
+                                    try:
+                                        from src.utils.event_quality import classify_market_confirmation
+                                        from src.utils.market_calendar import market_minutes_of_exposure
+                                        from src.config_loader import get_market_confirmation_config
+                                        _l4_cfg = get_market_confirmation_config()
+                                        _now_l4 = datetime.now(IST)
+                                        # Market-minutes elapsed since filing
+                                        _filed_str = pick.get("filed_at") or ""
+                                        _filing_ts_l4 = None
+                                        if _filed_str:
+                                            try:
+                                                _filing_ts_l4 = datetime.fromisoformat(_filed_str)
+                                                if _filing_ts_l4.tzinfo is None:
+                                                    _filing_ts_l4 = _filing_ts_l4.replace(tzinfo=IST)
+                                            except (ValueError, TypeError):
+                                                pass
+                                        _mkt_min_l4 = (
+                                            market_minutes_of_exposure(_filing_ts_l4, _now_l4)
+                                            if _filing_ts_l4 is not None else 0
+                                        )
+                                        # Volume: cumulative session volume vs expected 15-min avg
+                                        _tick_vol = float(getattr(tick, "volume", 0) or 0)
+                                        _avg_day = float(pick.get("avg_volume_20d", 0) or 0)
+                                        _avg_15m = _avg_day / 25.0 if _avg_day > 0 else None
+                                        _cur_vol = _tick_vol if _tick_vol > 0 else None
+                                        # Price velocity from prev_close (C7 already fetched it)
+                                        _vel_pct = (
+                                            (ltp - prev_close) / prev_close * 100.0
+                                            if prev_close > 0 else 0.0
+                                        )
+                                        _l4_status, _l4_reason = classify_market_confirmation(
+                                            market_minutes_elapsed=_mkt_min_l4,
+                                            volume_current_15min=_cur_vol,
+                                            volume_avg_15min=_avg_15m,
+                                            price_velocity_pct=_vel_pct,
+                                            config=_l4_cfg,
+                                        )
+                                        if _l4_status == "CONFIRMED":
+                                            _l4_bonus = int(_l4_cfg.get("confirmed_conviction_bonus", 10))
+                                            conviction_score = min(100.0, conviction_score + _l4_bonus)
+                                            print(f"  🌅 DAWN L4 {sym}: CONFIRMED +{_l4_bonus} ({_l4_reason})")
+                                            logging.info(f"[C3] {sym}: L4 CONFIRMED | {_l4_reason}")
+                                        elif _l4_status == "INDIFFERENT":
+                                            _l4_pen = int(_l4_cfg.get("indifferent_conviction_penalty", 20))
+                                            conviction_score = max(0.0, conviction_score - _l4_pen)
+                                            if conviction_score < get_conviction_threshold():
+                                                print(f"  🌅 DAWN SKIP {sym}: L4 INDIFFERENT after -{_l4_pen} ({_l4_reason})")
+                                                logging.info(f"[C3] {sym}: L4 INDIFFERENT — skipped | {_l4_reason}")
+                                                continue
+                                            print(f"  🌅 DAWN L4 {sym}: INDIFFERENT -{_l4_pen} conviction ({_l4_reason})")
+                                            logging.info(f"[C3] {sym}: L4 INDIFFERENT | penalised -{_l4_pen} | {_l4_reason}")
+                                        elif _l4_status == "TOO_EARLY":
+                                            print(f"  🌅 DAWN L4 {sym}: TOO_EARLY — bypassing ({_l4_reason})")
+                                            logging.info(f"[C3] {sym}: L4 TOO_EARLY — injecting | {_l4_reason}")
+                                        else:  # NO_DATA
+                                            logging.info(f"[C3] {sym}: L4 NO_DATA — proceeding | {_l4_reason}")
+                                    except Exception as _l4_e:
+                                        logging.warning(f"[C3] L4 check failed for {sym}: {_l4_e}")
                                     # ──────────────────────────────────────────────────────────────────
 
                                     # ATR: best-effort from daily cache; fallback to max_stop_pct
