@@ -1034,6 +1034,21 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                     if ltp <= 0:
                                         continue
 
+                                    # ── C7: Circuit limit check before DAWN entry ────────────────────
+                                    try:
+                                        nse_sym = f"NSE:{sym}"
+                                        ohlc_data = client.ohlc(nse_sym)
+                                        prev_close = ohlc_data.get(nse_sym, {}).get("ohlc", {}).get("close", 0.0)
+                                        if prev_close <= 0:
+                                            prev_close = ltp
+                                        circuit_ok, circuit_reason = is_safe_to_enter_long(sym, prev_close, ltp)
+                                        if not circuit_ok:
+                                            print(f"  🌅 DAWN SKIP {sym}: {circuit_reason}")
+                                            continue
+                                    except Exception:
+                                        pass
+                                    # ──────────────────────────────────────────────────────────────────
+
                                     # ATR: best-effort from daily cache; fallback to max_stop_pct
                                     atr_val = compute_daily_atr_from_cache(sym, ltp=ltp) or ltp * (get_max_stop_pct() / 100.0)
 
