@@ -85,12 +85,11 @@ def _coalesce_filing_impact(premarket: Optional[PreMarketSignals]) -> float:
 def _coalesce_filing_category(
     entry: WatchlistEntry, premarket: Optional[PreMarketSignals]
 ) -> str:
-    cat = ""
+    if entry.filing_category:
+        return str(entry.filing_category).upper().strip()
     if premarket is not None and premarket.filing_category:
-        cat = premarket.filing_category
-    elif entry.filing_category:
-        cat = entry.filing_category
-    return str(cat).upper().strip()
+        return str(premarket.filing_category).upper().strip()
+    return ""
 
 
 def _coalesce_gap_pct(
@@ -320,10 +319,26 @@ def route_candidate(
         quality_cfg = {"min_passing_score": 55.0}
 
     if filing_ts is None:
-        # No timestamp → can't classify freshness. Skip L1/L2, still score L3 quality.
-        passed.append("R4_SKIPPED")
-        notes.append("filed_at unknown — freshness skipped")
+        # No timestamp → can't classify freshness. Default: fail R4 (fail-closed).
+        # Toggle router.r4_pass_on_unknown=true to restore legacy R4_SKIPPED pass.
+        try:
+            from src.config_loader import get_r4_pass_on_unknown
+            pass_on_unknown = get_r4_pass_on_unknown()
+        except Exception:
+            pass_on_unknown = False
         entry.filing_freshness = None
+        if pass_on_unknown:
+            passed.append("R4_SKIPPED")
+            notes.append("filed_at unknown — freshness skipped (r4_pass_on_unknown=true)")
+        else:
+            failed.append("R4")
+            notes.append(
+                f"filed_at unknown/unparseable: {entry.filed_at!r} — R4 failed"
+            )
+            logger.warning(
+                f"[Router] {entry.symbol} R4 fail — filed_at unknown/unparseable: "
+                f"{entry.filed_at!r} (set router.r4_pass_on_unknown=true to bypass)"
+            )
     else:
         price_at_filing = getattr(entry, "price_at_filing_time", None)
         # price_now: prefer live LTP from premarket signals if available, else None.
