@@ -21,9 +21,15 @@ conviction:
     apply_enabled: true                  # master flag to disable the adjustment
 
 router:
-  dawn_confidence_min: 0.85
+  dawn_confidence_min: 0.83  # 5/6 rules — R1+R2 must both pass (see router.py guard)
   hydra_confidence_min: 0.0
   router_enabled: true
+
+  # When filed_at is missing/unparseable, R4 cannot evaluate freshness.
+  # Default false → fail R4 (fail-closed, matches R1/R3/R6 posture).
+  # Set true ONLY as an incident-response toggle if upstream filings
+  # temporarily lose timestamps; expect WARNING logs and audit before re-enabling.
+  r4_pass_on_unknown: false
 
   # ── 4-Layer Event Evaluation Model ─────────────────────────────────────
   # Replaces naive wall-clock staleness with market-time exposure + price-

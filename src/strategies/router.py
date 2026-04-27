@@ -419,6 +419,19 @@ def route_candidate(
     route = "DAWN" if not failed else "HYDRA"
     confidence = round(len(passed) / 6.0, 2)
 
+    # R1 and R2 are non-negotiable catalyst-quality gates
+    r1_passed = any("R1" in r for r in passed)
+    r2_passed = any("R2" in r for r in passed)
+    if not (r1_passed and r2_passed):
+        return RouteDecision(
+            symbol=entry.symbol,
+            route="HYDRA",
+            confidence=confidence,
+            rules_passed=passed,
+            rules_failed=failed,
+            reasoning=f"HYDRA: R1+R2 hard gate: catalyst quality not confirmed; passed {passed}; failed {failed}",
+        )
+
     # ── Phase 4: confidence-threshold demotion ──────────────────────────
     try:
         from src.config_loader import (
