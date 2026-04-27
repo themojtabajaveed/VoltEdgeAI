@@ -48,7 +48,7 @@ DAWN_CATEGORIES = frozenset({
 
 # ── Rule thresholds ──────────────────────────────────────────────────────
 _MIN_FILING_URGENCY = 8.5
-_MIN_FILING_IMPACT = 8.0
+_MIN_FILING_IMPACT = 7.0  # lowered from 8.0 — _score_filing_impact caps ~6-7 for strong catalysts; revisit after 2 weeks of post-B1/B2 data
 _MIN_GAP_ABS = 2.0
 _MIN_FOLLOW_THROUGH = 0.60
 _COLD_START_FOLLOW_THROUGH = 0.55
@@ -94,10 +94,19 @@ def _coalesce_filing_category(
 
 def _coalesce_gap_pct(
     entry: WatchlistEntry, premarket: Optional[PreMarketSignals]
-) -> float:
+) -> Optional[float]:
+    """Return gap_pct, or None when data is unavailable (both sources are 0.0/falsy).
+
+    None means "pre-open price discovery incomplete" — distinct from a real 0.0 gap.
+    A real 0.0 gap (perfectly flat stock) is indistinguishable here by design: at
+    08:15 a true-zero gap is vanishingly rare, and treating it as unavailable is
+    the safer fail-open posture (C5).
+    """
     if premarket is not None and premarket.gap_pct:
         return float(premarket.gap_pct)
-    return float(entry.gap_pct or 0.0)
+    if entry.gap_pct:
+        return float(entry.gap_pct)
+    return None  # both sources 0.0 / falsy → gap unavailable at pre-open
 
 
 def _coalesce_avg_volume(
@@ -273,22 +282,25 @@ def route_candidate(
         notes.append(f"category={category or 'UNKNOWN'} not in DAWN set")
 
     # R3 — Gap must actually be meaningful (direction-aware).
-    #     gap_pct == 0.0 means pre-market data was unavailable → HYDRA.
-    if gap_pct == 0.0:
-        failed.append("R3")
-        notes.append("gap_pct=0.0 (pre-market data unavailable)")
+    #   Three outcomes:
+    #     R3          → real gap meets threshold (PASS)
+    #     R3_UNAVAIL  → gap data not yet ready at pre-open (SOFT-PASS, counted in confidence)
+    #     R3 in failed → real gap exists but is below threshold (FAIL)
+    if gap_pct is None:
+        passed.append("R3_UNAVAIL")
+        notes.append("gap unavailable at pre-open (NSE price discovery incomplete)")
     elif direction == "SHORT":
         if gap_pct <= -_MIN_GAP_ABS:
             passed.append("R3")
         else:
             failed.append("R3")
-            notes.append(f"SHORT gap={gap_pct:+.2f}%>{-_MIN_GAP_ABS}")
+            notes.append(f"SHORT gap={gap_pct:+.2f}%>{-_MIN_GAP_ABS} (gap too small)")
     else:  # LONG / BUY / default
         if gap_pct >= _MIN_GAP_ABS:
             passed.append("R3")
         else:
             failed.append("R3")
-            notes.append(f"LONG gap={gap_pct:+.2f}%<{_MIN_GAP_ABS}")
+            notes.append(f"LONG gap={gap_pct:+.2f}%<{_MIN_GAP_ABS} (gap too small)")
 
     # R4 — 4-Layer Event Evaluation.
     #   Layer 1: market-time exposure (NSE session minutes, not wall clock)
