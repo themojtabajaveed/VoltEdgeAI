@@ -19,7 +19,8 @@ logs/
 # Runtime / generated data — do NOT commit
 data/exports/
 data/premarket_cache_*.json
-cache/
+cache/*.json
+cache/*.tmp
 *.sqlite3-journal
 logs/*.log
 reports/event_study_*.csv
@@ -44,6 +45,7 @@ voltedgeai.db
 data/exports/
 data/premarket_cache_*.json
 data/hydra_shadows_*.json
-cache/
+cache/*.json
+cache/*.tmp
 logs/
 data/event_study_*.json
