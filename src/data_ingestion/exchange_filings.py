@@ -175,6 +175,70 @@ def _score_urgency(category: str, subject: str) -> float:
     return 4.0
 
 
+def _normalise_filing_category(category: str, subject: str) -> Optional[str]:
+    """
+    Map a raw NSE filing category (smIndustry / announceType) and
+    subject line to one of the DAWN_CATEGORIES catalyst strings.
+    Returns None if no confident match — never guesses.
+    """
+    text = f"{category} {subject}".upper()
+
+    # ORDER_WIN — contracts, orders, LOAs, work orders
+    if any(k in text for k in [
+        "ORDER", "CONTRACT", "LOA", "WORK ORDER", "PURCHASE ORDER",
+        "LETTER OF AWARD", "AWARDED", "BAGGED", "SECURED CONTRACT",
+        "SUPPLY AGREEMENT", "EMPANELLED",
+    ]):
+        return "ORDER_WIN"
+
+    # MERGER / ACQUISITION
+    if any(k in text for k in [
+        "MERGER", "AMALGAMATION", "ACQUISITION", "TAKEOVER",
+        "SCHEME OF ARRANGEMENT", "DEMERGER", "BUYOUT",
+    ]):
+        return "MERGER"
+
+    # RESULTS_BLOWOUT — earnings surprises
+    if any(k in text for k in [
+        "FINANCIAL RESULT", "QUARTERLY RESULT", "ANNUAL RESULT",
+        "Q1 RESULT", "Q2 RESULT", "Q3 RESULT", "Q4 RESULT",
+        "STANDALONE RESULT", "CONSOLIDATED RESULT",
+        "PAT GROWTH", "REVENUE GROWTH", "PROFIT",
+    ]):
+        return "RESULTS_BLOWOUT"
+
+    # REGULATORY_CLEARANCE
+    if any(k in text for k in [
+        "APPROVAL", "CLEARANCE", "REGULATORY", "SEBI", "RBI",
+        "NCLT", "CCI", "NCLAT", "LICENCE", "LICENSE",
+        "FDA", "USFDA", "ANDA", "NDA", "CDSCO",
+    ]):
+        return "REGULATORY_CLEARANCE"
+
+    # INDEX_ADDITION
+    if any(k in text for k in [
+        "INDEX", "NIFTY", "SENSEX", "INCLUSION", "ADDITION TO INDEX",
+        "ADDED TO", "MSCI",
+    ]):
+        return "INDEX_ADDITION"
+
+    # MAJOR_CONTRACT — large deals, MoUs, JVs
+    if any(k in text for k in [
+        "MOU", "MOA", "JOINT VENTURE", "JV", "PARTNERSHIP",
+        "STRATEGIC ALLIANCE", "MEMORANDUM", "DEFINITIVE AGREEMENT",
+    ]):
+        return "MAJOR_CONTRACT"
+
+    # EARNINGS_SURPRISE — analyst upgrades, guidance raises
+    if any(k in text for k in [
+        "UPGRADE", "GUIDANCE", "OUTLOOK", "REVISED ESTIMATE",
+        "ANALYST", "RATING UPGRADE",
+    ]):
+        return "EARNINGS_SURPRISE"
+
+    return None   # no confident match — do not guess
+
+
 # ── Timestamp helpers ─────────────────────────────────────────────────────────
 
 _NSE_DT_FORMATS = [

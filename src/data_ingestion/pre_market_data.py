@@ -33,6 +33,7 @@ import zoneinfo
 from src.data_ingestion.exchange_filings import (
     FilingEvent,
     _get_nse_session,
+    _normalise_filing_category,
     fetch_exchange_filings,
 )
 
@@ -684,7 +685,12 @@ def fetch_all_premarket_data(
             deal_net_qty=deal_net,
             sector=sector,
             sector_momentum=sec_mom,
-            filing_category=filing.category if filing else None,
+            filing_category=(
+                _normalise_filing_category(
+                    filing.category or "",
+                    filing.subject or "",
+                ) or ""
+            ) if filing else None,
             filing_urgency=filing.urgency if filing else None,
             filing_impact_score=_score_filing_impact(filing, sec_mom) if filing else None,
             tier=1 if filing else 2,
