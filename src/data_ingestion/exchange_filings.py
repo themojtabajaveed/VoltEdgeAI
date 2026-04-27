@@ -475,21 +475,60 @@ def _fetch_bse_filings(cutoff: datetime) -> List[FilingEvent]:
 
 # ── Deduplication ─────────────────────────────────────────────────────────────
 
+_DEDUP_NOISE_WORDS = re.compile(
+    r"\b(CORRIGENDUM|CORRIGENDA|ADDENDUM|AMENDMENT|REVISED|REVISION|UPDATE)\b"
+)
+_DEDUP_PUNCT = re.compile(r"[^\w\s]")
+_DEDUP_WS = re.compile(r"\s+")
+
+
+def _normalise_dedup_subject(subject: str) -> str:
+    """Normalise a filing subject for second-pass amendment dedup."""
+    text = subject.upper()
+    text = _DEDUP_NOISE_WORDS.sub(" ", text)
+    text = _DEDUP_PUNCT.sub(" ", text)
+    text = _DEDUP_WS.sub(" ", text).strip()
+    return text[:60]
+
+
 def _dedup_filings(filings: List[FilingEvent]) -> List[FilingEvent]:
     """
     Remove duplicate filings across NSE and BSE.
-    Duplicate = same symbol + matching headline prefix (first 50 chars, lowercase).
-    Prefers NSE over BSE when duplicate detected.
+
+    Pass 1: same symbol + headline prefix (first 50 chars, lowercase).
+            Prefers NSE over BSE when duplicate detected.
+    Pass 2: same symbol + normalised subject (noise words stripped, first 60 chars).
+            Handles corrigenda/addenda with slightly different headlines.
+            Keeps the filing with the latest filed_at; prefers timestamped over
+            untimstamped when one side has no timestamp.
     """
+    # ── Pass 1: exchange-level dedup (existing logic, unchanged) ─────────────
     seen: dict[str, FilingEvent] = {}
     for f in filings:
         key = f"{f.symbol}|{f.headline[:50].lower().strip()}"
         if key not in seen:
             seen[key] = f
         elif f.exchange == "NSE" and seen[key].exchange == "BSE":
-            # Prefer NSE record
             seen[key] = f
-    return list(seen.values())
+    pass1 = list(seen.values())
+
+    # ── Pass 2: amendment dedup (corrigenda / addenda with differing headlines) ─
+    buckets: dict[tuple[str, str], FilingEvent] = {}
+    for f in pass1:
+        norm_key = (
+            f.symbol.upper().strip(),
+            _normalise_dedup_subject(f.headline or ""),
+        )
+        if norm_key not in buckets:
+            buckets[norm_key] = f
+        else:
+            existing = buckets[norm_key]
+            # Prefer the filing with the latest filed_at; prefer timestamped over none
+            f_ts = f.filed_at or ""
+            ex_ts = existing.filed_at or ""
+            if f_ts and (not ex_ts or f_ts > ex_ts):
+                buckets[norm_key] = f
+    return list(buckets.values())
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
