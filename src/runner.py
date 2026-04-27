@@ -365,10 +365,13 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     last_dawn_dryrun_entry_date = None   # HYDRA dryrun entries recorded once at 09:15
     last_dawn_dryrun_update_time = None  # HYDRA dryrun update cadence (15-min)
     last_dawn_revalid_date = None        # C8: 09:05 freshness revalidation fires once per day
+    last_c4_reroute_0845_date = None     # C4: 08:45 re-route pass fires once per day
+    last_c4_reroute_0900_date = None     # C4: 09:00 re-route pass fires once per day
 
     # ── DawnHydraRouter output (populated at 08:15, consumed at 09:15) ──
     dawn_candidates_today: list = []
     hydra_shadows_today: list = []
+    dawn_routed_symbols: set = set()     # C4: symbols already in dawn_candidates_today (dedup)
 
     # ── Mid-session bearish discovery (SHORT-4) ──
     last_neg_pulse_date = None
@@ -413,6 +416,9 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                 last_dawn_dryrun_update_time = None
                 slot_manager.reset_daily()
                 last_hydra_scan_date = None
+                last_c4_reroute_0845_date = None
+                last_c4_reroute_0900_date = None
+                dawn_routed_symbols = set()
                 grok_call_count = 0
                 grok_morning_plan = None
                 grok_optimizer_index = 0
@@ -647,6 +653,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                     # ── DawnHydraRouter: decide DAWN vs HYDRA per candidate ──
                     dawn_candidates_today = []
                     hydra_shadows_today = []
+                    dawn_routed_symbols = set()   # C4: reset dedup set on new scan day
                     try:
                         from src.strategies.router import route_candidate, create_hydra_shadow
                         from src.data_ingestion.pre_market_data import (
@@ -666,12 +673,13 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                                 if _decision.route == "DAWN":
                                     dawn_candidates_today.append(_entry)
                                     hydra_shadows_today.append(create_hydra_shadow(_entry))
+                                    dawn_routed_symbols.add(_entry.symbol)
                                     print(
-                                        f"  🌅 Router: {_entry.symbol} → DAWN | {_decision.reasoning}"
+                                        f"  🌅 Router [08:15]: {_entry.symbol} → DAWN | {_decision.reasoning}"
                                     )
                                 else:
                                     print(
-                                        f"  🔥 Router: {_entry.symbol} → HYDRA | {_decision.reasoning}"
+                                        f"  🔥 Router [08:15]: {_entry.symbol} → HYDRA | {_decision.reasoning}"
                                     )
                         else:
                             logging.info("[Router] HYDRA watchlist empty — no routing needed")
@@ -713,6 +721,84 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         logging.error(f"hydra_shadows persistence failed: {_persist_e}")
 
                     last_hydra_scan_date = current_date
+
+                # ── C4: Re-routing pass at 08:45 ──────────────────────────────
+                if (
+                    _market_open_today
+                    and _should_fire_scheduled_job(dt_time(8, 45), runner_start_time, current_time)
+                    and last_c4_reroute_0845_date != current_date
+                    and hydra.watchlist
+                ):
+                    last_c4_reroute_0845_date = current_date
+                    try:
+                        from src.strategies.router import route_candidate, create_hydra_shadow
+                        from src.data_ingestion.pre_market_data import (
+                            fetch_all_premarket_data, get_scan_universe,
+                        )
+                        import json as _json, pathlib as _pathlib
+                        _pdb_path = _pathlib.Path("data/pattern_db.json")
+                        try:
+                            pattern_db = _json.loads(_pdb_path.read_text()) if _pdb_path.exists() else {}
+                        except Exception:
+                            pattern_db = {}
+                        _c4_router_cache = fetch_all_premarket_data(get_scan_universe(), force_refresh=True)
+                        _c4_new = 0
+                        logging.info(f"[C4] 08:45 re-route pass — {len(hydra.watchlist)} watchlist entries, {len(dawn_routed_symbols)} already DAWN")
+                        for _entry in hydra.watchlist:
+                            if _entry.symbol in dawn_routed_symbols:
+                                continue  # already a DAWN candidate — skip
+                            _pm = _c4_router_cache.get(_entry.symbol)
+                            _decision = route_candidate(_entry, _pm, pattern_db=pattern_db)
+                            if _decision.route == "DAWN":
+                                dawn_candidates_today.append(_entry)
+                                dawn_routed_symbols.add(_entry.symbol)
+                                _c4_new += 1
+                                print(f"  🌅 Router [08:45]: {_entry.symbol} → DAWN | {_decision.reasoning}")
+                                logging.info(f"[C4] 08:45 new DAWN: {_entry.symbol} | {_decision.reasoning}")
+                            else:
+                                logging.debug(f"[C4] 08:45 {_entry.symbol} → HYDRA | {_decision.reasoning}")
+                        print(f"  🌅 C4 08:45: {_c4_new} new DAWN candidate(s) added (total={len(dawn_candidates_today)})")
+                    except Exception as _c4_e:
+                        logging.error(f"[C4] 08:45 re-route failed: {_c4_e}")
+
+                # ── C4: Re-routing pass at 09:00 ──────────────────────────────
+                if (
+                    _market_open_today
+                    and _should_fire_scheduled_job(dt_time(9, 0), runner_start_time, current_time)
+                    and last_c4_reroute_0900_date != current_date
+                    and hydra.watchlist
+                ):
+                    last_c4_reroute_0900_date = current_date
+                    try:
+                        from src.strategies.router import route_candidate
+                        from src.data_ingestion.pre_market_data import (
+                            fetch_all_premarket_data, get_scan_universe,
+                        )
+                        import json as _json, pathlib as _pathlib
+                        _pdb_path = _pathlib.Path("data/pattern_db.json")
+                        try:
+                            pattern_db = _json.loads(_pdb_path.read_text()) if _pdb_path.exists() else {}
+                        except Exception:
+                            pattern_db = {}
+                        _c4_router_cache = fetch_all_premarket_data(get_scan_universe(), force_refresh=True)
+                        _c4_new = 0
+                        logging.info(f"[C4] 09:00 re-route pass — {len(hydra.watchlist)} watchlist entries, {len(dawn_routed_symbols)} already DAWN")
+                        for _entry in hydra.watchlist:
+                            if _entry.symbol in dawn_routed_symbols:
+                                continue  # already a DAWN candidate — skip
+                            _pm = _c4_router_cache.get(_entry.symbol)
+                            _decision = route_candidate(_entry, _pm, pattern_db=pattern_db)
+                            if _decision.route == "DAWN":
+                                dawn_candidates_today.append(_entry)
+                                dawn_routed_symbols.add(_entry.symbol)
+                                _c4_new += 1
+                                print(f"  🌅 Router [09:00]: {_entry.symbol} → DAWN | {_decision.reasoning}")
+                                logging.info(f"[C4] 09:00 new DAWN: {_entry.symbol} | {_decision.reasoning}")
+                            else:
+                                logging.debug(f"[C4] 09:00 {_entry.symbol} → HYDRA | {_decision.reasoning}")
+                        print(f"  🌅 C4 09:00: {_c4_new} new DAWN candidate(s) added (total={len(dawn_candidates_today)})")
+                    except Exception as _c4_e:
+                        logging.error(f"[C4] 09:00 re-route failed: {_c4_e}")
 
                 # 0b. Run momentum scanner + stock discovery at 09:30
                 if _market_open_today and current_time >= SCANNER_TIME and last_scanner_date != current_date:
