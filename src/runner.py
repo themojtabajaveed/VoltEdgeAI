@@ -653,9 +653,15 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                         )
                         if hydra.watchlist:
                             _router_cache = fetch_all_premarket_data(get_scan_universe())
+                            import json as _json, pathlib as _pathlib
+                            _pdb_path = _pathlib.Path("data/pattern_db.json")
+                            try:
+                                pattern_db = _json.loads(_pdb_path.read_text()) if _pdb_path.exists() else {}
+                            except Exception:
+                                pattern_db = {}
                             for _entry in hydra.watchlist:
                                 _pm = _router_cache.get(_entry.symbol)
-                                _decision = route_candidate(_entry, _pm, pattern_db=None)
+                                _decision = route_candidate(_entry, _pm, pattern_db=pattern_db)
                                 if _decision.route == "DAWN":
                                     dawn_candidates_today.append(_entry)
                                     hydra_shadows_today.append(create_hydra_shadow(_entry))
