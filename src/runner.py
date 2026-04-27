@@ -364,6 +364,7 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
     last_dawn_manage_time = None
     last_dawn_dryrun_entry_date = None   # HYDRA dryrun entries recorded once at 09:15
     last_dawn_dryrun_update_time = None  # HYDRA dryrun update cadence (15-min)
+    last_dawn_revalid_date = None        # C8: 09:05 freshness revalidation fires once per day
 
     # ── DawnHydraRouter output (populated at 08:15, consumed at 09:15) ──
     dawn_candidates_today: list = []
@@ -985,6 +986,91 @@ def run_loop(live_mode: bool = False, per_trade_capital: int = 300, max_trades_p
                             logging.warning(f"[CIRCUIT BREAKER] {_cb_reason} — new entries blocked")
                     except Exception as _cb_e:
                         logging.error(f"[CIRCUIT BREAKER] check failed: {_cb_e}")
+
+                    # ── C8: DAWN 09:05 pre-open freshness revalidation ───────────
+                    if (
+                        _market_open_today
+                        and dt_time(9, 5) <= current_time < dt_time(9, 15)
+                        and last_dawn_revalid_date != current_date
+                        and dawn_candidates_today
+                    ):
+                        last_dawn_revalid_date = current_date
+                        try:
+                            from src.strategies.router import _parse_filing_ts
+                            from src.utils.filing_freshness import classify_filing_freshness, FilingFreshness
+                            from src.config_loader import get_filing_freshness_config
+                            _fresh_cfg = get_filing_freshness_config()
+                            _now_ist = datetime.now(IST)
+                            _rv_checked = _rv_kept = _rv_downgraded = _rv_stale = 0
+                            _survivors: list = []
+                            logging.info(
+                                f"[C8] DAWN 09:05 freshness revalidation — "
+                                f"{len(dawn_candidates_today)} candidate(s)"
+                            )
+                            print(
+                                f"  🌅 DAWN revalidation: checking "
+                                f"{len(dawn_candidates_today)} candidate(s) at 09:05..."
+                            )
+                            for _entry in dawn_candidates_today:
+                                _rv_checked += 1
+                                _filing_ts = _parse_filing_ts(_entry.filed_at)
+                                _orig_fresh = _entry.filing_freshness or "UNKNOWN"
+                                if _filing_ts is None:
+                                    # No timestamp — cannot revalidate L1; keep and warn
+                                    logging.info(
+                                        f"[C8] {_entry.symbol}: no filed_at — cannot revalidate "
+                                        f"(was {_orig_fresh}); keeping"
+                                    )
+                                    _survivors.append(_entry)
+                                    _rv_kept += 1
+                                    continue
+                                # L1 only — price_at_filing=None skips L2 (no live price pre-open)
+                                _new_fresh, _reason = classify_filing_freshness(
+                                    filing_ts=_filing_ts,
+                                    as_of=_now_ist,
+                                    price_at_filing=None,
+                                    price_now=0.0,
+                                    config=_fresh_cfg,
+                                )
+                                if _new_fresh == FilingFreshness.STALE:
+                                    _rv_stale += 1
+                                    _entry.filing_freshness = FilingFreshness.STALE.value
+                                    logging.info(
+                                        f"[C8] {_entry.symbol}: STALE at 09:05 — skipped "
+                                        f"(was {_orig_fresh}; {_reason})"
+                                    )
+                                    print(
+                                        f"  🌅 DAWN SKIP {_entry.symbol}: STALE at 09:05 ({_reason})"
+                                    )
+                                    continue
+                                if _new_fresh.value != _orig_fresh:
+                                    _rv_downgraded += 1
+                                    logging.info(
+                                        f"[C8] {_entry.symbol}: {_orig_fresh} → {_new_fresh.value} "
+                                        f"({_reason}) — kept"
+                                    )
+                                    print(
+                                        f"  🌅 DAWN {_entry.symbol}: freshness "
+                                        f"{_orig_fresh} → {_new_fresh.value}"
+                                    )
+                                else:
+                                    _rv_kept += 1
+                                _entry.filing_freshness = _new_fresh.value
+                                _survivors.append(_entry)
+                            dawn_candidates_today = _survivors
+                            logging.info(
+                                f"[C8] DAWN revalidation: checked={_rv_checked} "
+                                f"kept={_rv_kept} downgraded={_rv_downgraded} "
+                                f"stale_skipped={_rv_stale}"
+                            )
+                            print(
+                                f"  🌅 DAWN revalidation done: {_rv_kept} kept, "
+                                f"{_rv_downgraded} downgraded, {_rv_stale} stale-skipped "
+                                f"of {_rv_checked} checked"
+                            )
+                        except Exception as _revalid_e:
+                            logging.error(f"[C8] DAWN 09:05 revalidation failed: {_revalid_e}")
+                    # ─────────────────────────────────────────────────────────────
 
                     # ── DAWN: Record virtual entries at market open ──
                     if dawn._signals and dt_time(9, 15) <= current_time <= dt_time(9, 20):
