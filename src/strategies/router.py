@@ -131,6 +131,68 @@ def _parse_filing_ts(filed_at: Optional[str]) -> Optional[datetime]:
         return None
 
 
+_LIST_PATTERN_DB_MIN_SAMPLES = 10  # gate: buckets below this size return None
+
+
+def _aggregate_list_pattern_db(records: list) -> dict:
+    """Aggregate a flat list of pattern-db fingerprint records into the dict
+    shape consumed by _lookup_follow_through_rate.
+
+    Each record is expected to have a 'fingerprint' sub-dict with:
+      - catalyst_type / event_type  → category key (first non-empty wins)
+      - direction                   → "LONG" | "SHORT"
+    and top-level:
+      - triggered: bool             → whether the pattern fired
+      - pnl_pct: float              → outcome (>0 = win)
+
+    Records with missing/empty category or direction are skipped rather than
+    guessed.  Buckets with fewer than _LIST_PATTERN_DB_MIN_SAMPLES triggered
+    records are dropped — callers receive None and fall back to cold-start.
+
+    Returns a dict in the "filing_categories" shape:
+      {"filing_categories": {CATEGORY: {DIRECTION: {"hit_rate": 0.xx, "n": N}}}}
+    """
+    from collections import defaultdict
+
+    # bucket: (category_upper, direction_upper) → [win, total_triggered]
+    buckets: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
+
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        fp = rec.get("fingerprint")
+        if not isinstance(fp, dict):
+            continue
+        # Category: prefer catalyst_type, fall back to event_type
+        cat = (fp.get("catalyst_type") or fp.get("event_type") or "").strip().upper()
+        if not cat or cat in ("", "UNKNOWN"):
+            continue
+        direction = (fp.get("direction") or "").strip().upper()
+        if direction not in ("LONG", "SHORT"):
+            continue
+        if not rec.get("triggered"):
+            continue
+        pnl = rec.get("pnl_pct")
+        if not isinstance(pnl, (int, float)):
+            continue
+        key = (cat, direction)
+        buckets[key][1] += 1          # total triggered
+        if pnl > 0:
+            buckets[key][0] += 1      # wins
+
+    # Build output dict — drop thin buckets
+    filing_cats: dict = {}
+    for (cat, direction), (wins, n) in buckets.items():
+        if n < _LIST_PATTERN_DB_MIN_SAMPLES:
+            continue
+        filing_cats.setdefault(cat, {})[direction] = {
+            "hit_rate": round(wins / n, 4),
+            "n": n,
+        }
+
+    return {"filing_categories": filing_cats} if filing_cats else {}
+
+
 def _get_sector_followthrough(
     pattern_db: Optional[dict], category: str, direction: str
 ) -> Optional[float]:
@@ -139,24 +201,19 @@ def _get_sector_followthrough(
     Supported shapes:
       - dict (legacy): nested {"routing"|"categories"|"filing_categories":
         {CATEGORY: {follow_through_rate | hit_rate: 0.xx}}} — delegate.
-      - list (current on-disk shape): flat list of trade fingerprints. No
-        aggregator wired yet; see TODO below.
-
-    TODO (Step 9 follow-up): pattern_db.json is a list of per-trade
-    fingerprints where `triggered=True` entries carry pnl_pct outcomes. As of
-    2026-04-20 only 67 legacy/expired entries exist and 0 are triggered, so
-    hit-rate aggregation would produce no meaningful data. Wire a
-    list-shape aggregator once the triggered-entry count crosses a usable
-    threshold (~20 per (sector, category) bucket). Returning None here is safe:
-    event_quality treats None as neutral (50/100), not a penalty.
+      - list (current on-disk shape): aggregate in-memory via
+        _aggregate_list_pattern_db then delegate.  Returns None when no bucket
+        has reached the minimum sample gate (cold-start preserved).
     """
     if pattern_db is None:
         return None
-    # Legacy dict-based hit-rate map: delegate when available.
     if isinstance(pattern_db, dict):
         return _lookup_follow_through_rate(pattern_db, category, direction)
-    # List-shape (on-disk): cold start → neutral.
-    return None
+    # List-shape: build aggregated dict on the fly, then reuse dict path.
+    aggregated = _aggregate_list_pattern_db(pattern_db)
+    if not aggregated:
+        return None
+    return _lookup_follow_through_rate(aggregated, category, direction)
 
 
 def _get_recent_category_count(
@@ -407,7 +464,7 @@ def route_candidate(
     #     Cold start (no pattern_db history) passes as "R5_COLD_START" with a
     #     confidence penalty, rather than forcing HYDRA. This lets DAWN take
     #     first-ever trades in a category when every other rule is green.
-    ft_rate = _lookup_follow_through_rate(pattern_db, category, direction)
+    ft_rate = _get_sector_followthrough(pattern_db, category, direction)
     if ft_rate is None:
         passed.append("R5_COLD_START")
         notes.append(
