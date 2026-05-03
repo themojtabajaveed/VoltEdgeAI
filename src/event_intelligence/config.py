@@ -39,6 +39,12 @@ class EventIntelConfig:
     # Soak / behavior flags
     shadow_only: bool = True             # v1: never write to live router path
 
+    # Document fetcher
+    fetch_proxy_url: str = ""            # SOCKS/HTTP proxy for NSE archive downloads
+    fetch_timeout_s: float = 20.0        # per-attempt timeout
+    fetch_max_retries: int = 3           # retry attempts before degrading to heuristic
+    fetch_retry_delays: tuple = (30.0, 60.0, 120.0)  # seconds between retries
+
     # Plan B — source selection
     source_mode: str = "official"        # "official" | "truedata" | "dual"
     bse_enabled: bool = True             # OfficialClient runs BSEPoller alongside NSE
@@ -85,6 +91,14 @@ def load_config() -> EventIntelConfig:
         queue_max_items=_getenv_int("EVENT_INTEL_QUEUE_MAX", 1000),
         data_dir=_getenv("EVENT_INTEL_DATA_DIR", "data"),
         log_dir=_getenv("EVENT_INTEL_LOG_DIR", "logs/event_intel"),
+        fetch_proxy_url=_getenv("EVENT_INTEL_PROXY_URL"),
+        fetch_timeout_s=_getenv_float("EVENT_INTEL_FETCH_TIMEOUT_S", 20.0),
+        fetch_max_retries=_getenv_int("EVENT_INTEL_FETCH_MAX_RETRIES", 3),
+        fetch_retry_delays=tuple(
+            float(x) for x in _getenv(
+                "EVENT_INTEL_FETCH_RETRY_DELAYS", "30,60,120"
+            ).split(",") if x
+        ),
         shadow_only=_getenv("EVENT_INTEL_SHADOW_ONLY", "true").lower() != "false",
         source_mode=_getenv("EVENT_INTEL_SOURCE_MODE", "official").lower(),
         bse_enabled=_getenv("EVENT_INTEL_BSE_ENABLED", "true").lower() != "false",

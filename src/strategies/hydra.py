@@ -41,6 +41,7 @@ from src.data_ingestion.pre_market_data import (
     fetch_all_premarket_data,
     get_scan_universe,
 )
+from src.event_intelligence.hydra_bridge import get_event_intel_signals
 
 logger = logging.getLogger(__name__)
 
@@ -311,19 +312,36 @@ class HydraStrategy(StrategyHead):
         Called at 09:00 IST for full scan since last close.
         Called every 2 minutes during market hours for new events.
         """
+        # ── Priority path: event-intelligence pipeline signals ──────────
+        # These come from deep PDF/XBRL parsing + Gemini classification.
+        # They get priority slots; EventScanner fills remaining capacity.
+        intel_entries = []
+        try:
+            intel_entries = get_event_intel_signals(data_dir="data")
+            if intel_entries:
+                logger.info(
+                    "[HYDRA] event-intel bridge: %d signals (top: %s %.1f)",
+                    len(intel_entries), intel_entries[0].symbol, intel_entries[0].urgency,
+                )
+        except Exception as _ei_err:
+            logger.warning("[HYDRA] event-intel bridge failed: %s", _ei_err)
+
+        # ── Fallback path: EventScanner headline classification ────────
         if self._last_scan_time is None:
-            # First scan of the day — full scan since close
             events = self.event_scanner.get_hot_events(min_urgency=6.0)
         else:
-            # Incremental scan for new events
             new_events = self.event_scanner.scan_new_events()
             if new_events:
                 classified = self.event_scanner.classify_events(new_events)
-                events = [e for e in classified if e.urgency >= 7.0]  # Higher bar for mid-day
+                events = [e for e in classified if e.urgency >= 7.0]
             else:
                 events = []
 
         self._last_scan_time = datetime.now()
+
+        # Exclude symbols already covered by intel bridge
+        intel_syms = {e.symbol for e in intel_entries}
+        events = [e for e in events if e.symbol not in intel_syms]
 
         # Read macro regime once (regime fallback for sector_momentum)
         _regime_momentum = "NEUTRAL"
@@ -397,6 +415,10 @@ class HydraStrategy(StrategyHead):
                 filing_category=(event.event_type or getattr(event, "category", "") or "").upper(),
                 filing_urgency=float(getattr(event, "urgency", 0.0) or 0.0),
             ))
+
+        # Merge: intel-bridge entries first (priority), then EventScanner entries
+        entries = intel_entries + entries
+        entries = entries[:self.max_watchlist]
 
         if entries:
             self.update_watchlist(entries)

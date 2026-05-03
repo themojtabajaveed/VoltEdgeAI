@@ -119,7 +119,7 @@ class EarningsSignal:
     # Audit
     classifier_model: str = ""
     classifier_version: str = "v1"
-    parse_status: str = "SUCCESS"   # SUCCESS|PARTIAL|XBRL_FALLBACK_PDF|HEURISTIC|FAILED
+    parse_status: str = "HEURISTIC"  # PDF_TABLE|PDF_REGEX|HEURISTIC|FAILED (legacy: SUCCESS|PARTIAL)
     audit_notes: str = ""
     raw_truedata: Dict[str, Any] = field(default_factory=dict, repr=False)
     raw_filing: Dict[str, Any] = field(default_factory=dict, repr=False)
@@ -170,6 +170,11 @@ class VerifiedEvent:
     official_subject: Optional[str] = None
     official_filed_at: Optional[str] = None
     official_category: Optional[str] = None
+    # nse_xbrl_meta_url: NSE /api/xbrl/{seq_id} — announcement-level metadata ONLY
+    #   (ResultPeriod, ResultType, description). NOT financial-statement data.
+    # xbrl_url: reserved for a future path to full financial-statement XBRL if found.
+    #   Currently always None — do NOT populate with the metadata URL.
+    nse_xbrl_meta_url: Optional[str] = None
     xbrl_url: Optional[str] = None
     pdf_url: Optional[str] = None
     conflict_notes: Optional[str] = None

@@ -42,6 +42,85 @@ from src.event_intelligence.writers import append_record, write_heartbeat
 logger = logging.getLogger(__name__)
 
 
+def _load_prior_quarters(symbol: str) -> list:
+    """Best-effort load of prior quarterly results from DB."""
+    try:
+        from src.db.models_quarterly import get_prior_quarters
+        return get_prior_quarters(symbol)
+    except Exception:
+        return []
+
+
+def _store_quarterly_result(signal) -> None:
+    """Auto-store classified FINANCIAL_RESULTS into quarterly DB.
+
+    Converts extracted PAT/Revenue/EPS into crores and upserts.
+    Best-effort: never raises.
+    """
+    try:
+        from datetime import date as _date, datetime as _datetime
+        from src.db.models_quarterly import upsert_quarter
+
+        earnings = signal.earnings
+        if not earnings or (earnings.pat is None and earnings.revenue is None):
+            return
+
+        # Determine quarter_end from filed_at
+        filed_dt = _datetime.fromisoformat(signal.filed_at)
+        month = filed_dt.month
+        year = filed_dt.year
+
+        # Map filing month to the quarter being reported
+        if month in (4, 5, 6):
+            quarter_end = _date(year, 3, 31)
+            fq, fy = 4, year
+        elif month in (7, 8, 9):
+            quarter_end = _date(year, 6, 30)
+            fq, fy = 1, year + 1
+        elif month in (10, 11, 12):
+            quarter_end = _date(year, 9, 30)
+            fq, fy = 2, year + 1
+        else:  # Jan, Feb, Mar
+            quarter_end = _date(year - 1, 12, 31)
+            fq, fy = 3, year
+
+        # Unit normalization: earnings payload values come from Gemini (abs INR)
+        # or PDF parser (lakhs). Use same anchor-based detection as classifier.
+        # For auto-store, we skip if we can't determine unit reliably.
+        from src.db.models_quarterly import get_prior_quarters as _gp
+        prior = _gp(signal.symbol)
+        same_q = [q for q in prior if q.get("fiscal_quarter") == fq and q.get("pat_cr")]
+
+        pat_cr = None
+        revenue_cr = None
+        if earnings.pat is not None and same_q:
+            anchor = same_q[-1]["pat_cr"]
+            for divisor in (1.0, 100.0, 1e7):
+                ratio = (earnings.pat / divisor) / anchor if anchor else 0
+                if 0.05 <= abs(ratio) <= 20:
+                    pat_cr = earnings.pat / divisor
+                    break
+        if earnings.revenue is not None and pat_cr is not None and earnings.pat:
+            # Apply same divisor to revenue
+            divisor_used = earnings.pat / pat_cr if pat_cr else 1
+            revenue_cr = earnings.revenue / divisor_used if divisor_used else None
+
+        upsert_quarter(
+            symbol=signal.symbol,
+            quarter_end=quarter_end,
+            fiscal_quarter=fq,
+            fiscal_year=fy,
+            revenue_cr=revenue_cr,
+            pat_cr=pat_cr,
+            eps=earnings.eps,
+            parse_status=signal.parse_status,
+            source="pipeline",
+        )
+        logger.debug("[Classify] auto-stored quarterly result for %s Q%d FY%d", signal.symbol, fq, fy)
+    except Exception as e:
+        logger.warning("[Classify] auto-store failed for %s: %s", signal.symbol, e)
+
+
 def _setup_logging(cfg: EventIntelConfig) -> None:
     os.makedirs(cfg.log_dir, exist_ok=True)
     log_file = os.path.join(cfg.log_dir, "event_intel.log")
@@ -57,32 +136,96 @@ def _setup_logging(cfg: EventIntelConfig) -> None:
 
 # ── Parse + classify worker ─────────────────────────────────────────────────
 
-def _parse_document(verified: VerifiedEvent) -> ParsedDocument:
-    """XBRL primary, PDF fallback, heuristic ultimate fallback."""
-    if verified.xbrl_url:
-        content = fetch_attachment(verified.xbrl_url)
-        if content:
-            doc = parse_xbrl(content)
-            if doc.status in (ParseStatus.SUCCESS, ParseStatus.PARTIAL):
-                return doc
+def _parse_nse_announcement_meta(content: bytes) -> dict:
+    """Extract enrichment fields from NSE announcement-metadata XBRL.
+
+    Returns a dict with keys: result_period, result_type, description.
+    Never raises; returns {} on any error.
+    This is metadata only — no financial numbers are present in this document.
+    """
+    from xml.etree import ElementTree as ET
+    try:
+        root = ET.fromstring(content)
+        meta: dict = {}
+        for elem in root.iter():
+            local = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+            if local == "ResultPeriod" and elem.text:
+                meta["result_period"] = elem.text.strip()
+            elif local == "ResultType" and elem.text:
+                meta["result_type"] = elem.text.strip()
+            elif local == "DescriptionOfAnnouncement" and elem.text:
+                meta["description"] = elem.text.strip()[:200]
+        return meta
+    except Exception:
+        return {}
+
+
+def _parse_document(verified: VerifiedEvent, cfg: EventIntelConfig) -> ParsedDocument:
+    """PDF primary for financial numbers; NSE announcement meta for enrichment only.
+
+    Flow:
+      1. Fetch NSE announcement-metadata XBRL (ResultPeriod, ResultType) if available.
+         This is enrichment only — does NOT contain financial statement data.
+      2. Fetch PDF and parse for financial numbers (primary source).
+      3. Heuristic fallback if PDF unavailable or parse fails.
+
+    parse_xbrl() is intentionally not called here: the NSE /api/xbrl/{seq_id}
+    endpoint returns announcement metadata, not financial statements. When a
+    financial-statement XBRL path is discovered, re-introduce parse_xbrl() here.
+    """
+    fetch_kwargs = dict(
+        proxy_url=cfg.fetch_proxy_url,
+        timeout=cfg.fetch_timeout_s,
+        max_retries=cfg.fetch_max_retries,
+        retry_delays=cfg.fetch_retry_delays,
+        cache_dir=cfg.data_dir,
+    )
+
+    # Step 1: NSE announcement metadata (enrichment — no financial numbers).
+    nse_meta: dict = {}
+    if verified.nse_xbrl_meta_url:
+        meta_content = fetch_attachment(verified.nse_xbrl_meta_url, **fetch_kwargs)
+        if meta_content:
+            nse_meta = _parse_nse_announcement_meta(meta_content)
             logger.info(
-                "[Parse] XBRL parse degraded for %s — falling back to PDF",
+                "[Parse] %s NSE meta: period=%s type=%s",
+                verified.raw.symbol,
+                nse_meta.get("result_period", "?"),
+                nse_meta.get("result_type", "?"),
+            )
+        else:
+            logger.debug(
+                "[Parse] %s NSE announcement meta unavailable — PDF-only path",
                 verified.raw.symbol,
             )
 
+    # Step 2: PDF is the primary source for PAT / Revenue / EPS.
     if verified.pdf_url:
-        content = fetch_attachment(verified.pdf_url)
-        if content:
-            doc = parse_pdf(content)
-            if doc.status == ParseStatus.PARTIAL and verified.xbrl_url:
-                doc.status = ParseStatus.XBRL_FALLBACK_PDF
-            if doc.status in (ParseStatus.SUCCESS, ParseStatus.PARTIAL, ParseStatus.XBRL_FALLBACK_PDF):
+        pdf_content = fetch_attachment(verified.pdf_url, **fetch_kwargs)
+        if pdf_content:
+            doc = parse_pdf(pdf_content)
+            if nse_meta:
+                doc.fields.update(nse_meta)  # inject period/type for classifier context
+            if doc.status in (
+                ParseStatus.PDF_TABLE, ParseStatus.PDF_REGEX,
+                ParseStatus.SUCCESS, ParseStatus.PARTIAL,  # legacy compat
+            ):
+                logger.debug(
+                    "[Parse] %s PDF parse status=%s fields=%s",
+                    verified.raw.symbol, doc.status.value,
+                    {k: v for k, v in doc.fields.items() if k in ("revenue", "pat", "eps")},
+                )
                 return doc
 
-    return parse_heuristic(
+    # Step 3: heuristic fallback.
+    logger.info("[Parse] %s falling back to heuristic (no PDF content)", verified.raw.symbol)
+    doc = parse_heuristic(
         verified.official_subject or verified.raw.headline,
         verified.official_category or verified.raw.category,
     )
+    if nse_meta:
+        doc.fields.update(nse_meta)
+    return doc
 
 
 def _classify_worker(
@@ -97,9 +240,14 @@ def _classify_worker(
             continue
 
         try:
-            parsed = _parse_document(verified)
-            signal_record = classify(verified, parsed)
+            parsed = _parse_document(verified, cfg)
+            prior_quarters = _load_prior_quarters(verified.raw.symbol)
+            signal_record = classify(verified, parsed, prior_quarters=prior_quarters, cfg=cfg)
             append_record("earnings_signals", signal_record, data_dir=cfg.data_dir)
+
+            # Auto-store financial results into quarterly DB for future surprise computation.
+            if signal_record.event_type == "FINANCIAL_RESULTS" and signal_record.earnings:
+                _store_quarterly_result(signal_record)
 
             # Schedule artifact for board-meeting intimations.
             if signal_record.event_type == "BOARD_MEETING":
@@ -154,12 +302,22 @@ def _build_producers(cfg: EventIntelConfig, raw_q: _queue.Queue) -> list:
 # ── Main loop ───────────────────────────────────────────────────────────────
 
 def run(cfg: Optional[EventIntelConfig] = None) -> None:
+    from dotenv import load_dotenv
+    load_dotenv()
+
     cfg = cfg or load_config()
     _setup_logging(cfg)
+
+    if not cfg.gemini_api_key:
+        logger.error(
+            "[Main] GEMINI_API_KEY is empty — classifier will degrade to "
+            "heuristic-only (urgency capped at 5.0). Check .env or systemd Environment=."
+        )
+
     logger.info(
         "[Main] starting event-intelligence pipeline "
-        "(source_mode=%s, shadow_only=%s)",
-        cfg.source_mode, cfg.shadow_only,
+        "(source_mode=%s, shadow_only=%s, gemini_key_loaded=%s)",
+        cfg.source_mode, cfg.shadow_only, bool(cfg.gemini_api_key),
     )
 
     raw_q: _queue.Queue = _queue.Queue(maxsize=cfg.queue_max_items)

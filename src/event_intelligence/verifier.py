@@ -142,7 +142,8 @@ def _resolve(
             official_subject=matched.headline,
             official_filed_at=matched.filed_at,
             official_category=matched.category,
-            xbrl_url=matched.raw.get("xbrl_url") or matched.raw.get("xbrl"),
+            nse_xbrl_meta_url=matched.raw.get("nse_xbrl_meta_url"),
+            xbrl_url=None,  # financial-statement XBRL path not yet discovered
             pdf_url=matched.raw.get("pdf_url") or matched.raw.get("attchmntFile"),
             conflict_notes=conflict,
         )
@@ -158,7 +159,8 @@ def _resolve(
         official_subject=matched.headline,
         official_filed_at=matched.filed_at,
         official_category=matched.category,
-        xbrl_url=matched.raw.get("xbrl_url") or matched.raw.get("xbrl"),
+        nse_xbrl_meta_url=matched.raw.get("nse_xbrl_meta_url"),
+        xbrl_url=None,  # financial-statement XBRL path not yet discovered
         pdf_url=matched.raw.get("pdf_url") or matched.raw.get("attchmntFile"),
     )
 
@@ -414,7 +416,8 @@ def _emit_official_confirmed(self: Verifier, raw: RawTruedataEvent) -> None:
         official_subject=raw.headline,
         official_filed_at=raw.vendor_filed_at,
         official_category=raw.category,
-        xbrl_url=raw_dict.get("xbrl_url") or raw_dict.get("xbrl"),
+        nse_xbrl_meta_url=raw_dict.get("nse_xbrl_meta_url"),
+        xbrl_url=None,  # financial-statement XBRL path not yet discovered
         pdf_url=raw_dict.get("pdf_url") or raw_dict.get("attchmntFile"),
     )
     self._emit(confirmed, partial=False)

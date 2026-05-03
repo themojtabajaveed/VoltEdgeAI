@@ -83,6 +83,30 @@ def _current_interval_s(now_ist: datetime) -> float:
     return float(interval)
 
 
+# NSE /api/xbrl/{seq_id} — ANNOUNCEMENT METADATA only (ResultPeriod, ResultType,
+# description, PDF URL cross-check). Does NOT contain PAT/Revenue/EPS values.
+# Financial numbers come from the PDF attachment. Do NOT feed this URL to
+# parse_xbrl() or any numeric extraction path.
+_NSE_XBRL_META_BASE = "https://www.nseindia.com/api/xbrl/{seq_id}"
+
+
+def _build_nse_xbrl_meta_url(filing_raw: dict) -> Optional[str]:
+    """Return the NSE announcement-metadata XBRL URL when hasXbrl=True.
+
+    The returned URL serves a ~2 KB XML document containing:
+      ResultPeriod, ResultType, description, and the PDF attachment URL.
+    It is NOT a financial-statement XBRL file. Use it only for enrichment
+    (confirming result period / type). All financial numbers must come from
+    the PDF attachment.
+    """
+    if not filing_raw.get("hasXbrl"):
+        return None
+    seq_id = str(filing_raw.get("seq_id") or "")
+    if not seq_id:
+        return None
+    return _NSE_XBRL_META_BASE.format(seq_id=seq_id)
+
+
 def _filing_to_raw(filing: FilingEvent) -> RawTruedataEvent:
     """Convert an NSE FilingEvent (from exchange_filings.py) into a RawTruedataEvent.
 
@@ -98,7 +122,13 @@ def _filing_to_raw(filing: FilingEvent) -> RawTruedataEvent:
         filed_at_iso=filing.filed_at,
         headline=filing.headline,
     )
-    attchmnt = filing.raw.get("attchmntFile")
+    # Inject attachment URLs so the verifier can propagate them to VerifiedEvent.
+    # nse_xbrl_meta_url: announcement-metadata XBRL (period/type only — no financial numbers).
+    # pdf_url: primary source for PAT/Revenue/EPS extraction.
+    raw_with_urls = dict(filing.raw)
+    raw_with_urls["pdf_url"] = filing.raw.get("attchmntFile") or None
+    raw_with_urls["nse_xbrl_meta_url"] = _build_nse_xbrl_meta_url(filing.raw)
+
     return RawTruedataEvent(
         event_id=canonical_id,
         symbol=filing.symbol,
@@ -108,7 +138,7 @@ def _filing_to_raw(filing: FilingEvent) -> RawTruedataEvent:
         received_at=_now_iso(),
         vendor_filed_at=filing.filed_at,
         truedata_event_id=None,
-        raw=dict(filing.raw),
+        raw=raw_with_urls,
         source="NSE_OFFICIAL",
         nse_filing_id=seq_id,
         bse_filing_id=None,

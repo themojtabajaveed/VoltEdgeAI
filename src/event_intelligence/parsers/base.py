@@ -13,11 +13,18 @@ from typing import Any, Dict, Optional
 
 
 class ParseStatus(str, Enum):
-    SUCCESS = "SUCCESS"
-    PARTIAL = "PARTIAL"
-    XBRL_FALLBACK_PDF = "XBRL_FALLBACK_PDF"
-    HEURISTIC = "HEURISTIC"
-    FAILED = "FAILED"
+    # ── Current values — reflect the actual extraction source ──────────────
+    PDF_TABLE  = "PDF_TABLE"   # table extraction from PDF (primary path)
+    PDF_REGEX  = "PDF_REGEX"   # full-text regex on PDF (fallback)
+    HEURISTIC  = "HEURISTIC"   # headline/subject-only; no document fetched
+    FAILED     = "FAILED"
+    # ── Deprecated — kept for backward-compat with JSON records pre-2026-05-03 ──
+    # Do NOT emit these in new code. XBRL_FALLBACK_PDF is additionally
+    # unreachable: the XBRL-primary parse path was removed; NSE /api/xbrl
+    # returns announcement metadata only and is never a source of financials.
+    SUCCESS          = "SUCCESS"           # was: any successful PDF extraction
+    PARTIAL          = "PARTIAL"           # was: partial extraction (some fields)
+    XBRL_FALLBACK_PDF = "XBRL_FALLBACK_PDF"  # unreachable since XBRL primary path removed
 
 
 @dataclass

@@ -90,6 +90,7 @@ def _route_with_safety(
     # synthesize neutral defaults so the router runs to completion.
     pm_dict = _load_premarket_signal(sig.symbol, data_dir) or {}
     pm_dict.setdefault("symbol", sig.symbol)
+    pm_dict.setdefault("as_of", datetime.now(IST).isoformat())
     pm_dict.setdefault("filing_category", fe.category)
     pm_dict.setdefault("filing_urgency", fe.urgency)
     pm_dict.setdefault("filing_impact_score", fe.urgency)
@@ -138,6 +139,20 @@ def _stub_decision(sig: EarningsSignal, reason: str) -> Dict[str, Any]:
 def shadow_route(sig: EarningsSignal, data_dir: str = "data") -> Dict[str, Any]:
     """Run the shadow route for one EarningsSignal and persist the decision."""
     decision = _route_with_safety(sig, data_dir)
+
+    # Assess priced-in discount for audit trail (best-effort, never blocks routing)
+    priced_in_discount = 0.0
+    priced_in_novelty = "PRISTINE"
+    try:
+        from dataclasses import asdict as _asdict
+        from src.event_intelligence.priced_in import assess_priced_in
+        sig_dict = _asdict(sig)
+        assessment = assess_priced_in(sig_dict, data_dir=data_dir, check_preopen=False)
+        priced_in_discount = assessment.priced_in_discount
+        priced_in_novelty = assessment.novelty
+    except Exception:
+        pass
+
     record = {
         "event_id": sig.event_id,
         "symbol": sig.symbol,
@@ -147,6 +162,9 @@ def shadow_route(sig: EarningsSignal, data_dir: str = "data") -> Dict[str, Any]:
         "classified_at": sig.classified_at,
         "direction_hint": sig.direction_hint,
         "raw_urgency": sig.urgency,
+        "priced_in_discount": priced_in_discount,
+        "effective_urgency": sig.urgency * (1.0 - priced_in_discount),
+        "novelty": priced_in_novelty,
         "source_confidence": sig.source_confidence,
         "dawn_category": sig.dawn_category,
         "decision": decision,
