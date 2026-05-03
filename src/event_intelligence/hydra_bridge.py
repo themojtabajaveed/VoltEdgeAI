@@ -174,7 +174,9 @@ def get_event_intel_signals(
         if not _is_fresh(record):
             continue
 
-        # Apply priced-in discount to urgency before threshold check
+        # Apply priced-in discount to urgency before threshold check.
+        # Threshold uses raw_urgency × source_confidence × (1 - discount)
+        # so that both quality and novelty factor into the gate decision.
         raw_urgency = float(record.get("urgency", 0.0))
         priced_in_discount = 0.0
         conflict_signal = False
@@ -193,17 +195,20 @@ def get_event_intel_signals(
                 logger.debug("[HydraBridge] priced-in check failed for %s: %s",
                             record.get("symbol"), e)
 
-        effective_urgency = raw_urgency * (1.0 - priced_in_discount)
+        gate_urgency = raw_urgency * source_confidence * (1.0 - priced_in_discount)
 
-        if effective_urgency < min_urgency:
+        if gate_urgency < min_urgency:
             continue
 
         entry = _signal_to_watchlist_entry(record)
         if entry:
-            # Override urgency with effective (post-discount) value
+            # Apply priced-in discount multiplicatively ON TOP of the
+            # source_confidence that _signal_to_watchlist_entry already applied.
+            # entry.urgency = raw × source_confidence (from _signal_to_watchlist_entry)
+            # We want: raw × source_confidence × (1 - discount)
             if priced_in_discount > 0:
-                entry.urgency = effective_urgency
-                entry.filing_urgency = effective_urgency
+                entry.urgency = entry.urgency * (1.0 - priced_in_discount)
+                entry.filing_urgency = entry.urgency
             # Tag conflict signals in metadata
             if conflict_signal and entry.metadata:
                 entry.metadata["conflict_signal"] = True
